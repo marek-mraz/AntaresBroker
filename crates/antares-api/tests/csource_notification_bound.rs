@@ -101,7 +101,7 @@ async fn the_initial_csource_notification_is_cut_into_bounded_bodies() {
     antares_jsonld::allow_private_egress(true);
     let cap = 4096usize;
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (port, seen) = recording_mock();
 
     // Six registrations, each carrying a Context Source Property big enough

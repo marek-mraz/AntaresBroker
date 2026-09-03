@@ -88,7 +88,7 @@ async fn a_subscription_crosses_two_organizations_through_four_proxy_hops() {
     // The provider organization: its broker, and the ingress proxy in front
     // of it that the consumer organization's egress proxy dials.
     let mut provider = AppState::new("provider".into());
-    antares_api::wire(&mut provider);
+    antares_api::wire(&mut provider).await;
     let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -115,7 +115,7 @@ async fn a_subscription_crosses_two_organizations_through_four_proxy_hops() {
         format!("http://127.0.0.1:{provider_egress}"),
     );
     let mut consumer = AppState::new("consumer".into());
-    antares_api::wire(&mut consumer);
+    antares_api::wire(&mut consumer).await;
     let consumer_router = antares_api::router(consumer.clone());
     tokio::spawn(async move {
         axum::serve(consumer_listener, consumer_router)

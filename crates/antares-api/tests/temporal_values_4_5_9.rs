@@ -88,7 +88,7 @@ fn values_of(entity: &Value, attr: &str) -> Vec<Value> {
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_4_5_9_the_simplified_representation_keeps_the_value_the_property_holds() {
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st); // temporal auto-recording
+    antares_api::wire(&mut st).await; // temporal auto-recording
     seed(&st).await;
 
     let (status, e) = get(
@@ -120,7 +120,7 @@ async fn clause_4_5_9_the_simplified_representation_keeps_the_value_the_property
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_4_5_9_the_simplified_and_normalized_representations_agree_on_the_value() {
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     seed(&st).await;
 
     let win = "timerel=after&timeAt=1970-01-01T00:00:00Z";

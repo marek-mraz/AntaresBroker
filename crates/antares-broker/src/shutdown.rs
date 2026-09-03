@@ -137,7 +137,7 @@ pub async fn drain(
     // latency, never an event.
     if flush_outbox {
         loop {
-            match store.outbox_peek(1) {
+            match store.outbox_peek(1).await {
                 Ok(rows) if rows.is_empty() => break,
                 Ok(_) => {}
                 Err(e) => {
@@ -186,14 +186,12 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl antares_store::TemporalDriver for CountsCloses {
-        fn close<'a>(
-            &'a self,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        async fn close(&self) {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async {})
         }
-        fn temporal_append(
+        async fn temporal_append(
             &self,
             _t: &antares_model::TenantId,
             _id: &str,
@@ -202,14 +200,14 @@ mod tests {
         ) -> Result<(), antares_model::NgsiError> {
             Self::off()
         }
-        fn query_temporal(
+        async fn query_temporal(
             &self,
             _t: &antares_model::TenantId,
             _f: &antares_store::filter::TemporalFilter<'_>,
         ) -> Result<antares_store::filter::TemporalOutcome, antares_model::NgsiError> {
             Self::off()
         }
-        fn get_temporal(
+        async fn get_temporal(
             &self,
             _t: &antares_model::TenantId,
             _id: &str,
@@ -217,14 +215,14 @@ mod tests {
         ) -> Result<Option<serde_json::Value>, antares_model::NgsiError> {
             Self::off()
         }
-        fn get(
+        async fn get(
             &self,
             _t: &antares_model::TenantId,
             _id: &str,
         ) -> Result<Option<serde_json::Value>, antares_model::NgsiError> {
             Self::off()
         }
-        fn create(
+        async fn create(
             &self,
             _t: &antares_model::TenantId,
             _id: &str,
@@ -232,7 +230,7 @@ mod tests {
         ) -> Result<bool, antares_model::NgsiError> {
             Self::off()
         }
-        fn upsert(
+        async fn upsert(
             &self,
             _t: &antares_model::TenantId,
             _id: &str,
@@ -240,20 +238,20 @@ mod tests {
         ) -> Result<bool, antares_model::NgsiError> {
             Self::off()
         }
-        fn delete(
+        async fn delete(
             &self,
             _t: &antares_model::TenantId,
             _id: &str,
         ) -> Result<bool, antares_model::NgsiError> {
             Self::off()
         }
-        fn list(
+        async fn list(
             &self,
             _t: &antares_model::TenantId,
         ) -> Result<Vec<serde_json::Value>, antares_model::NgsiError> {
             Self::off()
         }
-        fn mutate_boxed<'a>(
+        async fn mutate_boxed<'a>(
             &self,
             _t: &antares_model::TenantId,
             _id: &str,
@@ -511,15 +509,15 @@ mod tests {
     /// waiting there would only burn the deadline. Needs a live database —
     /// the outbox table exists on the Pg arm alone, so the memory store can
     /// never exercise the wait (it answers an empty page and falls through).
-    #[test]
+    #[tokio::test]
     #[ignore = "needs a live database (ANTARES_TEST_DATABASE_URL)"]
-    fn outbox_flush_waits_for_pending_rows_and_only_when_asked() {
+    async fn outbox_flush_waits_for_pending_rows_and_only_when_asked() {
         use antares_sql::store::any::{AnyStore, PgBackend};
         use antares_sql::store::Kind;
         let url = std::env::var("ANTARES_TEST_DATABASE_URL")
             .expect("ANTARES_TEST_DATABASE_URL: this test is asked for by name where a DB exists");
-        // Multi-thread: the store's sync-over-async bridge uses
-        // block_in_place, which a current-thread runtime cannot host.
+        // Multi-thread: this test drives the store from `block_on` inside a
+        // synchronous closure, which a current-thread runtime cannot host.
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -550,9 +548,11 @@ mod tests {
                 &id,
                 serde_json::json!({"id": id.as_str(), "type": "DrainProbe"}),
             )
+            .await
             .expect("write");
         let mine: Vec<i64> = store
             .outbox_peek(500)
+            .await
             .expect("peek")
             .into_iter()
             .filter(|(_, t, _)| t == tenant.as_str())
@@ -607,11 +607,13 @@ mod tests {
         let store = connect();
         store
             .delete(&tenant, Kind::Entity, &id)
+            .await
             .expect("probe cleanup");
-        store.outbox_ack(&mine).expect("outbox cleanup");
+        store.outbox_ack(&mine).await.expect("outbox cleanup");
         assert!(
             store
                 .outbox_peek(500)
+                .await
                 .expect("peek")
                 .into_iter()
                 .all(|(_, t, _)| t != tenant.as_str()),

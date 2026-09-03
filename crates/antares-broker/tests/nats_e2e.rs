@@ -448,8 +448,7 @@ fn sigkill_between_commit_and_publish_republishes_from_outbox() {
     // row would fold in a sibling's — or an aborted earlier run's — and
     // make the drain below wait on rows this test never wrote.
     let mine = || {
-        store
-            .outbox_peek(1000)
+        rt.block_on(store.outbox_peek(1000))
             .expect("peek")
             .into_iter()
             .filter(|(_, t, _)| *t == tenant)

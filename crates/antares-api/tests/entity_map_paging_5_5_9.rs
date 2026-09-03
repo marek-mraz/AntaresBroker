@@ -321,7 +321,7 @@ async fn a_narrowed_request_neither_widens_the_answer_nor_empties_the_map() {
     // wire() installs the temporal auto-record hook, so the temporal half of
     // this test has history to answer from
     let mut st = AppState::new("antares-map-narrow".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let map_ref = seed_with_map(&st, 4).await;
     let before = map_ids(&st, &map_ref).await;
     assert_eq!(before.len(), 4, "{before:?}");

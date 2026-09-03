@@ -68,7 +68,7 @@ async fn sink() -> (String, tokio::sync::mpsc::Receiver<Value>) {
 async fn a_notification_falls_back_to_the_context_the_subscription_was_made_with() {
     antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("test-notify-context".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
 
     let (uri, mut rx) = sink().await;
     // No `jsonldContext` member: the fallback is the whole point. `accept`

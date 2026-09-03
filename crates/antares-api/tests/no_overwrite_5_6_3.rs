@@ -47,7 +47,7 @@ const CREATE: &str = r#"{"id":"urn:ngsi-ld:NoOv:1","type":"NoOv",
 
 async fn seeded() -> AppState {
     let mut st = AppState::new("test".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (status, body) = send(&st, "POST", "/ngsi-ld/v1/entities", CREATE).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     st

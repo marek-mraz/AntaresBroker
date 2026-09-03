@@ -578,7 +578,7 @@ fn validate_auxiliary_ops(doc: &Map<String, Value>) -> Result<(), NgsiError> {
 /// (an `idPattern`, or a type alone) is answered by walking the tenant a
 /// page at a time, asking every EntityInfo about each Entity as it arrives
 /// rather than re-reading the tenant per EntityInfo.
-fn check_entity_conflict(
+async fn check_entity_conflict(
     st: &AppState,
     tenant: &antares_model::TenantId,
     doc: &Map<String, Value>,
@@ -675,7 +675,7 @@ fn check_entity_conflict(
             // and nothing else — bounded by the registration, not by the
             // tenant, whatever the tenant holds.
             for id in &ids {
-                if let Some(existing) = st.store.get(tenant, Kind::Entity, id)? {
+                if let Some(existing) = st.store.get(tenant, Kind::Entity, id).await? {
                     if let Some(conflict) = hit(&existing) {
                         return Err(conflict);
                     }
@@ -691,7 +691,8 @@ fn check_entity_conflict(
             walk_docs(st, tenant, Kind::Entity, |existing| match hit(&existing) {
                 Some(conflict) => Err(conflict),
                 None => Ok(()),
-            })?;
+            })
+            .await?;
         }
     }
     Ok(())
@@ -707,14 +708,14 @@ fn check_entity_conflict(
 /// AlreadyExists only for a registration that exists. Unlike a Subscription
 /// (5.8.6), a Registration has no `status` member that keeps an expired one
 /// visible.
-fn take_live_registration(
+async fn take_live_registration(
     st: &AppState,
     tenant: &TenantId,
     id: &str,
 ) -> Result<Option<Value>, NgsiError> {
-    match st.store.get(tenant, Kind::Registration, id)? {
+    match st.store.get(tenant, Kind::Registration, id).await? {
         Some(doc) if reg_expired(&doc) => {
-            st.store.delete(tenant, Kind::Registration, id)?;
+            st.store.delete(tenant, Kind::Registration, id).await?;
             Ok(None)
         }
         live => Ok(live),
@@ -773,7 +774,7 @@ pub fn validate_exclusive(doc: &Map<String, Value>) -> Result<(), NgsiError> {
 /// AlreadyExists — the project's standing 409 mapping). Redirect overlapping
 /// redirect stays legal: "operations are distributed to all registered
 /// Context Sources".
-pub fn check_proxied_overlap(
+pub async fn check_proxied_overlap(
     st: &AppState,
     tenant: &antares_model::TenantId,
     doc: &Map<String, Value>,
@@ -860,6 +861,7 @@ pub fn check_proxied_overlap(
         }
         Ok(())
     })
+    .await
 }
 
 /// The 5.9.2.4 conflict rules ("if an exclusive or redirect Context Source
@@ -933,16 +935,17 @@ pub async fn create_registration(
         validate_auxiliary_ops(&norm)?;
         let doc = {
             let _serialized = registration_write_lock(&tenant).await;
-            take_live_registration(&st, &tenant, &id)?;
-            check_entity_conflict(&st, &tenant, &norm)?;
-            check_proxied_overlap(&st, &tenant, &norm, None, &parsed.ctx)?;
+            take_live_registration(&st, &tenant, &id).await?;
+            check_entity_conflict(&st, &tenant, &norm).await?;
+            check_proxied_overlap(&st, &tenant, &norm, None, &parsed.ctx).await?;
             let ts = now_iso();
             norm.insert("createdAt".into(), Value::String(ts.clone()));
             norm.insert("modifiedAt".into(), Value::String(ts));
             let doc = Value::Object(norm);
             if !st
                 .store
-                .create(&tenant, Kind::Registration, &id, doc.clone())?
+                .create(&tenant, Kind::Registration, &id, doc.clone())
+                .await?
             {
                 return Err(
                     NgsiError::AlreadyExists(format!("registration {id} already exists")).into(),
@@ -976,7 +979,8 @@ pub async fn retrieve_registration(
         gate!(st, &tenant, &headers, "5.10.1", ids: &[&id]).await?;
         let doc = st
             .store
-            .get(&tenant, Kind::Registration, &id)?
+            .get(&tenant, Kind::Registration, &id)
+            .await?
             .filter(|d| !reg_expired(d))
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("registration {id} not found")))?;
         let sys = sys_attrs_asked(&params);
@@ -1144,7 +1148,7 @@ pub async fn query_registrations(
             }
             csr_matches(&spec, doc, &ctx)
         };
-        let matches = collect_matching(&st, &tenant, keep, *crate::bounds::MAX_FOLD_DOCS)?;
+        let matches = collect_matching(&st, &tenant, keep, *crate::bounds::MAX_FOLD_DOCS).await?;
         let (page, count_hdr, links) = crate::paging::paginate_accept(
             &st,
             &params,
@@ -1182,7 +1186,7 @@ const SCAN_PAGE: usize = 1_000;
 /// conflicts existed. A page bounds the allocation by construction and
 /// carries no ceiling, so a large tenant costs time here rather than a
 /// permanent 403.
-pub(crate) fn walk_docs(
+pub(crate) async fn walk_docs(
     st: &AppState,
     tenant: &antares_model::TenantId,
     kind: Kind,
@@ -1192,7 +1196,8 @@ pub(crate) fn walk_docs(
     loop {
         let page = st
             .store
-            .list_page(tenant, kind, after.as_deref(), SCAN_PAGE)?;
+            .list_page(tenant, kind, after.as_deref(), SCAN_PAGE)
+            .await?;
         let short = page.len() < SCAN_PAGE;
         let before = after.clone();
         for doc in page {
@@ -1220,7 +1225,7 @@ pub(crate) fn walk_docs(
 /// client picks with one `type=` — and 5.5.6 gives the answer for "a query
 /// operation … producing so many results that can potentially exhaust client
 /// or server resources": TooManyResults, rather than the memory.
-fn collect_matching(
+async fn collect_matching(
     st: &AppState,
     tenant: &antares_model::TenantId,
     keep: impl Fn(&Value) -> bool,
@@ -1237,7 +1242,8 @@ fn collect_matching(
             matches.push(doc);
         }
         Ok(())
-    })?;
+    })
+    .await?;
     Ok(matches)
 }
 
@@ -1283,7 +1289,7 @@ pub async fn update_registration(
         // invalidate the checks between them.
         let (before, res) = {
             let _serialized = registration_write_lock(&tenant).await;
-            let before = take_live_registration(&st, &tenant, &id)?;
+            let before = take_live_registration(&st, &tenant, &id).await?;
             if let Some(prev) = before.as_ref().and_then(Value::as_object) {
                 // validate the post-merge document (4.3.6.3) BEFORE mutating:
                 // a patch may flip the mode or rewrite information
@@ -1301,25 +1307,28 @@ pub async fn update_registration(
                 validate_exclusive(&merged)?;
                 // 5.9.3.4: the mode-specific rules apply to the merged document
                 validate_auxiliary_ops(&merged)?;
-                check_entity_conflict(&st, &tenant, &merged)?;
-                check_proxied_overlap(&st, &tenant, &merged, Some(&id), &parsed.ctx)?;
+                check_entity_conflict(&st, &tenant, &merged).await?;
+                check_proxied_overlap(&st, &tenant, &merged, Some(&id), &parsed.ctx).await?;
             }
-            let res = st.store.mutate(&tenant, Kind::Registration, &id, |doc| {
-                let Some(target) = doc.as_object_mut() else {
-                    return Err(NgsiError::InternalError(
-                        "stored registration is not a JSON object".into(),
-                    ));
-                };
-                crate::apply_doc_fragment(target, &norm, &ts);
-                Ok::<(), NgsiError>(())
-            })?;
+            let res = st
+                .store
+                .mutate(&tenant, Kind::Registration, &id, |doc| {
+                    let Some(target) = doc.as_object_mut() else {
+                        return Err(NgsiError::InternalError(
+                            "stored registration is not a JSON object".into(),
+                        ));
+                    };
+                    crate::apply_doc_fragment(target, &norm, &ts);
+                    Ok::<(), NgsiError>(())
+                })
+                .await?;
             (before, res)
         };
         match res {
             None => Err(NgsiError::ResourceNotFound(format!("registration {id} not found")).into()),
             Some(Err(e)) => Err(ApiError::from(e)),
             Some(Ok(())) => {
-                let after = st.store.get(&tenant, Kind::Registration, &id)?;
+                let after = st.store.get(&tenant, Kind::Registration, &id).await?;
                 st.reg_changed(&tenant, &id, after.as_ref());
                 crate::notify::csource_fanout(&st, &tenant, before, after).await;
                 Ok(no_content(&tenant))
@@ -1343,8 +1352,8 @@ pub async fn delete_registration(
             .map_err(|_| NgsiError::BadRequestData(format!("invalid registration id {id:?}")))?;
         check_params(&params, &["local"])?;
         gate!(st, &tenant, &headers, "5.9.4", ids: &[&id]).await?;
-        let before = take_live_registration(&st, &tenant, &id)?;
-        if st.store.delete(&tenant, Kind::Registration, &id)? {
+        let before = take_live_registration(&st, &tenant, &id).await?;
+        if st.store.delete(&tenant, Kind::Registration, &id).await? {
             st.reg_changed(&tenant, &id, None);
             crate::notify::csource_fanout(&st, &tenant, before, None).await;
             Ok(no_content(&tenant))
@@ -1441,8 +1450,8 @@ mod csi_tests {
     /// 4.3.6.3: "the registration shall define both: an entity id (i.e. an id
     /// pattern or Entity type defining a group of entities is not supported
     /// for exclusive registrations) [and] Attributes."
-    #[test]
-    fn exclusive_registration_requires_entity_id_and_attributes() {
+    #[tokio::test]
+    async fn exclusive_registration_requires_entity_id_and_attributes() {
         let ctx = Loader::new().core();
         let mk = |mode: &str, info: Value| {
             json!({
@@ -1500,8 +1509,8 @@ mod csi_tests {
     /// created, no further exclusive or redirect Context Source Registrations
     /// can be created for that same combination of Entity ID and Attributes"
     /// — while redirect × redirect overlap stays legal.
-    #[test]
-    fn proxied_overlap_with_an_exclusive_registration_conflicts() {
+    #[tokio::test]
+    async fn proxied_overlap_with_an_exclusive_registration_conflicts() {
         let st = crate::state::AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -1530,6 +1539,7 @@ mod csi_tests {
                 "urn:ngsi-ld:ContextSourceRegistration:e1",
                 Value::Object(seeded),
             )
+            .await
             .expect("seed");
         let overlap_exc = mk(
             "urn:ngsi-ld:ContextSourceRegistration:e2",
@@ -1537,7 +1547,9 @@ mod csi_tests {
             "speed",
         );
         assert!(
-            check_proxied_overlap(&st, &tenant, &overlap_exc, None, &ctx).is_err(),
+            check_proxied_overlap(&st, &tenant, &overlap_exc, None, &ctx)
+                .await
+                .is_err(),
             "second exclusive for the same (id, attr)"
         );
         let overlap_red = mk(
@@ -1546,7 +1558,9 @@ mod csi_tests {
             "speed",
         );
         assert!(
-            check_proxied_overlap(&st, &tenant, &overlap_red, None, &ctx).is_err(),
+            check_proxied_overlap(&st, &tenant, &overlap_red, None, &ctx)
+                .await
+                .is_err(),
             "redirect after an exclusive for the same combination"
         );
         let other_attr = mk(
@@ -1555,7 +1569,9 @@ mod csi_tests {
             "color",
         );
         assert!(
-            check_proxied_overlap(&st, &tenant, &other_attr, None, &ctx).is_ok(),
+            check_proxied_overlap(&st, &tenant, &other_attr, None, &ctx)
+                .await
+                .is_ok(),
             "disjoint attribute is a different combination"
         );
         // the registration itself is not its own conflict (update path)
@@ -1571,6 +1587,7 @@ mod csi_tests {
             Some("urn:ngsi-ld:ContextSourceRegistration:e1"),
             &ctx
         )
+        .await
         .is_ok());
         // redirect × redirect overlap is explicitly legal
         let r2 = mk(
@@ -1585,20 +1602,23 @@ mod csi_tests {
                 "urn:ngsi-ld:ContextSourceRegistration:r2",
                 Value::Object(r2),
             )
+            .await
             .expect("seed redirect");
         let r3 = mk(
             "urn:ngsi-ld:ContextSourceRegistration:r3",
             "redirect",
             "color",
         );
-        assert!(check_proxied_overlap(&st, &tenant, &r3, None, &ctx).is_ok());
+        assert!(check_proxied_overlap(&st, &tenant, &r3, None, &ctx)
+            .await
+            .is_ok());
     }
 
     /// 5.2.8 Table 5.2.8-1 — an EntityInfo `type` is "String or String[]" —
     /// applied to the 5.9.2.4 redirect rule: only an entity that matches the
     /// registered Entity type conflicts, whichever spelling was registered.
-    #[test]
-    fn clause_5_9_2_4_redirect_conflict_honours_the_array_form_entity_type() {
+    #[tokio::test]
+    async fn clause_5_9_2_4_redirect_conflict_honours_the_array_form_entity_type() {
         let st = crate::state::AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -1612,6 +1632,7 @@ mod csi_tests {
                 "urn:ngsi-ld:Building:b1",
                 Value::Object(building),
             )
+            .await
             .expect("seed building");
         let reg = |ty: Value| {
             let doc = json!({
@@ -1623,23 +1644,34 @@ mod csi_tests {
             });
             normalize_registration(doc.as_object().expect("object"), &ctx, false).expect("valid")
         };
-        let err = |ty: Value| match check_entity_conflict(&st, &tenant, &reg(ty)) {
-            Err(NgsiError::Conflict(m)) => Some(m),
-            Err(other) => panic!("unexpected error {other:?}"),
-            Ok(()) => None,
-        };
+        async fn err(st: &AppState, tenant: &TenantId, doc: Map<String, Value>) -> Option<String> {
+            match check_entity_conflict(st, tenant, &doc).await {
+                Err(NgsiError::Conflict(m)) => Some(m),
+                Err(other) => panic!("unexpected error {other:?}"),
+                Ok(()) => None,
+            }
+        }
         assert_eq!(
-            err(json!(["Vehicle"])),
+            err(&st, &tenant, reg(json!(["Vehicle"]))).await,
             None,
             "a redirect for Vehicle must not conflict with a Building"
         );
-        assert_eq!(err(json!("Vehicle")), None, "same, in the string spelling");
-        let hit = err(json!(["Building"])).expect("the Building conflicts");
+        assert_eq!(
+            err(&st, &tenant, reg(json!("Vehicle"))).await,
+            None,
+            "same, in the string spelling"
+        );
+        let hit = err(&st, &tenant, reg(json!(["Building"])))
+            .await
+            .expect("the Building conflicts");
         assert!(
             hit.contains("urn:ngsi-ld:Building:b1"),
             "the conflict names the existing entity: {hit}"
         );
-        assert!(err(json!("Building")).is_some(), "same, string spelling");
+        assert!(
+            err(&st, &tenant, reg(json!("Building"))).await.is_some(),
+            "same, string spelling"
+        );
     }
 
     /// 5.9.2.4 redirect: "If an existing Entity already matches the
@@ -1648,8 +1680,8 @@ mod csi_tests {
     /// alone (5.2.8) — a predicate no store can decide — and a
     /// RegistrationInfo may carry several EntityInfo entries, so each
     /// Entity read is asked about all of them.
-    #[test]
-    fn clause_5_9_2_4_redirect_conflict_matches_an_id_pattern() {
+    #[tokio::test]
+    async fn clause_5_9_2_4_redirect_conflict_matches_an_id_pattern() {
         let st = crate::state::AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -1662,9 +1694,10 @@ mod csi_tests {
             e.insert("type".into(), json!([ctx.expand_key(ty)]));
             st.store
                 .create(&tenant, Kind::Entity, id, Value::Object(e))
+                .await
                 .expect("seed");
         }
-        let err = |ents: Value| {
+        let pat = |ents: Value| {
             let doc = json!({
                 "id": "urn:ngsi-ld:ContextSourceRegistration:pat1",
                 "type": "ContextSourceRegistration",
@@ -1672,33 +1705,54 @@ mod csi_tests {
                 "mode": "redirect",
                 "information": [{"entities": ents}]
             });
-            let norm = normalize_registration(doc.as_object().expect("object"), &ctx, false)
-                .expect("valid");
-            match check_entity_conflict(&st, &tenant, &norm) {
+            normalize_registration(doc.as_object().expect("object"), &ctx, false).expect("valid")
+        };
+        async fn err(st: &AppState, tenant: &TenantId, doc: Map<String, Value>) -> Option<String> {
+            match check_entity_conflict(st, tenant, &doc).await {
                 Err(NgsiError::Conflict(m)) => Some(m),
                 Err(other) => panic!("unexpected error {other:?}"),
                 Ok(()) => None,
             }
-        };
+        }
         assert_eq!(
-            err(json!([{"idPattern": "^urn:ngsi-ld:Nothing:.*"}])),
+            err(
+                &st,
+                &tenant,
+                pat(json!([{"idPattern": "^urn:ngsi-ld:Nothing:.*"}]))
+            )
+            .await,
             None,
             "a pattern no entity matches does not conflict"
         );
-        let hit = err(json!([{"idPattern": "^urn:ngsi-ld:Vehicle:.*"}]))
-            .expect("the Vehicle matches the pattern");
+        let hit = err(
+            &st,
+            &tenant,
+            pat(json!([{"idPattern": "^urn:ngsi-ld:Vehicle:.*"}])),
+        )
+        .await
+        .expect("the Vehicle matches the pattern");
         assert!(hit.contains("urn:ngsi-ld:Vehicle:v1"), "{hit}");
         assert_eq!(
-            err(json!([{"idPattern": "^urn:ngsi-ld:Vehicle:.*", "type": "Device"}])),
+            err(
+                &st,
+                &tenant,
+                pat(json!([{"idPattern": "^urn:ngsi-ld:Vehicle:.*", "type": "Device"}]))
+            )
+            .await,
             None,
             "the pattern and the type must both hold: the Vehicle is not a Device"
         );
         // The second EntityInfo is the one that matches: every selector of
         // the RegistrationInfo is asked about every Entity, not only the first.
-        let hit = err(json!([
-            {"idPattern": "^urn:ngsi-ld:Nothing:.*"},
-            {"idPattern": "^urn:ngsi-ld:Device:.*"}
-        ]))
+        let hit = err(
+            &st,
+            &tenant,
+            pat(json!([
+                {"idPattern": "^urn:ngsi-ld:Nothing:.*"},
+                {"idPattern": "^urn:ngsi-ld:Device:.*"}
+            ])),
+        )
+        .await
         .expect("the Device matches the second EntityInfo");
         assert!(hit.contains("urn:ngsi-ld:Device:d1"), "{hit}");
     }
@@ -1707,8 +1761,8 @@ mod csi_tests {
     /// read is refused above the store's row ceiling, 5.5.6, and this check
     /// has no TooManyResults to raise), so a conflict that sits beyond the
     /// first page must still be found.
-    #[test]
-    fn clause_5_9_2_4_a_conflict_past_the_first_page_is_found() {
+    #[tokio::test]
+    async fn clause_5_9_2_4_a_conflict_past_the_first_page_is_found() {
         let st = crate::state::AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -1720,6 +1774,7 @@ mod csi_tests {
             e.insert("type".into(), json!([device]));
             st.store
                 .create(&tenant, Kind::Entity, &id, Value::Object(e))
+                .await
                 .expect("seed");
         }
         // sorts after every Device above, so it is only reached on page two
@@ -1733,6 +1788,7 @@ mod csi_tests {
                 "urn:ngsi-ld:Zebra:z1",
                 Value::Object(zebra),
             )
+            .await
             .expect("seed");
         let doc = json!({
             "id": "urn:ngsi-ld:ContextSourceRegistration:pat2",
@@ -1743,7 +1799,7 @@ mod csi_tests {
         });
         let norm =
             normalize_registration(doc.as_object().expect("object"), &ctx, false).expect("valid");
-        match check_entity_conflict(&st, &tenant, &norm) {
+        match check_entity_conflict(&st, &tenant, &norm).await {
             Err(NgsiError::Conflict(m)) => assert!(m.contains("urn:ngsi-ld:Zebra:z1"), "{m}"),
             other => panic!("the conflict on page two was missed: {other:?}"),
         }
@@ -1752,8 +1808,8 @@ mod csi_tests {
     /// 5.9.2.4: an exclusive registration conflicts with an existing Entity
     /// only when "the existing Entity contains any of the Attributes defined
     /// in the registration".
-    #[test]
-    fn clause_5_9_2_4_exclusive_conflict_needs_a_registered_attribute() {
+    #[tokio::test]
+    async fn clause_5_9_2_4_exclusive_conflict_needs_a_registered_attribute() {
         let st = crate::state::AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -1768,6 +1824,7 @@ mod csi_tests {
                 "urn:ngsi-ld:Vehicle:v1",
                 Value::Object(vehicle),
             )
+            .await
             .expect("seed vehicle");
         let reg = |attr: &str, id: &str| {
             let doc = json!({
@@ -1783,15 +1840,21 @@ mod csi_tests {
             normalize_registration(doc.as_object().expect("object"), &ctx, false).expect("valid")
         };
         assert!(
-            check_entity_conflict(&st, &tenant, &reg("speed", "urn:ngsi-ld:Vehicle:v1")).is_ok(),
+            check_entity_conflict(&st, &tenant, &reg("speed", "urn:ngsi-ld:Vehicle:v1"))
+                .await
+                .is_ok(),
             "the entity carries no speed Attribute"
         );
         assert!(
-            check_entity_conflict(&st, &tenant, &reg("color", "urn:ngsi-ld:Vehicle:v2")).is_ok(),
+            check_entity_conflict(&st, &tenant, &reg("color", "urn:ngsi-ld:Vehicle:v2"))
+                .await
+                .is_ok(),
             "another entity id is not this entity"
         );
         assert!(
-            check_entity_conflict(&st, &tenant, &reg("color", "urn:ngsi-ld:Vehicle:v1")).is_err(),
+            check_entity_conflict(&st, &tenant, &reg("color", "urn:ngsi-ld:Vehicle:v1"))
+                .await
+                .is_err(),
             "the entity carries the registered color Attribute"
         );
     }
@@ -1804,24 +1867,25 @@ mod csi_tests {
         let st = crate::state::AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
-        let seed = |id: &str, ty: Value| {
+        let reg = |id: &str, ty: Value| {
             let doc = json!({
                 "id": id,
                 "type": "ContextSourceRegistration",
                 "endpoint": "http://peer:9090",
                 "information": [{"entities": [{"type": ty}]}]
             });
-            let norm =
-                normalize_registration(doc.as_object().expect("object"), &ctx, false).expect("ok");
-            st.store
-                .create(&tenant, Kind::Registration, id, Value::Object(norm))
-                .expect("seed");
+            normalize_registration(doc.as_object().expect("object"), &ctx, false).expect("ok")
         };
-        seed(
-            "urn:ngsi-ld:ContextSourceRegistration:both",
-            json!(["Home", "Vehicle"]),
-        );
-        seed("urn:ngsi-ld:ContextSourceRegistration:home", json!("Home"));
+        async fn seed(st: &AppState, tenant: &TenantId, id: &str, doc: Map<String, Value>) {
+            st.store
+                .create(tenant, Kind::Registration, id, Value::Object(doc))
+                .await
+                .expect("seed");
+        }
+        let both = "urn:ngsi-ld:ContextSourceRegistration:both";
+        let home = "urn:ngsi-ld:ContextSourceRegistration:home";
+        seed(&st, &tenant, both, reg(both, json!(["Home", "Vehicle"]))).await;
+        seed(&st, &tenant, home, reg(home, json!("Home"))).await;
         let ids = |sel: &str| {
             let st = st.clone();
             let sel = sel.to_owned();
@@ -2008,8 +2072,8 @@ mod csi_tests {
     /// the "so many results that can potentially exhaust … server resources"
     /// 5.5.6 names — the query is refused at the ceiling instead of building
     /// the answer.
-    #[test]
-    fn clause_5_5_6_a_registration_query_stops_at_the_fold_ceiling() {
+    #[tokio::test]
+    async fn clause_5_5_6_a_registration_query_stops_at_the_fold_ceiling() {
         let st = AppState::new("antares-csr-ceiling".into());
         let tenant = TenantId::default();
         for i in 0..5 {
@@ -2026,11 +2090,15 @@ mod csi_tests {
                         "information": [{"entities": [{"type": "Building"}]}],
                     }),
                 )
+                .await
                 .expect("store the registration");
         }
-        let all = collect_matching(&st, &tenant, |_| true, 100).expect("under the ceiling");
+        let all = collect_matching(&st, &tenant, |_| true, 100)
+            .await
+            .expect("under the ceiling");
         assert_eq!(all.len(), 5, "every registration matches");
         let err = collect_matching(&st, &tenant, |_| true, 2)
+            .await
             .expect_err("a match set over the ceiling is refused");
         assert!(
             matches!(err, NgsiError::TooManyResults(_)),
@@ -2044,6 +2112,7 @@ mod csi_tests {
             |d| d["id"] == json!("urn:ngsi-ld:ContextSourceRegistration:ceil3"),
             2,
         )
+        .await
         .expect("one match is under any ceiling");
         assert_eq!(narrow.len(), 1);
     }
@@ -2180,6 +2249,7 @@ mod concurrent_create_5_9_2_4 {
             let stored = st
                 .store
                 .list(&tenant, Kind::Registration)
+                .await
                 .expect("registrations");
             assert_eq!(
                 stored.len(),
@@ -2242,6 +2312,7 @@ mod concurrent_create_5_9_2_4 {
             let exclusive = st
                 .store
                 .list(&tenant, Kind::Registration)
+                .await
                 .expect("registrations")
                 .iter()
                 .filter(|r| r.get("mode").and_then(Value::as_str) == Some("exclusive"))

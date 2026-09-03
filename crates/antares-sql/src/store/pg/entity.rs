@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! PgStore, first slice: entity CRUD over the `entities`
-//! table. Sync facade — same signatures as the in-memory `Store`, sqlx driven
-//! internally via `block_in_place` + `Handle::block_on`, so the call
-//! sites in `antares-api` keep their signatures.
+//! table. Same signatures as the in-memory `Store`, awaited: every method is
+//! an `async fn` over sqlx, so a caller waiting on the database holds no
+//! thread.
 //!
 //! Extracted columns are computed in Rust at write time (no triggers):
 //! `types`, `scopes`, `created_at`, `modified_at`, `expires_at` and
@@ -41,28 +41,6 @@ enum Bind {
     Num(f64),
     /// LIMIT/OFFSET (pagination pushdown)
     Int(i64),
-}
-
-/// Run an async block from sync code without stalling a tokio worker
-/// (same rationale as the redb shadow's `on_blocking`). The parked thread
-/// counts against tokio's blocking-thread ceiling; past that ceiling a
-/// `block_in_place` also parks the core it ran on, so the composition root
-/// sizes the ceiling above the connection cap (`antares-broker` `runtime`).
-pub(crate) fn wait<T>(fut: impl std::future::Future<Output = T>) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| h.block_on(fut))
-        }
-        Ok(h) => h.block_on(fut),
-        // A current-thread runtime fails to build only when the OS refuses
-        // the reactor's own descriptors; no database call can proceed then.
-        #[allow(clippy::expect_used)]
-        Err(_) => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("mini runtime")
-            .block_on(fut),
-    }
 }
 
 /// The internal doc's members that become extracted columns.
@@ -318,160 +296,101 @@ impl PgEntityStore {
     /// reaping lag, so it must not 409 a create that reads (and GETs) as
     /// absent. The conflict clause replaces such a row and reports CREATED;
     /// a live row still takes the DO NOTHING path and `rows_affected() == 0`.
-    pub fn create(&self, tenant: &TenantId, id: &str, doc: &Value) -> Result<bool, sqlx::Error> {
+    pub async fn create(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        doc: &Value,
+    ) -> Result<bool, sqlx::Error> {
         let e = extract(doc);
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
-            let done = sqlx::query(
-                "INSERT INTO entities
-                   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
-                    location, location_ambiguous)
-                 VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8::timestamptz,
-                         CASE WHEN ST_IsValid(try_geomfromgeojson($9))
-                              THEN try_geomfromgeojson($9) END,
-                         $10 OR ($9 IS NOT NULL
-                                 AND NOT COALESCE(ST_IsValid(try_geomfromgeojson($9)), false)))
-                 ON CONFLICT (tenant_id, id) DO UPDATE SET
-                   entity = EXCLUDED.entity, types = EXCLUDED.types,
-                   scopes = EXCLUDED.scopes, created_at = EXCLUDED.created_at,
-                   modified_at = EXCLUDED.modified_at, expires_at = EXCLUDED.expires_at,
-                   location = EXCLUDED.location,
-                   location_ambiguous = EXCLUDED.location_ambiguous,
-                   version = 1
-                 WHERE entities.expires_at IS NOT NULL AND entities.expires_at <= now()",
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        crate::store::pg::claim_tenant(&mut tx, tenant).await?;
+        let done = sqlx::query(
+            "INSERT INTO entities
+               (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
+                location, location_ambiguous)
+             VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8::timestamptz,
+                     CASE WHEN ST_IsValid(try_geomfromgeojson($9))
+                          THEN try_geomfromgeojson($9) END,
+                     $10 OR ($9 IS NOT NULL
+                             AND NOT COALESCE(ST_IsValid(try_geomfromgeojson($9)), false)))
+             ON CONFLICT (tenant_id, id) DO UPDATE SET
+               entity = EXCLUDED.entity, types = EXCLUDED.types,
+               scopes = EXCLUDED.scopes, created_at = EXCLUDED.created_at,
+               modified_at = EXCLUDED.modified_at, expires_at = EXCLUDED.expires_at,
+               location = EXCLUDED.location,
+               location_ambiguous = EXCLUDED.location_ambiguous,
+               version = 1
+             WHERE entities.expires_at IS NOT NULL AND entities.expires_at <= now()",
+        )
+        .bind(tenant.as_str())
+        .bind(id)
+        .bind(doc)
+        .bind(&e.types)
+        .bind(&e.scopes)
+        .bind(&e.created)
+        .bind(&e.modified)
+        .bind(&e.expires)
+        .bind(&e.location)
+        .bind(e.location_ambiguous)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if done == 1 && self.outbox_on() {
+            enqueue_change(
+                &mut tx,
+                tenant,
+                "create",
+                id,
+                &e.types,
+                None,
+                Some(doc),
+                1,
+                &e.created,
             )
-            .bind(tenant.as_str())
-            .bind(id)
-            .bind(doc)
-            .bind(&e.types)
-            .bind(&e.scopes)
-            .bind(&e.created)
-            .bind(&e.modified)
-            .bind(&e.expires)
-            .bind(&e.location)
-            .bind(e.location_ambiguous)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if done == 1 && self.outbox_on() {
-                enqueue_change(
-                    &mut tx,
-                    tenant,
-                    "create",
-                    id,
-                    &e.types,
-                    None,
-                    Some(doc),
-                    1,
-                    &e.created,
-                )
-                .await?;
-            }
-            tx.commit().await?;
-            Ok(done == 1)
-        })
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(done == 1)
     }
 
-    pub fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            // 4.22: expired rows are invalid context until the sweep reaps them
-            let row = sqlx::query(
-                "SELECT entity FROM entities WHERE tenant_id = $1 AND id = $2
-                   AND (expires_at IS NULL OR expires_at > now())",
-            )
-            .bind(tenant.as_str())
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            Ok(row.map(|r| r.get::<Value, _>(0)))
-        })
+    pub async fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        // 4.22: expired rows are invalid context until the sweep reaps them
+        let row = sqlx::query(
+            "SELECT entity FROM entities WHERE tenant_id = $1 AND id = $2
+               AND (expires_at IS NULL OR expires_at > now())",
+        )
+        .bind(tenant.as_str())
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(row.map(|r| r.get::<Value, _>(0)))
     }
 
     /// Returns the deleted document (the before-image, captured in the same
     /// transaction as the DELETE — never re-read outside it), `None` = absent.
-    pub fn delete(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            // 4.22: an already-expired row is invalid, so deleting it is a
-            // 404 exactly as retrieving it is — never a 204 for an entity the
-            // API has stopped serving.
-            let row = sqlx::query(
-                "DELETE FROM entities WHERE tenant_id = $1 AND id = $2
-                   AND (expires_at IS NULL OR expires_at > now())
-                 RETURNING entity, types, version, created_at::text",
-            )
-            .bind(tenant.as_str())
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let mut prev_out = None;
-            if let Some(r) = &row {
-                let prev: Value = r.get(0);
-                if self.outbox_on() {
-                    let types: Vec<String> = r.get(1);
-                    enqueue_change(
-                        &mut tx,
-                        tenant,
-                        "delete",
-                        id,
-                        &types,
-                        Some(&prev),
-                        None,
-                        r.get::<i64, _>(2),
-                        r.get::<&str, _>(3),
-                    )
-                    .await?;
-                }
-                prev_out = Some(prev);
-            }
-            tx.commit().await?;
-            Ok(prev_out)
-        })
-    }
-
-    /// Delete one entity only if `keep` accepts the stored document, under
-    /// one lock: the DELETE itself takes the row lock and produces the
-    /// document that decides, and a refusal rolls the transaction back
-    /// instead of committing it. A `SELECT` followed by a `DELETE` would
-    /// leave the window this exists to close — between them the row can be
-    /// deleted and recreated under the same id, and the delete then lands on
-    /// a document nobody inspected.
-    ///
-    /// 4.22 as in `delete`: an already-expired row is invalid, so it is
-    /// absent here too.
-    pub fn delete_if(
-        &self,
-        tenant: &TenantId,
-        id: &str,
-        keep: &dyn Fn(&Value) -> bool,
-    ) -> Result<Option<Value>, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let row = sqlx::query(
-                "DELETE FROM entities WHERE tenant_id = $1 AND id = $2
-                   AND (expires_at IS NULL OR expires_at > now())
-                 RETURNING entity, types, version, created_at::text",
-            )
-            .bind(tenant.as_str())
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some(r) = &row else {
-                tx.commit().await?;
-                return Ok(None);
-            };
+    pub async fn delete(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        // 4.22: an already-expired row is invalid, so deleting it is a
+        // 404 exactly as retrieving it is — never a 204 for an entity the
+        // API has stopped serving.
+        let row = sqlx::query(
+            "DELETE FROM entities WHERE tenant_id = $1 AND id = $2
+               AND (expires_at IS NULL OR expires_at > now())
+             RETURNING entity, types, version, created_at::text",
+        )
+        .bind(tenant.as_str())
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let mut prev_out = None;
+        if let Some(r) = &row {
             let prev: Value = r.get(0);
-            if !keep(&prev) {
-                tx.rollback().await?;
-                return Ok(None);
-            }
             if self.outbox_on() {
                 let types: Vec<String> = r.get(1);
                 enqueue_change(
@@ -487,9 +406,65 @@ impl PgEntityStore {
                 )
                 .await?;
             }
+            prev_out = Some(prev);
+        }
+        tx.commit().await?;
+        Ok(prev_out)
+    }
+
+    /// Delete one entity only if `keep` accepts the stored document, under
+    /// one lock: the DELETE itself takes the row lock and produces the
+    /// document that decides, and a refusal rolls the transaction back
+    /// instead of committing it. A `SELECT` followed by a `DELETE` would
+    /// leave the window this exists to close — between them the row can be
+    /// deleted and recreated under the same id, and the delete then lands on
+    /// a document nobody inspected.
+    ///
+    /// 4.22 as in `delete`: an already-expired row is invalid, so it is
+    /// absent here too.
+    pub async fn delete_if(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        keep: &(dyn for<'v> Fn(&'v Value) -> bool + Sync),
+    ) -> Result<Option<Value>, sqlx::Error> {
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let row = sqlx::query(
+            "DELETE FROM entities WHERE tenant_id = $1 AND id = $2
+               AND (expires_at IS NULL OR expires_at > now())
+             RETURNING entity, types, version, created_at::text",
+        )
+        .bind(tenant.as_str())
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(r) = &row else {
             tx.commit().await?;
-            Ok(Some(prev))
-        })
+            return Ok(None);
+        };
+        let prev: Value = r.get(0);
+        if !keep(&prev) {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        if self.outbox_on() {
+            let types: Vec<String> = r.get(1);
+            enqueue_change(
+                &mut tx,
+                tenant,
+                "delete",
+                id,
+                &types,
+                Some(&prev),
+                None,
+                r.get::<i64, _>(2),
+                r.get::<&str, _>(3),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(Some(prev))
     }
 
     /// Query pushdown. The predicates that compile EXACTLY go to
@@ -505,7 +480,7 @@ impl PgEntityStore {
     /// caller's page, everything else by `MAX_UNDECIDED_ROWS`. A set that
     /// reaches that ceiling is refused with TooManyResults (5.5.6) rather
     /// than returned as a prefix the caller would page over as if complete.
-    pub fn query(
+    pub async fn query(
         &self,
         tenant: &TenantId,
         f: &EntityFilter<'_>,
@@ -580,7 +555,7 @@ impl PgEntityStore {
             // the evaluator. Probing validity once here keeps the two modes
             // identical: invalid ⇒ no pushdown, evaluator decides. Stored
             // geometries can't be invalid — the write path NULLs those.
-            if self.geometry_is_valid(spec) {
+            if self.geometry_is_valid(spec).await {
                 if let Some(c) = crate::compile::geo::compile_geo(spec, "location", binds.len() + 1)
                 {
                     wheres.push(c.sql);
@@ -633,73 +608,71 @@ impl PgEntityStore {
         // materializes the whole tenant into the Vec below.
         let ceiling = MAX_UNDECIDED_ROWS;
         let (sql, paged) = query_sql(&select, &wheres, f.page.as_ref(), decided, &mut binds);
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            // sqlx 0.9 makes dynamic SQL opt-in. The assertion holds by
-            // construction: `sql` is built from this function's own literals
-            // plus `$n` placeholders — no caller-supplied text reaches it.
-            // The audit lives here, next to the builder.
-            let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()));
-            for b in &binds {
-                qy = match b {
-                    Bind::Text(s) | Bind::Path(s) => qy.bind(s),
-                    Bind::TextArr(v) => qy.bind(v),
-                    Bind::Num(n) => qy.bind(n),
-                    Bind::Int(n) => qy.bind(n),
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        // sqlx 0.9 makes dynamic SQL opt-in. The assertion holds by
+        // construction: `sql` is built from this function's own literals
+        // plus `$n` placeholders — no caller-supplied text reaches it.
+        // The audit lives here, next to the builder.
+        let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()));
+        for b in &binds {
+            qy = match b {
+                Bind::Text(s) | Bind::Path(s) => qy.bind(s),
+                Bind::TextArr(v) => qy.bind(v),
+                Bind::Num(n) => qy.bind(n),
+                Bind::Int(n) => qy.bind(n),
+            };
+        }
+        // Stream rows, decode each to its Value and
+        // drop the PgRow — the full row set never sits in memory twice.
+        let mut docs: Vec<Value> = Vec::new();
+        let mut total: Option<i64> = None;
+        let counted = paged && f.page.as_ref().is_some_and(|p| p.count);
+        {
+            use futures_util::TryStreamExt;
+            let mut stream = qy.fetch(&mut *tx);
+            while let Some(row) = stream.try_next().await? {
+                if counted && docs.is_empty() {
+                    total = Some(row.get::<i64, _>(1));
+                }
+                docs.push(row.get::<Value, _>(0));
+            }
+        }
+        check_ceiling(paged, docs.len(), ceiling)?;
+        // uncounted page: the extra row says a next page exists; the
+        // total handed back is the smallest one consistent with that,
+        // enough for the next/prev links and never shown as a count
+        if let Some(p) = f.page.as_ref().filter(|_| paged && !counted) {
+            let more = docs.len() as i64 > p.limit;
+            docs.truncate(p.limit as usize);
+            total = Some(p.offset + docs.len() as i64 + i64::from(more));
+        }
+        // an off-the-end counted page returns zero rows and no window
+        // total — count the match set separately so links/count stay correct
+        if counted && total.is_none() {
+            let count_sql = format!(
+                "SELECT count(*) FROM entities WHERE {}",
+                wheres.join(" AND ")
+            );
+            let mut cq = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
+            // same wheres ⇒ same bind prefix; stop before the
+            // projection/page binds, which the count statement lacks
+            for b in binds.iter().take(where_binds) {
+                cq = match b {
+                    Bind::Text(s) | Bind::Path(s) => cq.bind(s),
+                    Bind::TextArr(v) => cq.bind(v),
+                    Bind::Num(n) => cq.bind(n),
+                    Bind::Int(n) => cq.bind(n),
                 };
             }
-            // Stream rows, decode each to its Value and
-            // drop the PgRow — the full row set never sits in memory twice.
-            let mut docs: Vec<Value> = Vec::new();
-            let mut total: Option<i64> = None;
-            let counted = paged && f.page.as_ref().is_some_and(|p| p.count);
-            {
-                use futures_util::TryStreamExt;
-                let mut stream = qy.fetch(&mut *tx);
-                while let Some(row) = stream.try_next().await? {
-                    if counted && docs.is_empty() {
-                        total = Some(row.get::<i64, _>(1));
-                    }
-                    docs.push(row.get::<Value, _>(0));
-                }
-            }
-            check_ceiling(paged, docs.len(), ceiling)?;
-            // uncounted page: the extra row says a next page exists; the
-            // total handed back is the smallest one consistent with that,
-            // enough for the next/prev links and never shown as a count
-            if let Some(p) = f.page.as_ref().filter(|_| paged && !counted) {
-                let more = docs.len() as i64 > p.limit;
-                docs.truncate(p.limit as usize);
-                total = Some(p.offset + docs.len() as i64 + i64::from(more));
-            }
-            // an off-the-end counted page returns zero rows and no window
-            // total — count the match set separately so links/count stay correct
-            if counted && total.is_none() {
-                let count_sql = format!(
-                    "SELECT count(*) FROM entities WHERE {}",
-                    wheres.join(" AND ")
-                );
-                let mut cq = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
-                // same wheres ⇒ same bind prefix; stop before the
-                // projection/page binds, which the count statement lacks
-                for b in binds.iter().take(where_binds) {
-                    cq = match b {
-                        Bind::Text(s) | Bind::Path(s) => cq.bind(s),
-                        Bind::TextArr(v) => cq.bind(v),
-                        Bind::Num(n) => cq.bind(n),
-                        Bind::Int(n) => cq.bind(n),
-                    };
-                }
-                total = Some(cq.fetch_one(&mut *tx).await?);
-            }
-            tx.commit().await?;
-            Ok(QueryOutcome {
-                rows: docs,
-                decided,
-                paged,
-                total,
-            })
+            total = Some(cq.fetch_one(&mut *tx).await?);
+        }
+        tx.commit().await?;
+        Ok(QueryOutcome {
+            rows: docs,
+            decided,
+            paged,
+            total,
         })
     }
 
@@ -707,20 +680,16 @@ impl PgEntityStore {
     /// GeoJSON counts as invalid — same outcome, no pushdown — and reaches
     /// that answer through `try_geomfromgeojson` (0001_init.sql), so the
     /// probe itself can never raise.
-    fn geometry_is_valid(&self, spec: &crate::compile::geo::GeoSpec<'_>) -> bool {
+    async fn geometry_is_valid(&self, spec: &crate::compile::geo::GeoSpec<'_>) -> bool {
         let geojson = serde_json::to_string(&serde_json::json!({
             "type": spec.geometry, "coordinates": spec.coordinates
         }))
         .unwrap_or_default();
-        wait(async {
-            sqlx::query_scalar::<_, bool>(
-                "SELECT COALESCE(ST_IsValid(try_geomfromgeojson($1)), false)",
-            )
+        sqlx::query_scalar::<_, bool>("SELECT COALESCE(ST_IsValid(try_geomfromgeojson($1)), false)")
             .bind(&geojson)
             .fetch_one(&self.pool)
             .await
             .unwrap_or(false)
-        })
     }
 
     /// Id-ordered snapshot for one tenant (the v0 `list` shape — still the
@@ -730,29 +699,27 @@ impl PgEntityStore {
     /// `MAX_UNDECIDED_ROWS` safety LIMIT, and a tenant that reaches it is
     /// refused with TooManyResults (5.5.6) rather than served a silent
     /// prefix.
-    pub fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let mut docs: Vec<Value> = Vec::new();
-            {
-                use futures_util::TryStreamExt;
-                let mut stream = sqlx::query(
-                    "SELECT entity FROM entities WHERE tenant_id = $1
-                           AND (expires_at IS NULL OR expires_at > now())
-                     ORDER BY id LIMIT $2",
-                )
-                .bind(tenant.as_str())
-                .bind(MAX_UNDECIDED_ROWS)
-                .fetch(&mut *tx);
-                while let Some(row) = stream.try_next().await? {
-                    docs.push(row.get::<Value, _>(0));
-                }
+    pub async fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, sqlx::Error> {
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let mut docs: Vec<Value> = Vec::new();
+        {
+            use futures_util::TryStreamExt;
+            let mut stream = sqlx::query(
+                "SELECT entity FROM entities WHERE tenant_id = $1
+                       AND (expires_at IS NULL OR expires_at > now())
+                 ORDER BY id LIMIT $2",
+            )
+            .bind(tenant.as_str())
+            .bind(MAX_UNDECIDED_ROWS)
+            .fetch(&mut *tx);
+            while let Some(row) = stream.try_next().await? {
+                docs.push(row.get::<Value, _>(0));
             }
-            tx.commit().await?;
-            check_ceiling(false, docs.len(), MAX_UNDECIDED_ROWS)?;
-            Ok(docs)
-        })
+        }
+        tx.commit().await?;
+        check_ceiling(false, docs.len(), MAX_UNDECIDED_ROWS)?;
+        Ok(docs)
     }
 
     /// One id-ordered page of entities: ids strictly greater than `after`,
@@ -771,106 +738,102 @@ impl PgEntityStore {
     /// 4.22 at the entity level is in the statement, so a full page is a
     /// full page: the caller reads a short page as the end of the tenant,
     /// and a filter applied after the LIMIT would end the walk early.
-    pub fn list_page(
+    pub async fn list_page(
         &self,
         tenant: &TenantId,
         after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Value>, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let rows = sqlx::query(
-                "SELECT entity FROM entities WHERE tenant_id = $1 AND id > $2
-                       AND (expires_at IS NULL OR expires_at > now())
-                 ORDER BY id LIMIT $3",
-            )
-            .bind(tenant.as_str())
-            .bind(after.unwrap_or(""))
-            .bind(limit)
-            .fetch_all(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let rows = sqlx::query(
+            "SELECT entity FROM entities WHERE tenant_id = $1 AND id > $2
+                   AND (expires_at IS NULL OR expires_at > now())
+             ORDER BY id LIMIT $3",
+        )
+        .bind(tenant.as_str())
+        .bind(after.unwrap_or(""))
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
     }
 
     /// Read-modify-write: row lock via `SELECT … FOR UPDATE`, closure
     /// applied in Rust, `version` bumped under the lock. Two racing PATCHes
     /// serialize in Postgres, neither is lost. `Ok(None)` = entity absent.
-    pub fn mutate<T, E>(
+    pub async fn mutate<T, E>(
         &self,
         tenant: &TenantId,
         id: &str,
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Result<Option<Result<T, E>>, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            // 4.22: an expired row is invalid, so a patch of it is a 404 —
-            // the same answer the retrieve it would follow already gives.
-            let row = sqlx::query(
-                "SELECT entity FROM entities WHERE tenant_id = $1 AND id = $2
-                   AND (expires_at IS NULL OR expires_at > now()) FOR UPDATE",
-            )
-            .bind(tenant.as_str())
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some(row) = row else {
-                tx.commit().await?;
-                return Ok(None);
-            };
-            let mut doc: Value = row.get(0);
-            let before = self.outbox_on().then(|| doc.clone());
-            match f(&mut doc) {
-                Ok(t) => {
-                    let e = extract(&doc);
-                    let updated = sqlx::query(
-                        "UPDATE entities SET entity = $3, types = $4, scopes = $5,
-                           modified_at = $6::timestamptz, expires_at = $7::timestamptz,
-                           location = CASE WHEN ST_IsValid(try_geomfromgeojson($8))
-                                           THEN try_geomfromgeojson($8) END,
-                           location_ambiguous = $9 OR ($8 IS NOT NULL
-                               AND NOT COALESCE(ST_IsValid(try_geomfromgeojson($8)), false)),
-                           version = version + 1
-                         WHERE tenant_id = $1 AND id = $2
-                         RETURNING version, created_at::text",
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        // 4.22: an expired row is invalid, so a patch of it is a 404 —
+        // the same answer the retrieve it would follow already gives.
+        let row = sqlx::query(
+            "SELECT entity FROM entities WHERE tenant_id = $1 AND id = $2
+               AND (expires_at IS NULL OR expires_at > now()) FOR UPDATE",
+        )
+        .bind(tenant.as_str())
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let mut doc: Value = row.get(0);
+        let before = self.outbox_on().then(|| doc.clone());
+        match f(&mut doc) {
+            Ok(t) => {
+                let e = extract(&doc);
+                let updated = sqlx::query(
+                    "UPDATE entities SET entity = $3, types = $4, scopes = $5,
+                       modified_at = $6::timestamptz, expires_at = $7::timestamptz,
+                       location = CASE WHEN ST_IsValid(try_geomfromgeojson($8))
+                                       THEN try_geomfromgeojson($8) END,
+                       location_ambiguous = $9 OR ($8 IS NOT NULL
+                           AND NOT COALESCE(ST_IsValid(try_geomfromgeojson($8)), false)),
+                       version = version + 1
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING version, created_at::text",
+                )
+                .bind(tenant.as_str())
+                .bind(id)
+                .bind(&doc)
+                .bind(&e.types)
+                .bind(&e.scopes)
+                .bind(&e.modified)
+                .bind(&e.expires)
+                .bind(&e.location)
+                .bind(e.location_ambiguous)
+                .fetch_one(&mut *tx)
+                .await?;
+                if let Some(before) = &before {
+                    enqueue_change(
+                        &mut tx,
+                        tenant,
+                        "update",
+                        id,
+                        &e.types,
+                        Some(before),
+                        Some(&doc),
+                        updated.get::<i64, _>(0),
+                        updated.get::<&str, _>(1),
                     )
-                    .bind(tenant.as_str())
-                    .bind(id)
-                    .bind(&doc)
-                    .bind(&e.types)
-                    .bind(&e.scopes)
-                    .bind(&e.modified)
-                    .bind(&e.expires)
-                    .bind(&e.location)
-                    .bind(e.location_ambiguous)
-                    .fetch_one(&mut *tx)
                     .await?;
-                    if let Some(before) = &before {
-                        enqueue_change(
-                            &mut tx,
-                            tenant,
-                            "update",
-                            id,
-                            &e.types,
-                            Some(before),
-                            Some(&doc),
-                            updated.get::<i64, _>(0),
-                            updated.get::<&str, _>(1),
-                        )
-                        .await?;
-                    }
-                    tx.commit().await?;
-                    Ok(Some(Ok(t)))
                 }
-                Err(e) => {
-                    tx.rollback().await?;
-                    Ok(Some(Err(e)))
-                }
+                tx.commit().await?;
+                Ok(Some(Ok(t)))
             }
-        })
+            Err(e) => {
+                tx.rollback().await?;
+                Ok(Some(Err(e)))
+            }
+        }
     }
 
     /// Batch create: ONE multi-row INSERT for the whole batch (the jsonb
@@ -885,7 +848,7 @@ impl PgEntityStore {
     /// local operation" — so the conflict clause is `create`'s, and an
     /// entity past its `expiresAt` is absent (4.22) and gets created over
     /// rather than reported as an id that already exists.
-    pub fn batch_create(
+    pub async fn batch_create(
         &self,
         tenant: &TenantId,
         items: &[(String, Value)],
@@ -902,70 +865,68 @@ impl PgEntityStore {
                 }));
             }
         }
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
-            let rows = sqlx::query(
-                "INSERT INTO entities
-                   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
-                    location, location_ambiguous)
-                 SELECT $1, e->>'id', e->'doc',
-                        ARRAY(SELECT jsonb_array_elements_text(e->'types')),
-                        CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
-                             ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
-                        (e->>'created')::timestamptz, (e->>'modified')::timestamptz,
-                        (e->>'expires')::timestamptz,
-                        CASE WHEN ST_IsValid(try_geomfromgeojson(e->>'location'))
-                             THEN try_geomfromgeojson(e->>'location') END,
-                        COALESCE((e->>'loc_ambiguous')::bool, false)
-                          OR (e->>'location' IS NOT NULL
-                              AND NOT COALESCE(ST_IsValid(try_geomfromgeojson(e->>'location')), false))
-                 FROM jsonb_array_elements($2::jsonb) AS e
-                 ON CONFLICT (tenant_id, id) DO UPDATE SET
-                        entity = EXCLUDED.entity, types = EXCLUDED.types,
-                        scopes = EXCLUDED.scopes, created_at = EXCLUDED.created_at,
-                        modified_at = EXCLUDED.modified_at,
-                        expires_at = EXCLUDED.expires_at, location = EXCLUDED.location,
-                        location_ambiguous = EXCLUDED.location_ambiguous,
-                        version = 1
-                 WHERE entities.expires_at IS NOT NULL AND entities.expires_at <= now()
-                 RETURNING id",
-            )
-            .bind(tenant.as_str())
-            .bind(Value::Array(payload))
-            .fetch_all(&mut *tx)
-            .await?;
-            let created_now: std::collections::HashSet<String> =
-                rows.into_iter().map(|r| r.get::<String, _>(0)).collect();
-            if self.outbox_on() {
-                let mut seen_ev = std::collections::HashSet::new();
-                let mut events = Vec::new();
-                for (id, doc) in items {
-                    if created_now.contains(id.as_str()) && seen_ev.insert(id.as_str()) {
-                        let e = extract(doc);
-                        events.push(change_event(
-                            tenant,
-                            "create",
-                            id,
-                            &e.types,
-                            None,
-                            Some(doc),
-                            1,
-                            &e.created,
-                        ));
-                    }
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        crate::store::pg::claim_tenant(&mut tx, tenant).await?;
+        let rows = sqlx::query(
+            "INSERT INTO entities
+               (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
+                location, location_ambiguous)
+             SELECT $1, e->>'id', e->'doc',
+                    ARRAY(SELECT jsonb_array_elements_text(e->'types')),
+                    CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
+                         ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
+                    (e->>'created')::timestamptz, (e->>'modified')::timestamptz,
+                    (e->>'expires')::timestamptz,
+                    CASE WHEN ST_IsValid(try_geomfromgeojson(e->>'location'))
+                         THEN try_geomfromgeojson(e->>'location') END,
+                    COALESCE((e->>'loc_ambiguous')::bool, false)
+                      OR (e->>'location' IS NOT NULL
+                          AND NOT COALESCE(ST_IsValid(try_geomfromgeojson(e->>'location')), false))
+             FROM jsonb_array_elements($2::jsonb) AS e
+             ON CONFLICT (tenant_id, id) DO UPDATE SET
+                    entity = EXCLUDED.entity, types = EXCLUDED.types,
+                    scopes = EXCLUDED.scopes, created_at = EXCLUDED.created_at,
+                    modified_at = EXCLUDED.modified_at,
+                    expires_at = EXCLUDED.expires_at, location = EXCLUDED.location,
+                    location_ambiguous = EXCLUDED.location_ambiguous,
+                    version = 1
+             WHERE entities.expires_at IS NOT NULL AND entities.expires_at <= now()
+             RETURNING id",
+        )
+        .bind(tenant.as_str())
+        .bind(Value::Array(payload))
+        .fetch_all(&mut *tx)
+        .await?;
+        let created_now: std::collections::HashSet<String> =
+            rows.into_iter().map(|r| r.get::<String, _>(0)).collect();
+        if self.outbox_on() {
+            let mut seen_ev = std::collections::HashSet::new();
+            let mut events = Vec::new();
+            for (id, doc) in items {
+                if created_now.contains(id.as_str()) && seen_ev.insert(id.as_str()) {
+                    let e = extract(doc);
+                    events.push(change_event(
+                        tenant,
+                        "create",
+                        id,
+                        &e.types,
+                        None,
+                        Some(doc),
+                        1,
+                        &e.created,
+                    ));
                 }
-                super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
             }
-            tx.commit().await?;
-            let mut created = created_now;
-            // consume-once: a duplicate of a created id still reports false
-            Ok(items
-                .iter()
-                .map(|(id, _)| created.remove(id.as_str()))
-                .collect())
-        })
+            super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
+        }
+        tx.commit().await?;
+        let mut created = created_now;
+        // consume-once: a duplicate of a created id still reports false
+        Ok(items
+            .iter()
+            .map(|(id, _)| created.remove(id.as_str()))
+            .collect())
     }
 
     /// Batch delete: ONE statement, returning each deleted row's previous
@@ -975,50 +936,48 @@ impl PgEntityStore {
     /// Array execute the behaviour defined by clause 5.6.6, but limited to a
     /// local operation" — so an entity past its `expiresAt` is absent (4.22)
     /// and is not deleted here either, exactly as `delete` refuses it.
-    pub fn batch_delete(
+    pub async fn batch_delete(
         &self,
         tenant: &TenantId,
         ids: &[String],
     ) -> Result<Vec<(String, Value)>, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let rows = sqlx::query(
-                "DELETE FROM entities WHERE tenant_id = $1 AND id = ANY($2)
-                   AND (expires_at IS NULL OR expires_at > now())
-                 RETURNING id, entity, types, version, created_at::text",
-            )
-            .bind(tenant.as_str())
-            .bind(ids)
-            .fetch_all(&mut *tx)
-            .await?;
-            if self.outbox_on() {
-                let events: Vec<Value> = rows
-                    .iter()
-                    .map(|r| {
-                        let id: String = r.get(0);
-                        let prev: Value = r.get(1);
-                        let types: Vec<String> = r.get(2);
-                        change_event(
-                            tenant,
-                            "delete",
-                            &id,
-                            &types,
-                            Some(&prev),
-                            None,
-                            r.get::<i64, _>(3),
-                            r.get::<&str, _>(4),
-                        )
-                    })
-                    .collect();
-                super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
-            }
-            tx.commit().await?;
-            Ok(rows
-                .into_iter()
-                .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
-                .collect())
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let rows = sqlx::query(
+            "DELETE FROM entities WHERE tenant_id = $1 AND id = ANY($2)
+           AND (expires_at IS NULL OR expires_at > now())
+         RETURNING id, entity, types, version, created_at::text",
+        )
+        .bind(tenant.as_str())
+        .bind(ids)
+        .fetch_all(&mut *tx)
+        .await?;
+        if self.outbox_on() {
+            let events: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    let id: String = r.get(0);
+                    let prev: Value = r.get(1);
+                    let types: Vec<String> = r.get(2);
+                    change_event(
+                        tenant,
+                        "delete",
+                        &id,
+                        &types,
+                        Some(&prev),
+                        None,
+                        r.get::<i64, _>(3),
+                        r.get::<&str, _>(4),
+                    )
+                })
+                .collect();
+            super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
+        }
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
+            .collect())
     }
 
     /// Batch upsert in REPLACE semantics — ONE
@@ -1035,7 +994,7 @@ impl PgEntityStore {
     /// entity past its `expiresAt` does not exist (4.22), so it takes the
     /// creation branch: fresh `created_at`, `version` back to 1 and a
     /// created-flag, which is what splits 201 from 204 at the API.
-    pub fn batch_upsert_replace(
+    pub async fn batch_upsert_replace(
         &self,
         tenant: &TenantId,
         items: &[(String, Value)],
@@ -1054,104 +1013,101 @@ impl PgEntityStore {
                 }));
             }
         }
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
-            // lock + before-images in one statement (ordered: stable lock order)
-            let prev_rows = sqlx::query(
-                "SELECT id, entity,
-                        (expires_at IS NOT NULL AND expires_at <= now()) AS expired
-                 FROM entities WHERE tenant_id = $1 AND id = ANY($2)
-                 ORDER BY id FOR UPDATE",
-            )
-            .bind(tenant.as_str())
-            .bind(&ids)
-            .fetch_all(&mut *tx)
-            .await?;
-            // 4.22: an expired row is already invalid, so it is not a
-            // before-image — the upsert that replaces it is a creation and
-            // its change event has nothing before it. The lock still covers
-            // the row, so the stable lock order is unchanged.
-            let prevs: std::collections::HashMap<String, Value> = prev_rows
-                .into_iter()
-                .filter(|r| !r.get::<bool, _>(2))
-                .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
-                .collect();
-            let rows = sqlx::query(
-                "INSERT INTO entities
-                   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
-                    location, location_ambiguous)
-                 SELECT $1, e->>'id', e->'doc',
-                        ARRAY(SELECT jsonb_array_elements_text(e->'types')),
-                        CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
-                             ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
-                        (e->>'created')::timestamptz, (e->>'modified')::timestamptz,
-                        (e->>'expires')::timestamptz,
-                        CASE WHEN ST_IsValid(try_geomfromgeojson(e->>'location'))
-                             THEN try_geomfromgeojson(e->>'location') END,
-                        COALESCE((e->>'loc_ambiguous')::bool, false)
-                          OR (e->>'location' IS NOT NULL
-                              AND NOT COALESCE(ST_IsValid(try_geomfromgeojson(e->>'location')), false))
-                 FROM jsonb_array_elements($2::jsonb) AS e
-                 ON CONFLICT (tenant_id, id) DO UPDATE SET
-                        entity = EXCLUDED.entity, types = EXCLUDED.types,
-                        scopes = EXCLUDED.scopes, modified_at = EXCLUDED.modified_at,
-                        expires_at = EXCLUDED.expires_at, location = EXCLUDED.location,
-                        location_ambiguous = EXCLUDED.location_ambiguous,
-                        created_at = CASE WHEN entities.expires_at IS NOT NULL
-                                           AND entities.expires_at <= now()
-                                          THEN EXCLUDED.created_at
-                                          ELSE entities.created_at END,
-                        version = CASE WHEN entities.expires_at IS NOT NULL
-                                        AND entities.expires_at <= now()
-                                       THEN 1 ELSE entities.version + 1 END
-                 RETURNING id, (xmax = 0 OR version = 1) AS inserted,
-                           version, created_at::text",
-            )
-            .bind(tenant.as_str())
-            .bind(Value::Array(payload))
-            .fetch_all(&mut *tx)
-            .await?;
-            let mut created: std::collections::HashMap<String, bool> =
-                std::collections::HashMap::new();
-            let mut events = Vec::new();
-            for r in &rows {
-                let id: String = r.get(0);
-                let inserted: bool = r.get(1);
-                // the id came out of `items`, so the lookup answers; an
-                // outbox row for a document that is not there would carry no
-                // payload, so there is nothing to emit either way
-                if let (true, Some(doc)) = (
-                    self.outbox_on(),
-                    items.iter().find(|(i, _)| *i == id).map(|(_, d)| d),
-                ) {
-                    let e = extract(doc);
-                    events.push(change_event(
-                        tenant,
-                        if inserted { "create" } else { "update" },
-                        &id,
-                        &e.types,
-                        prevs.get(&id),
-                        Some(doc),
-                        r.get::<i64, _>(2),
-                        r.get::<&str, _>(3),
-                    ));
-                }
-                created.insert(id, inserted);
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        crate::store::pg::claim_tenant(&mut tx, tenant).await?;
+        // lock + before-images in one statement (ordered: stable lock order)
+        let prev_rows = sqlx::query(
+            "SELECT id, entity,
+                    (expires_at IS NOT NULL AND expires_at <= now()) AS expired
+             FROM entities WHERE tenant_id = $1 AND id = ANY($2)
+             ORDER BY id FOR UPDATE",
+        )
+        .bind(tenant.as_str())
+        .bind(&ids)
+        .fetch_all(&mut *tx)
+        .await?;
+        // 4.22: an expired row is already invalid, so it is not a
+        // before-image — the upsert that replaces it is a creation and
+        // its change event has nothing before it. The lock still covers
+        // the row, so the stable lock order is unchanged.
+        let prevs: std::collections::HashMap<String, Value> = prev_rows
+            .into_iter()
+            .filter(|r| !r.get::<bool, _>(2))
+            .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
+            .collect();
+        let rows = sqlx::query(
+            "INSERT INTO entities
+               (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
+                location, location_ambiguous)
+             SELECT $1, e->>'id', e->'doc',
+                    ARRAY(SELECT jsonb_array_elements_text(e->'types')),
+                    CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
+                         ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
+                    (e->>'created')::timestamptz, (e->>'modified')::timestamptz,
+                    (e->>'expires')::timestamptz,
+                    CASE WHEN ST_IsValid(try_geomfromgeojson(e->>'location'))
+                         THEN try_geomfromgeojson(e->>'location') END,
+                    COALESCE((e->>'loc_ambiguous')::bool, false)
+                      OR (e->>'location' IS NOT NULL
+                          AND NOT COALESCE(ST_IsValid(try_geomfromgeojson(e->>'location')), false))
+             FROM jsonb_array_elements($2::jsonb) AS e
+             ON CONFLICT (tenant_id, id) DO UPDATE SET
+                    entity = EXCLUDED.entity, types = EXCLUDED.types,
+                    scopes = EXCLUDED.scopes, modified_at = EXCLUDED.modified_at,
+                    expires_at = EXCLUDED.expires_at, location = EXCLUDED.location,
+                    location_ambiguous = EXCLUDED.location_ambiguous,
+                    created_at = CASE WHEN entities.expires_at IS NOT NULL
+                                       AND entities.expires_at <= now()
+                                      THEN EXCLUDED.created_at
+                                      ELSE entities.created_at END,
+                    version = CASE WHEN entities.expires_at IS NOT NULL
+                                    AND entities.expires_at <= now()
+                                   THEN 1 ELSE entities.version + 1 END
+             RETURNING id, (xmax = 0 OR version = 1) AS inserted,
+                       version, created_at::text",
+        )
+        .bind(tenant.as_str())
+        .bind(Value::Array(payload))
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut created: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        let mut events = Vec::new();
+        for r in &rows {
+            let id: String = r.get(0);
+            let inserted: bool = r.get(1);
+            // the id came out of `items`, so the lookup answers; an
+            // outbox row for a document that is not there would carry no
+            // payload, so there is nothing to emit either way
+            if let (true, Some(doc)) = (
+                self.outbox_on(),
+                items.iter().find(|(i, _)| *i == id).map(|(_, d)| d),
+            ) {
+                let e = extract(doc);
+                events.push(change_event(
+                    tenant,
+                    if inserted { "create" } else { "update" },
+                    &id,
+                    &e.types,
+                    prevs.get(&id),
+                    Some(doc),
+                    r.get::<i64, _>(2),
+                    r.get::<&str, _>(3),
+                ));
             }
-            super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
-            tx.commit().await?;
-            Ok(items
-                .iter()
-                .map(|(id, _)| {
-                    (
-                        created.get(id).copied().unwrap_or(false),
-                        prevs.get(id).cloned(),
-                    )
-                })
-                .collect())
-        })
+            created.insert(id, inserted);
+        }
+        super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
+        tx.commit().await?;
+        Ok(items
+            .iter()
+            .map(|(id, _)| {
+                (
+                    created.get(id).copied().unwrap_or(false),
+                    prevs.get(id).cloned(),
+                )
+            })
+            .collect())
     }
 
     /// Batch read-modify-write — ONE transaction,
@@ -1159,151 +1115,147 @@ impl PgEntityStore {
     /// applied per doc in Rust, and ONE multi-row UPDATE writeback. Per-item
     /// results align with `ids`: `None` = absent, `Some(Err)` = the closure
     /// rejected that item (its write is skipped, the rest proceed).
-    pub fn batch_mutate<E>(
+    pub async fn batch_mutate<E>(
         &self,
         tenant: &TenantId,
         ids: &[String],
         mut f: impl FnMut(&str, &mut Value) -> Result<(), E>,
     ) -> Result<Vec<Option<Result<(), E>>>, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let rows = sqlx::query(
-                // 4.22: an expired entity is invalid, so it is not a row this
-                // update can find — 5.6.9.4 is clause 5.6.3 run per item, and
-                // 5.6.3 on an absent entity is ResourceNotFound. Without the
-                // predicate the batch reported the id as updated, wrote to
-                // it, and emitted a change event for an entity every read
-                // refuses. ORDER BY id keeps the lock order stable.
-                "SELECT id, entity FROM entities
-                  WHERE tenant_id = $1 AND id = ANY($2)
-                    AND (expires_at IS NULL OR expires_at > now())
-                 ORDER BY id FOR UPDATE",
-            )
-            .bind(tenant.as_str())
-            .bind(ids)
-            .fetch_all(&mut *tx)
-            .await?;
-            let mut docs: std::collections::HashMap<String, Value> = rows
-                .into_iter()
-                .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
-                .collect();
-            let mut results: Vec<Option<Result<(), E>>> = Vec::with_capacity(ids.len());
-            // 5.6.9.4 is clause 5.6.3 run per item, so a repeated id applies
-            // its closure once per item onto the SAME document and the last
-            // application is the state the row must end at. The writeback
-            // below is one `UPDATE … FROM`, which updates a target row once
-            // from whichever source row the join happens to reach, so the
-            // statement is fed one row per id — the document as the whole
-            // batch left it — rather than one per input item.
-            let mut write_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            let mut changed: Vec<(String, Value, Value)> = Vec::new(); // id, before, after
-            for id in ids {
-                match docs.get_mut(id) {
-                    None => results.push(None),
-                    Some(doc) => {
-                        let before = doc.clone();
-                        match f(id, doc) {
-                            Err(e) => {
-                                *doc = before; // closure failed: discard its edits
-                                results.push(Some(Err(e)));
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let rows = sqlx::query(
+            // 4.22: an expired entity is invalid, so it is not a row this
+            // update can find — 5.6.9.4 is clause 5.6.3 run per item, and
+            // 5.6.3 on an absent entity is ResourceNotFound. Without the
+            // predicate the batch reported the id as updated, wrote to
+            // it, and emitted a change event for an entity every read
+            // refuses. ORDER BY id keeps the lock order stable.
+            "SELECT id, entity FROM entities
+          WHERE tenant_id = $1 AND id = ANY($2)
+            AND (expires_at IS NULL OR expires_at > now())
+         ORDER BY id FOR UPDATE",
+        )
+        .bind(tenant.as_str())
+        .bind(ids)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut docs: std::collections::HashMap<String, Value> = rows
+            .into_iter()
+            .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
+            .collect();
+        let mut results: Vec<Option<Result<(), E>>> = Vec::with_capacity(ids.len());
+        // 5.6.9.4 is clause 5.6.3 run per item, so a repeated id applies
+        // its closure once per item onto the SAME document and the last
+        // application is the state the row must end at. The writeback
+        // below is one `UPDATE … FROM`, which updates a target row once
+        // from whichever source row the join happens to reach, so the
+        // statement is fed one row per id — the document as the whole
+        // batch left it — rather than one per input item.
+        let mut write_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut changed: Vec<(String, Value, Value)> = Vec::new(); // id, before, after
+        for id in ids {
+            match docs.get_mut(id) {
+                None => results.push(None),
+                Some(doc) => {
+                    let before = doc.clone();
+                    match f(id, doc) {
+                        Err(e) => {
+                            *doc = before; // closure failed: discard its edits
+                            results.push(Some(Err(e)));
+                        }
+                        Ok(()) => {
+                            if *doc != before {
+                                write_ids.insert(id.as_str());
+                                changed.push((id.clone(), before, doc.clone()));
                             }
-                            Ok(()) => {
-                                if *doc != before {
-                                    write_ids.insert(id.as_str());
-                                    changed.push((id.clone(), before, doc.clone()));
-                                }
-                                results.push(Some(Ok(())));
-                            }
+                            results.push(Some(Ok(())));
                         }
                     }
                 }
             }
-            let payload: Vec<Value> = write_ids
-                .iter()
-                .filter_map(|id| docs.get(*id).map(|doc| (*id, doc)))
-                .map(|(id, doc)| {
-                    let e = extract(doc);
-                    serde_json::json!({
-                        "id": id, "doc": doc, "types": e.types,
-                        "scopes": e.scopes, "modified": e.modified,
-                        "expires": e.expires, "location": e.location,
-                        "loc_ambiguous": e.location_ambiguous,
-                    })
+        }
+        let payload: Vec<Value> = write_ids
+            .iter()
+            .filter_map(|id| docs.get(*id).map(|doc| (*id, doc)))
+            .map(|(id, doc)| {
+                let e = extract(doc);
+                serde_json::json!({
+                    "id": id, "doc": doc, "types": e.types,
+                    "scopes": e.scopes, "modified": e.modified,
+                    "expires": e.expires, "location": e.location,
+                    "loc_ambiguous": e.location_ambiguous,
                 })
-                .collect();
-            if !payload.is_empty() {
-                let updated = sqlx::query(
-                    "UPDATE entities t SET
-                            entity = e->'doc',
-                            types = ARRAY(SELECT jsonb_array_elements_text(e->'types')),
-                            scopes = CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
-                                          ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
-                            modified_at = (e->>'modified')::timestamptz,
-                            expires_at = (e->>'expires')::timestamptz,
-                            location = CASE WHEN ST_IsValid(try_geomfromgeojson(e->>'location'))
-                                            THEN try_geomfromgeojson(e->>'location') END,
-                            location_ambiguous = COALESCE((e->>'loc_ambiguous')::bool, false)
-                              OR (e->>'location' IS NOT NULL
-                                  AND NOT COALESCE(ST_IsValid(try_geomfromgeojson(e->>'location')), false)),
-                            version = t.version + 1
-                     FROM jsonb_array_elements($2::jsonb) AS e
-                     WHERE t.tenant_id = $1 AND t.id = e->>'id'
-                     RETURNING t.id, t.version, t.created_at::text",
-                )
-                .bind(tenant.as_str())
-                .bind(Value::Array(payload))
-                .fetch_all(&mut *tx)
-                .await?;
-                if self.outbox_on() {
-                    let meta: std::collections::HashMap<String, (i64, String)> = updated
-                        .into_iter()
-                        .map(|r| {
-                            (
-                                r.get::<String, _>(0),
-                                (r.get::<i64, _>(1), r.get::<String, _>(2)),
-                            )
-                        })
-                        .collect();
-                    let events: Vec<Value> = changed
-                        .iter()
-                        .filter_map(|(id, before, after)| {
-                            let e = extract(after);
-                            let (version, incarnation) = meta.get(id)?;
-                            Some(change_event(
-                                tenant,
-                                "update",
-                                id,
-                                &e.types,
-                                Some(before),
-                                Some(after),
-                                *version,
-                                incarnation,
-                            ))
-                        })
-                        .collect();
-                    super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
-                }
+            })
+            .collect();
+        if !payload.is_empty() {
+            let updated = sqlx::query(
+                "UPDATE entities t SET
+                    entity = e->'doc',
+                    types = ARRAY(SELECT jsonb_array_elements_text(e->'types')),
+                    scopes = CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
+                                  ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
+                    modified_at = (e->>'modified')::timestamptz,
+                    expires_at = (e->>'expires')::timestamptz,
+                    location = CASE WHEN ST_IsValid(try_geomfromgeojson(e->>'location'))
+                                    THEN try_geomfromgeojson(e->>'location') END,
+                    location_ambiguous = COALESCE((e->>'loc_ambiguous')::bool, false)
+                      OR (e->>'location' IS NOT NULL
+                          AND NOT COALESCE(ST_IsValid(try_geomfromgeojson(e->>'location')), false)),
+                    version = t.version + 1
+             FROM jsonb_array_elements($2::jsonb) AS e
+             WHERE t.tenant_id = $1 AND t.id = e->>'id'
+             RETURNING t.id, t.version, t.created_at::text",
+            )
+            .bind(tenant.as_str())
+            .bind(Value::Array(payload))
+            .fetch_all(&mut *tx)
+            .await?;
+            if self.outbox_on() {
+                let meta: std::collections::HashMap<String, (i64, String)> = updated
+                    .into_iter()
+                    .map(|r| {
+                        (
+                            r.get::<String, _>(0),
+                            (r.get::<i64, _>(1), r.get::<String, _>(2)),
+                        )
+                    })
+                    .collect();
+                let events: Vec<Value> = changed
+                    .iter()
+                    .filter_map(|(id, before, after)| {
+                        let e = extract(after);
+                        let (version, incarnation) = meta.get(id)?;
+                        Some(change_event(
+                            tenant,
+                            "update",
+                            id,
+                            &e.types,
+                            Some(before),
+                            Some(after),
+                            *version,
+                            incarnation,
+                        ))
+                    })
+                    .collect();
+                super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
             }
-            tx.commit().await?;
-            Ok(results)
-        })
+        }
+        tx.commit().await?;
+        Ok(results)
     }
 
     /// Current row version (test hook for the version-monotonicity assertions).
     #[cfg(any(test, feature = "test-kit"))]
-    pub fn version(&self, tenant: &TenantId, id: &str) -> Result<Option<i64>, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let row = sqlx::query("SELECT version FROM entities WHERE tenant_id = $1 AND id = $2")
-                .bind(tenant.as_str())
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(row.map(|r| r.get::<i64, _>(0)))
-        })
+    pub async fn version(&self, tenant: &TenantId, id: &str) -> Result<Option<i64>, sqlx::Error> {
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let row = sqlx::query("SELECT version FROM entities WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant.as_str())
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(row.map(|r| r.get::<i64, _>(0)))
     }
 }
 

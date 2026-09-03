@@ -30,8 +30,9 @@ use std::collections::HashMap;
 /// 5.5.14's one allowance for other components — they "shall only be allowed
 /// to update the expiry timestamp" — is why 5.14.2 Update is NOT routed
 /// through here: extending a lifetime is what the clause lets a stranger do.
-fn mine(st: &AppState, tenant: &TenantId, headers: &HeaderMap, id: &str) -> ApiResult<Value> {
-    map_get(st, tenant, id)?
+async fn mine(st: &AppState, tenant: &TenantId, headers: &HeaderMap, id: &str) -> ApiResult<Value> {
+    map_get(st, tenant, id)
+        .await?
         .filter(|doc| crate::policy::belongs_to(doc, &crate::policy::subject_of(tenant, headers)))
         .ok_or_else(|| NgsiError::ResourceNotFound(format!("EntityMap {id} not found")).into())
 }
@@ -49,7 +50,7 @@ pub async fn retrieve_entity_map(
         gate!(st, &tenant, &headers, "5.14.1", ids: &[&id]).await?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
-        let mut doc = mine(&st, &tenant, &headers, &id)?;
+        let mut doc = mine(&st, &tenant, &headers, &id).await?;
         // 5.2.39 defines no member for whose map this is
         crate::policy::strip_internal(&mut doc);
         Ok::<_, ApiError>(respond(StatusCode::OK, doc, &ctx, accept, &tenant))
@@ -75,7 +76,8 @@ pub async fn update_entity_map(
         let obj = frag.as_object().ok_or_else(|| {
             NgsiError::BadRequestData("EntityMap fragment must be a JSON object".into())
         })?;
-        let mut doc = map_get(&st, &tenant, &id)?
+        let mut doc = map_get(&st, &tenant, &id)
+            .await?
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("EntityMap {id} not found")))?;
         if let Some(e) = obj.get("expiresAt") {
             let s = e.as_str().filter(|s| dt(s).is_some()).ok_or_else(|| {
@@ -83,7 +85,7 @@ pub async fn update_entity_map(
             })?;
             doc["expiresAt"] = json!(s);
         }
-        map_put(&st, &tenant, doc)?;
+        map_put(&st, &tenant, doc).await?;
         Ok::<_, ApiError>(no_content(&tenant))
     };
     go.await.unwrap_or_else(|e| e.into_response())
@@ -100,8 +102,8 @@ pub async fn delete_entity_map(
     let go = async {
         let tenant = open_map(&params, &headers, &id)?;
         gate!(st, &tenant, &headers, "5.14.3", ids: &[&id]).await?;
-        mine(&st, &tenant, &headers, &id)?;
-        if !map_delete(&st, &tenant, &id)? {
+        mine(&st, &tenant, &headers, &id).await?;
+        if !map_delete(&st, &tenant, &id).await? {
             return Err(NgsiError::ResourceNotFound(format!("EntityMap {id} not found")).into());
         }
         Ok::<_, ApiError>(no_content(&tenant))
@@ -283,6 +285,7 @@ mod tests {
                         "type": ["https://uri.etsi.org/ngsi-ld/default-context/Vehicle"],
                     }),
                 )
+                .await
                 .expect("seed");
         }
         let doc = build_query_map(

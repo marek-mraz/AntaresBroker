@@ -14,7 +14,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 
-use super::entity::{check_ceiling, wait, MAX_UNDECIDED_ROWS};
+use super::entity::{check_ceiling, MAX_UNDECIDED_ROWS};
 
 /// Which doc table a resource kind lives in.
 #[derive(Clone, Copy, Debug)]
@@ -370,7 +370,7 @@ impl PgDocStore {
     /// a read-then-write would let two concurrent creates of the same
     /// client-supplied id both report created, and the second would silently
     /// overwrite the first.
-    pub fn create(
+    pub async fn create(
         &self,
         tenant: &TenantId,
         kind: DocKind,
@@ -378,25 +378,23 @@ impl PgDocStore {
         doc: &Value,
     ) -> Result<bool, sqlx::Error> {
         let conflict = " ON CONFLICT (tenant_id, id) DO NOTHING RETURNING true AS created";
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
-            let created = insert_doc(&mut tx, tenant, kind, id, doc, conflict)
-                .await?
-                .is_some();
-            // a losing INSERT must not rebuild the winner's index rows
-            if created && matches!(kind, DocKind::Registration) {
-                rebuild_csource_index(&mut tx, tenant, id, doc).await?;
-            }
-            tx.commit().await?;
-            Ok(created)
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        crate::store::pg::claim_tenant(&mut tx, tenant).await?;
+        let created = insert_doc(&mut tx, tenant, kind, id, doc, conflict)
+            .await?
+            .is_some();
+        // a losing INSERT must not rebuild the winner's index rows
+        if created && matches!(kind, DocKind::Registration) {
+            rebuild_csource_index(&mut tx, tenant, id, doc).await?;
+        }
+        tx.commit().await?;
+        Ok(created)
     }
 
     /// Upsert one doc, refreshing the extracted columns. `Ok(true)` = it
     /// existed before.
-    pub fn upsert(
+    pub async fn upsert(
         &self,
         tenant: &TenantId,
         kind: DocKind,
@@ -419,24 +417,22 @@ impl PgDocStore {
                  RETURNING (xmax <> 0) AS existed"
             )
         };
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
-            // INSERT … ON CONFLICT DO UPDATE … RETURNING always answers with
-            // the row; no row means the statement stopped being an upsert.
-            let existed = insert_doc(&mut tx, tenant, kind, id, doc, &conflict)
-                .await?
-                .ok_or(sqlx::Error::RowNotFound)?;
-            if matches!(kind, DocKind::Registration) {
-                rebuild_csource_index(&mut tx, tenant, id, doc).await?;
-            }
-            tx.commit().await?;
-            Ok(existed)
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        crate::store::pg::claim_tenant(&mut tx, tenant).await?;
+        // INSERT … ON CONFLICT DO UPDATE … RETURNING always answers with
+        // the row; no row means the statement stopped being an upsert.
+        let existed = insert_doc(&mut tx, tenant, kind, id, doc, &conflict)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+        if matches!(kind, DocKind::Registration) {
+            rebuild_csource_index(&mut tx, tenant, id, doc).await?;
+        }
+        tx.commit().await?;
+        Ok(existed)
     }
 
-    pub fn get(
+    pub async fn get(
         &self,
         tenant: &TenantId,
         kind: DocKind,
@@ -447,17 +443,15 @@ impl PgDocStore {
             kind.doc_column(),
             kind.table()
         );
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let row = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                .bind(tenant.as_str())
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(row.map(|r| r.get::<Value, _>(0)))
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(tenant.as_str())
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(row.map(|r| r.get::<Value, _>(0)))
     }
 
     /// Read-modify-write in ONE transaction under the row lock (the entity
@@ -487,7 +481,7 @@ impl PgDocStore {
     /// `notification` is a mandatory member (5.2.12) and `jsonb_set` on a
     /// path with no parent is a no-op, so a document that somehow lacks it is
     /// left alone rather than grown a synthetic one.
-    pub fn record_delivery(
+    pub async fn record_delivery(
         &self,
         tenant: &TenantId,
         kind: DocKind,
@@ -517,7 +511,7 @@ impl PgDocStore {
              WHERE d.tenant_id = $1 AND d.id = prev.locked_id
              RETURNING d.{col}, prev.ls"
         );
-        wait(async move {
+        async move {
             let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -533,10 +527,11 @@ impl PgDocStore {
             let prev: Option<Value> = row.get(1);
             tx.commit().await?;
             Ok(Some((doc, prev)))
-        })
+        }
+        .await
     }
 
-    pub fn mutate<T, E>(
+    pub async fn mutate<T, E>(
         &self,
         tenant: &TenantId,
         kind: DocKind,
@@ -558,7 +553,7 @@ impl PgDocStore {
         } else {
             format!("UPDATE {table} SET {col} = $3 WHERE tenant_id = $1 AND id = $2")
         };
-        wait(async move {
+        async move {
             let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query(sqlx::AssertSqlSafe(select.clone()))
@@ -605,26 +600,30 @@ impl PgDocStore {
                 // closure rejected the change: nothing written, lock released
                 Err(e) => Ok(Some(Err(e))),
             }
-        })
+        }
+        .await
     }
 
-    pub fn delete(&self, tenant: &TenantId, kind: DocKind, id: &str) -> Result<bool, sqlx::Error> {
+    pub async fn delete(
+        &self,
+        tenant: &TenantId,
+        kind: DocKind,
+        id: &str,
+    ) -> Result<bool, sqlx::Error> {
         let sql = format!(
             "DELETE FROM {} WHERE tenant_id = $1 AND id = $2",
             kind.table()
         );
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let done = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                .bind(tenant.as_str())
-                .bind(id)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
-            tx.commit().await?;
-            Ok(done == 1)
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let done = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(tenant.as_str())
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+        Ok(done == 1)
     }
 
     /// One id-ordered page of docs: ids strictly greater than `after`, at
@@ -641,7 +640,7 @@ impl PgDocStore {
     /// id because a document id is a URI and a URI is never empty. A row
     /// stored with an empty id would be returned by `list` and skipped by
     /// every page of this walk.
-    pub fn list_page(
+    pub async fn list_page(
         &self,
         tenant: &TenantId,
         kind: DocKind,
@@ -653,18 +652,16 @@ impl PgDocStore {
             kind.doc_column(),
             kind.table()
         );
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let rows = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                .bind(tenant.as_str())
-                .bind(after.unwrap_or(""))
-                .bind(limit)
-                .fetch_all(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(tenant.as_str())
+            .bind(after.unwrap_or(""))
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
     }
 
     /// One id-ordered window of docs and the size of the whole set:
@@ -676,7 +673,7 @@ impl PgDocStore {
     /// statements run in one transaction under the same `set_tenant`, so
     /// the count and the page describe the same set — a count taken outside
     /// it could report a total no page of this read ever adds up to.
-    pub fn list_slice(
+    pub async fn list_slice(
         &self,
         tenant: &TenantId,
         kind: DocKind,
@@ -689,25 +686,23 @@ impl PgDocStore {
             kind.table()
         );
         let count_sql = format!("SELECT count(*) FROM {} WHERE tenant_id = $1", kind.table());
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql))
-                .bind(tenant.as_str())
-                .fetch_one(&mut *tx)
-                .await?;
-            let rows = sqlx::query(sqlx::AssertSqlSafe(page_sql))
-                .bind(tenant.as_str())
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok((
-                rows.into_iter().map(|r| r.get::<Value, _>(0)).collect(),
-                total,
-            ))
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql))
+            .bind(tenant.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(page_sql))
+            .bind(tenant.as_str())
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok((
+            rows.into_iter().map(|r| r.get::<Value, _>(0)).collect(),
+            total,
+        ))
     }
 
     /// Every doc of one kind for one tenant, id-ordered.
@@ -717,24 +712,22 @@ impl PgDocStore {
     /// broker target is the broker's memory, not the database's. A tenant that
     /// reaches the ceiling is refused with TooManyResults (5.5.6) rather than
     /// served a silent prefix.
-    pub fn list(&self, tenant: &TenantId, kind: DocKind) -> Result<Vec<Value>, sqlx::Error> {
+    pub async fn list(&self, tenant: &TenantId, kind: DocKind) -> Result<Vec<Value>, sqlx::Error> {
         let sql = format!(
             "SELECT {} FROM {} WHERE tenant_id = $1 ORDER BY id LIMIT $2",
             kind.doc_column(),
             kind.table()
         );
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let rows = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                .bind(tenant.as_str())
-                .bind(MAX_UNDECIDED_ROWS)
-                .fetch_all(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            check_ceiling(false, rows.len(), MAX_UNDECIDED_ROWS)?;
-            Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(tenant.as_str())
+            .bind(MAX_UNDECIDED_ROWS)
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        check_ceiling(false, rows.len(), MAX_UNDECIDED_ROWS)?;
+        Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
     }
 
     /// 5.12: the registrations that may take part in an operation on these
@@ -762,7 +755,7 @@ impl PgDocStore {
     ///
     /// Bounded like every other read (5.5.6): a tenant whose candidate set
     /// reaches the ceiling is refused rather than served a silent prefix.
-    pub fn matching_registrations(
+    pub async fn matching_registrations(
         &self,
         tenant: &TenantId,
         ids: Option<&[String]>,
@@ -798,26 +791,24 @@ impl PgDocStore {
               ORDER BY r.id LIMIT ${}",
             n + 1
         );
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(tenant.as_str());
-            if let Some(types) = types {
-                q = q.bind(types);
-            }
-            if let Some(ids) = ids {
-                q = q.bind(ids);
-            }
-            let rows = q.bind(MAX_UNDECIDED_ROWS).fetch_all(&mut *tx).await?;
-            tx.commit().await?;
-            check_ceiling(false, rows.len(), MAX_UNDECIDED_ROWS)?;
-            Ok(rows.into_iter().map(|r| r.get::<Value, _>(1)).collect())
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(tenant.as_str());
+        if let Some(types) = types {
+            q = q.bind(types);
+        }
+        if let Some(ids) = ids {
+            q = q.bind(ids);
+        }
+        let rows = q.bind(MAX_UNDECIDED_ROWS).fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        check_ceiling(false, rows.len(), MAX_UNDECIDED_ROWS)?;
+        Ok(rows.into_iter().map(|r| r.get::<Value, _>(1)).collect())
     }
 
     /// Bookkeeping columns straight from the row (test hook: rows are truth).
     #[cfg(any(test, feature = "test-kit"))]
-    pub fn status_row(
+    pub async fn status_row(
         &self,
         tenant: &TenantId,
         kind: DocKind,
@@ -827,17 +818,15 @@ impl PgDocStore {
             "SELECT is_active, times_sent FROM {} WHERE tenant_id = $1 AND id = $2",
             kind.table()
         );
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let row = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                .bind(tenant.as_str())
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(row.map(|r| (r.get(0), r.get(1))))
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(tenant.as_str())
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(row.map(|r| (r.get(0), r.get(1))))
     }
 
     // jsonldContexts — a `tenant_id` GENERATED from the row's kind and its
@@ -861,91 +850,89 @@ impl PgDocStore {
     /// ceiling evicts the oldest Cached rows. `Hosted` and
     /// `ImplicitlyCreated` rows are resources the broker serves on demand
     /// (5.13.2, 5.13.4), not cache, and are never evicted.
-    pub fn context_put(
+    pub async fn context_put(
         &self,
         tenant: Option<&TenantId>,
         id: &str,
         doc: &Value,
         kind: &str,
     ) -> Result<(), sqlx::Error> {
-        wait(async {
-            let mut tx = self.pool.begin().await?;
-            set_context_tenant(&mut tx, tenant).await?;
-            // `xmax` is zero on a fresh row and the locking transaction's id
-            // on the conflict path: the eviction then runs only when the table
-            // actually grew, never on a usage bump rewriting a row in place.
-            // The `WHERE` on the conflict path is the write half of the rule:
-            // a row another Tenant owns is not replaced, the statement returns
-            // no row, and `fetch_one` raises rather than silently doing
-            // nothing. Nothing in the broker reaches it — every id is minted
-            // by the caller — so it is a backstop, and it is the one the
-            // driver contract probes.
-            let inserted: bool = sqlx::query_scalar(
-                "INSERT INTO jsonld_contexts (id, body, kind) VALUES ($1, $2, $3)
-                 ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body, kind = EXCLUDED.kind
-                 WHERE jsonld_contexts.tenant_id IS NOT DISTINCT FROM $4
-                    OR jsonld_contexts.tenant_id IS NULL
-                 RETURNING xmax::text = '0'",
+        let mut tx = self.pool.begin().await?;
+        set_context_tenant(&mut tx, tenant).await?;
+        // `xmax` is zero on a fresh row and the locking transaction's id
+        // on the conflict path: the eviction then runs only when the table
+        // actually grew, never on a usage bump rewriting a row in place.
+        // The `WHERE` on the conflict path is the write half of the rule:
+        // a row another Tenant owns is not replaced, the statement returns
+        // no row, and `fetch_one` raises rather than silently doing
+        // nothing. Nothing in the broker reaches it — every id is minted
+        // by the caller — so it is a backstop, and it is the one the
+        // driver contract probes.
+        let inserted: bool = sqlx::query_scalar(
+            "INSERT INTO jsonld_contexts (id, body, kind) VALUES ($1, $2, $3)
+             ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body, kind = EXCLUDED.kind
+             WHERE jsonld_contexts.tenant_id IS NOT DISTINCT FROM $4
+                OR jsonld_contexts.tenant_id IS NULL
+             RETURNING xmax::text = '0'",
+        )
+        .bind(id)
+        .bind(doc)
+        .bind(kind)
+        .bind(tenant.map(TenantId::as_str))
+        .fetch_one(&mut *tx)
+        .await?;
+        if inserted && kind == "Cached" {
+            sqlx::query(
+                "DELETE FROM jsonld_contexts WHERE id IN (
+                   SELECT id FROM jsonld_contexts WHERE kind = 'Cached'
+                    ORDER BY created_at DESC, id DESC OFFSET $1)",
             )
-            .bind(id)
-            .bind(doc)
-            .bind(kind)
-            .bind(tenant.map(TenantId::as_str))
-            .fetch_one(&mut *tx)
+            .bind(crate::store::MAX_CACHED_CONTEXTS as i64)
+            .execute(&mut *tx)
             .await?;
-            if inserted && kind == "Cached" {
-                sqlx::query(
-                    "DELETE FROM jsonld_contexts WHERE id IN (
-                       SELECT id FROM jsonld_contexts WHERE kind = 'Cached'
-                        ORDER BY created_at DESC, id DESC OFFSET $1)",
-                )
-                .bind(crate::store::MAX_CACHED_CONTEXTS as i64)
-                .execute(&mut *tx)
-                .await?;
-            }
-            tx.commit().await?;
-            Ok(())
-        })
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
-    pub fn context_get(
+    pub async fn context_get(
         &self,
         tenant: Option<&TenantId>,
         id: &str,
     ) -> Result<Option<Value>, sqlx::Error> {
-        wait(async {
-            let mut tx = self.pool.begin().await?;
-            set_context_tenant(&mut tx, tenant).await?;
-            let row = sqlx::query(
-                "SELECT body FROM jsonld_contexts
-                  WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2)",
-            )
-            .bind(id)
-            .bind(tenant.map(TenantId::as_str))
-            .fetch_optional(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            Ok(row.map(|r| r.get::<Value, _>(0)))
-        })
+        let mut tx = self.pool.begin().await?;
+        set_context_tenant(&mut tx, tenant).await?;
+        let row = sqlx::query(
+            "SELECT body FROM jsonld_contexts
+              WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2)",
+        )
+        .bind(id)
+        .bind(tenant.map(TenantId::as_str))
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(row.map(|r| r.get::<Value, _>(0)))
     }
 
-    pub fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, sqlx::Error> {
-        wait(async {
-            let mut tx = self.pool.begin().await?;
-            set_context_tenant(&mut tx, tenant).await?;
-            let gone = sqlx::query(
-                "DELETE FROM jsonld_contexts
-                  WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2)",
-            )
-            .bind(id)
-            .bind(tenant.map(TenantId::as_str))
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
-                == 1;
-            tx.commit().await?;
-            Ok(gone)
-        })
+    pub async fn context_delete(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        set_context_tenant(&mut tx, tenant).await?;
+        let gone = sqlx::query(
+            "DELETE FROM jsonld_contexts
+              WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2)",
+        )
+        .bind(id)
+        .bind(tenant.map(TenantId::as_str))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        tx.commit().await?;
+        Ok(gone)
     }
 
     /// Every row without its `@context` document: `- 'body'` drops that
@@ -953,20 +940,21 @@ impl PgDocStore {
     /// decoded and never resident. A row's body may be 5 MiB and only the
     /// `Cached` rows are capped in number, so selecting whole rows here was
     /// a multi-gigabyte read on the boot path.
-    pub fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, sqlx::Error> {
-        wait(async {
-            let mut tx = self.pool.begin().await?;
-            set_context_tenant(&mut tx, tenant).await?;
-            let rows = sqlx::query(
-                "SELECT body - 'body' FROM jsonld_contexts
-                  WHERE tenant_id IS NULL OR tenant_id = $1 ORDER BY id",
-            )
-            .bind(tenant.map(TenantId::as_str))
-            .fetch_all(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
-        })
+    pub async fn context_list_meta(
+        &self,
+        tenant: Option<&TenantId>,
+    ) -> Result<Vec<Value>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        set_context_tenant(&mut tx, tenant).await?;
+        let rows = sqlx::query(
+            "SELECT body - 'body' FROM jsonld_contexts
+              WHERE tenant_id IS NULL OR tenant_id = $1 ORDER BY id",
+        )
+        .bind(tenant.map(TenantId::as_str))
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
     }
 }
 

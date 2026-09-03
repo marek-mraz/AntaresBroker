@@ -162,7 +162,7 @@ async fn deleted_subscription_stops_notifying() {
     // allow it for this process the way the ETSI stacks do
     antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("test".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let st = st;
 
     let post = |path: &'static str, body: String| {

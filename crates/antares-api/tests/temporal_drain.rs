@@ -26,69 +26,71 @@ struct Counting {
     events: AtomicUsize,
 }
 
+#[async_trait::async_trait]
 impl TemporalDriver for Counting {
-    fn event_list(&self, evs: &[TemporalEvent]) -> Result<(), NgsiError> {
+    async fn event_list(&self, evs: &[TemporalEvent]) -> Result<(), NgsiError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.events.fetch_add(evs.len(), Ordering::SeqCst);
-        TemporalDriver::event_list(&*self.inner, evs)
+        TemporalDriver::event_list(&*self.inner, evs).await
     }
-    fn temporal_append(
+    async fn temporal_append(
         &self,
         t: &TenantId,
         id: &str,
         shell: &Value,
         additions: &Value,
     ) -> Result<(), NgsiError> {
-        TemporalDriver::temporal_append(&*self.inner, t, id, shell, additions)
+        TemporalDriver::temporal_append(&*self.inner, t, id, shell, additions).await
     }
-    fn query_temporal(
+    async fn query_temporal(
         &self,
         t: &TenantId,
         f: &filter::TemporalFilter<'_>,
     ) -> Result<filter::TemporalOutcome, NgsiError> {
-        TemporalDriver::query_temporal(&*self.inner, t, f)
+        TemporalDriver::query_temporal(&*self.inner, t, f).await
     }
-    fn get_temporal(
+    async fn get_temporal(
         &self,
         t: &TenantId,
         id: &str,
         f: &filter::TemporalFilter<'_>,
     ) -> Result<Option<Value>, NgsiError> {
-        TemporalDriver::get_temporal(&*self.inner, t, id, f)
+        TemporalDriver::get_temporal(&*self.inner, t, id, f).await
     }
-    fn get(&self, t: &TenantId, id: &str) -> Result<Option<Value>, NgsiError> {
-        TemporalDriver::get(&*self.inner, t, id)
+    async fn get(&self, t: &TenantId, id: &str) -> Result<Option<Value>, NgsiError> {
+        TemporalDriver::get(&*self.inner, t, id).await
     }
-    fn create(&self, t: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
-        TemporalDriver::create(&*self.inner, t, id, doc)
+    async fn create(&self, t: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
+        TemporalDriver::create(&*self.inner, t, id, doc).await
     }
-    fn upsert(&self, t: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
-        TemporalDriver::upsert(&*self.inner, t, id, doc)
+    async fn upsert(&self, t: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
+        TemporalDriver::upsert(&*self.inner, t, id, doc).await
     }
-    fn delete(&self, t: &TenantId, id: &str) -> Result<bool, NgsiError> {
-        TemporalDriver::delete(&*self.inner, t, id)
+    async fn delete(&self, t: &TenantId, id: &str) -> Result<bool, NgsiError> {
+        TemporalDriver::delete(&*self.inner, t, id).await
     }
-    fn list(&self, t: &TenantId) -> Result<Vec<Value>, NgsiError> {
-        TemporalDriver::list(&*self.inner, t)
+    async fn list(&self, t: &TenantId) -> Result<Vec<Value>, NgsiError> {
+        TemporalDriver::list(&*self.inner, t).await
     }
-    fn mutate_boxed<'a>(
+    async fn mutate_boxed<'a>(
         &self,
         t: &TenantId,
         id: &str,
         f: MutateFn<'a>,
     ) -> Result<Option<Result<(), ()>>, NgsiError> {
-        TemporalDriver::mutate_boxed(&*self.inner, t, id, f)
+        TemporalDriver::mutate_boxed(&*self.inner, t, id, f).await
     }
 }
 
 /// A driver whose drain always fails.
 struct Failing;
 
+#[async_trait::async_trait]
 impl TemporalDriver for Failing {
-    fn event_list(&self, _evs: &[TemporalEvent]) -> Result<(), NgsiError> {
+    async fn event_list(&self, _evs: &[TemporalEvent]) -> Result<(), NgsiError> {
         Err(NgsiError::InternalError("history store down".into()))
     }
-    fn temporal_append(
+    async fn temporal_append(
         &self,
         _t: &TenantId,
         _id: &str,
@@ -97,14 +99,14 @@ impl TemporalDriver for Failing {
     ) -> Result<(), NgsiError> {
         Err(NgsiError::InternalError("history store down".into()))
     }
-    fn query_temporal(
+    async fn query_temporal(
         &self,
         _t: &TenantId,
         _f: &filter::TemporalFilter<'_>,
     ) -> Result<filter::TemporalOutcome, NgsiError> {
         Err(NgsiError::InternalError("history store down".into()))
     }
-    fn get_temporal(
+    async fn get_temporal(
         &self,
         _t: &TenantId,
         _id: &str,
@@ -112,22 +114,22 @@ impl TemporalDriver for Failing {
     ) -> Result<Option<Value>, NgsiError> {
         Err(NgsiError::InternalError("history store down".into()))
     }
-    fn get(&self, _t: &TenantId, _id: &str) -> Result<Option<Value>, NgsiError> {
+    async fn get(&self, _t: &TenantId, _id: &str) -> Result<Option<Value>, NgsiError> {
         Ok(None)
     }
-    fn create(&self, _t: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
+    async fn create(&self, _t: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
         Ok(false)
     }
-    fn upsert(&self, _t: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
+    async fn upsert(&self, _t: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
         Ok(false)
     }
-    fn delete(&self, _t: &TenantId, _id: &str) -> Result<bool, NgsiError> {
+    async fn delete(&self, _t: &TenantId, _id: &str) -> Result<bool, NgsiError> {
         Ok(false)
     }
-    fn list(&self, _t: &TenantId) -> Result<Vec<Value>, NgsiError> {
+    async fn list(&self, _t: &TenantId) -> Result<Vec<Value>, NgsiError> {
         Ok(Vec::new())
     }
-    fn mutate_boxed<'a>(
+    async fn mutate_boxed<'a>(
         &self,
         _t: &TenantId,
         _id: &str,
@@ -137,7 +139,7 @@ impl TemporalDriver for Failing {
     }
 }
 
-fn counting_state() -> (AppState, Arc<Counting>) {
+async fn counting_state() -> (AppState, Arc<Counting>) {
     let store = Arc::new(AnyStore::Mem(Store::default()));
     let counting = Arc::new(Counting {
         inner: store.clone(),
@@ -145,7 +147,7 @@ fn counting_state() -> (AppState, Arc<Counting>) {
         events: AtomicUsize::new(0),
     });
     let mut st = AppState::with_drivers("me".into(), store, counting.clone(), "memory");
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     (st, counting)
 }
 
@@ -181,7 +183,7 @@ fn entity(n: u32) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_batch_write_drains_in_one_driver_call() {
-    let (st, c) = counting_state();
+    let (st, c) = counting_state().await;
     let (status, body) = req(
         &st,
         "POST",
@@ -215,7 +217,7 @@ async fn a_batch_write_drains_in_one_driver_call() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unchanged_re_put_produces_no_events() {
-    let (st, c) = counting_state();
+    let (st, c) = counting_state().await;
     let (status, _) = req(&st, "POST", "/ngsi-ld/v1/entities", Some(entity(7))).await;
     assert_eq!(status, 201);
     let after_create = c.events.load(Ordering::SeqCst);
@@ -244,7 +246,7 @@ async fn an_unchanged_re_put_produces_no_events() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn reads_never_drain() {
-    let (st, c) = counting_state();
+    let (st, c) = counting_state().await;
     let (status, _) = req(&st, "GET", "/ngsi-ld/v1/entities?type=D", None).await;
     assert_eq!(status, 200);
     assert_eq!(c.calls.load(Ordering::SeqCst), 0);
@@ -254,7 +256,7 @@ async fn reads_never_drain() {
 async fn a_failing_drain_keeps_the_2xx_and_is_counted() {
     let store = Arc::new(AnyStore::Mem(Store::default()));
     let mut st = AppState::with_drivers("me".into(), store, Arc::new(Failing), "memory");
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let before = antares_api::history::drain_errors();
     let (status, body) = req(&st, "POST", "/ngsi-ld/v1/entities", Some(entity(9))).await;
     assert_eq!(
@@ -284,7 +286,7 @@ async fn a_failing_drain_keeps_the_2xx_and_is_counted() {
 /// both and its modifiedAt still moves.
 #[tokio::test(flavor = "multi_thread")]
 async fn observed_mode_records_only_observed_instances() {
-    let (mut st, c) = counting_state();
+    let (mut st, c) = counting_state().await;
     st.temporal_record = TemporalRecord::Observed;
     let (status, _) = req(&st, "POST", "/ngsi-ld/v1/entities", Some(entity(11))).await;
     assert_eq!(status, 201);
@@ -340,7 +342,7 @@ async fn observed_mode_records_only_observed_instances() {
 /// merely lenient.
 #[tokio::test(flavor = "multi_thread")]
 async fn all_mode_records_unobserved_instances_too() {
-    let (st, c) = counting_state();
+    let (st, c) = counting_state().await;
     assert_eq!(
         st.temporal_record,
         TemporalRecord::All,
@@ -364,7 +366,7 @@ async fn all_mode_records_unobserved_instances_too() {
 /// API's own write path keep working.
 #[tokio::test(flavor = "multi_thread")]
 async fn none_mode_records_nothing() {
-    let (mut st, c) = counting_state();
+    let (mut st, c) = counting_state().await;
     st.temporal_record = TemporalRecord::None;
     let (status, _) = req(&st, "POST", "/ngsi-ld/v1/entities", Some(entity(13))).await;
     assert_eq!(status, 201);

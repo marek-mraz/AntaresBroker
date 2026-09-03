@@ -44,7 +44,7 @@ async fn get(st: &AppState, uri: &str) -> (StatusCode, Value, Option<String>) {
     (status, body, count)
 }
 
-fn seed(st: &AppState, n: usize) {
+async fn seed(st: &AppState, n: usize) {
     let tenant = TenantId::new("default").expect("tenant");
     for i in 0..n {
         let id = format!("urn:ngsi-ld:Subscription:list-{i:03}");
@@ -59,6 +59,7 @@ fn seed(st: &AppState, n: usize) {
                     "notification": {"endpoint": {"uri": "http://sink.invalid/n"}},
                 }),
             )
+            .await
             .expect("seed subscription");
     }
 }
@@ -75,7 +76,7 @@ fn seed(st: &AppState, n: usize) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tenant_over_the_document_ceiling_can_still_list_a_page_of_subscriptions() {
     let mut st = AppState::new("me".into());
-    seed(&st, 6);
+    seed(&st, 6).await;
     // Refuses every whole-tenant `list`, the way the Postgres arm refuses
     // one past its ceiling. The windowed read is not refused.
     st.store = Arc::new(Double::flaky_list(st.store.clone(), usize::MAX));
@@ -107,7 +108,7 @@ async fn a_tenant_over_the_document_ceiling_can_still_list_a_page_of_subscriptio
 #[tokio::test(flavor = "multi_thread")]
 async fn the_pushed_down_window_is_the_window_the_client_asked_for() {
     let st = AppState::new("me".into());
-    seed(&st, 5);
+    seed(&st, 5).await;
 
     let (status, body, _) = get(&st, "/ngsi-ld/v1/subscriptions?limit=5&offset=0").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -161,7 +162,7 @@ async fn the_pushed_down_window_is_the_window_the_client_asked_for() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pushed_down_window_never_reaches_another_tenants_subscriptions() {
     let st = AppState::new("me".into());
-    seed(&st, 4);
+    seed(&st, 4).await;
 
     let resp = antares_api::router(st.clone())
         .oneshot(

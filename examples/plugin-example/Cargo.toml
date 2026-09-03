@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 antares-model = { workspace = true }
+async-trait = { workspace = true }
 antares-ql = { workspace = true }
 antares-store = { workspace = true }
 antares-api = { workspace = true }

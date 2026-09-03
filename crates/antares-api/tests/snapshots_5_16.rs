@@ -95,9 +95,9 @@ async fn wait_ready_h(st: &AppState, loc: &str, extra: &[(&str, &str)]) -> Value
     panic!("snapshot never left preparing");
 }
 
-fn state() -> AppState {
+async fn state() -> AppState {
     let mut st = AppState::new("antares-snap".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     st
 }
 
@@ -105,7 +105,7 @@ fn state() -> AppState {
 /// 5.2.41 output members (priority default 5, expiresAt, per-query details).
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_1_create_executes_queries_into_the_snapshot() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:s1", 80).await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:s2", 30).await;
 
@@ -182,7 +182,7 @@ async fn clause_5_16_1_create_executes_queries_into_the_snapshot() {
 /// "empty" ExecutionResultDetails entry.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_1_empty_result_yields_empty_status() {
-    let st = state();
+    let st = state().await;
     let snap = json!({"type": "Snapshot",
         "snapshotQueries": [{"type": "Query", "entities": [{"type": "Nothing"}]}]})
     .to_string();
@@ -207,7 +207,7 @@ async fn clause_5_16_1_empty_result_yields_empty_status() {
 /// snapshotQueries entries must NOT carry temporalQ; priority is 1..=10.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_2_41_create_validation() {
-    let st = state();
+    let st = state().await;
     for bad in [
         json!({"type": "Snapshot"}),
         json!({"type": "Snapshot", "snapshotQueries": [
@@ -252,7 +252,7 @@ async fn clause_5_2_41_create_validation() {
 /// floors the same suggestion at one second; a Snapshot is no different.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_2_41_a_zero_lifetime_does_not_create_a_snapshot_nobody_can_read() {
-    let st = state();
+    let st = state().await;
     let body = json!({"type": "Snapshot", "snapshotLifetime": "PT0S",
         "snapshotQueries": [{"type": "Query", "entities": [{"type": "V"}]}]})
     .to_string();
@@ -275,7 +275,7 @@ async fn clause_5_2_41_a_zero_lifetime_does_not_create_a_snapshot_nobody_can_rea
 /// snapshotQueries member in a fragment is 400; unknown snapshot 404.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_4_update_status() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:u1", 80).await;
     let snap = json!({"type": "Snapshot",
         "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})
@@ -322,7 +322,7 @@ async fn clause_5_16_4_update_status() {
 /// touch the clone. Clone bodies must not carry snapshotQueries.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_2_clone_and_5_16_5_delete() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:c1", 80).await;
     let snap = json!({"type": "Snapshot",
         "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})
@@ -402,7 +402,7 @@ async fn clause_5_16_2_clone_and_5_16_5_delete() {
 /// matching snapshots.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_7_purge_by_query() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:p1", 80).await;
     let mk = |prio: i64| {
         json!({"type": "Snapshot", "snapshotPriority": prio,
@@ -439,7 +439,7 @@ async fn clause_5_16_7_purge_by_query() {
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_6_snapshot_notification() {
     allow_private();
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:n1", 80).await;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(4);
@@ -510,7 +510,7 @@ async fn clause_5_16_6_snapshot_notification() {
 /// API view (NGSILD-Snapshot on GET /temporal/entities).
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_1_temporal_queries_fill_the_temporal_view() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:t1", 80).await;
 
     let snap = json!({"type": "Snapshot",
@@ -555,7 +555,7 @@ async fn clause_5_16_1_temporal_queries_fill_the_temporal_view() {
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_1_federated_fill() {
     allow_private();
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:fedlocal", 70).await;
 
     // a context source serving one remote Vehicle on the query path
@@ -633,7 +633,7 @@ async fn clause_5_16_1_federated_fill() {
 /// past the broker's max_limit.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_1_temporal_fill_pages_past_max_limit() {
-    let mut st = state();
+    let mut st = state().await;
     st.max_limit = 2;
     for i in 1..=3 {
         create_vehicle(&st, &format!("urn:ngsi-ld:Vehicle:page{i}"), 60 + i).await;
@@ -677,7 +677,7 @@ async fn clause_5_16_1_temporal_fill_pages_past_max_limit() {
 /// survive.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_5_15_priority_eviction_over_cap() {
-    let mut st = state();
+    let mut st = state().await;
     st.snapshot_cap = 2;
     let mk = |prio: i64| {
         json!({"type": "Snapshot", "snapshotPriority": prio,
@@ -702,7 +702,7 @@ async fn clause_5_5_15_priority_eviction_over_cap() {
 /// status retrieval is not "use".
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_2_41_last_used_at() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:l1", 80).await;
     let snap = json!({"type": "Snapshot",
         "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})
@@ -742,7 +742,7 @@ async fn clause_5_2_41_last_used_at() {
 /// type — any other attribute is BadRequestData and nothing is purged.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_7_purge_q_restricted_to_snapshot_members() {
-    let st = state();
+    let st = state().await;
     let snap = json!({"type": "Snapshot",
         "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})
     .to_string();
@@ -764,7 +764,7 @@ async fn clause_5_16_7_purge_q_restricted_to_snapshot_members() {
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_6_3_22_snapshot_scoped_subscription_notification_header() {
     allow_private();
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:sn1", 80).await;
     let snap = json!({"type": "Snapshot",
         "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})
@@ -846,7 +846,7 @@ async fn clause_6_3_22_snapshot_scoped_subscription_notification_header() {
 /// tenant needs BOTH headers, and is invisible from any other tenant.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_5_15_snapshot_is_tenant_scoped() {
-    let st = state();
+    let st = state().await;
     let tenant = &[("NGSILD-Tenant", "acme")];
     let body = json!({"id": "urn:ngsi-ld:Vehicle:ten1", "type": "Vehicle",
         "speed": {"type": "Property", "value": 80}})
@@ -929,7 +929,7 @@ async fn clause_5_5_15_snapshot_is_tenant_scoped() {
 /// 6.3.22: an unknown NGSILD-Snapshot reference is ResourceNotFound.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_6_3_22_unknown_snapshot_is_404() {
-    let st = state();
+    let st = state().await;
     let (status, _, body) = send_h(
         &st,
         "GET",
@@ -955,7 +955,7 @@ async fn clause_6_3_22_unknown_snapshot_is_404() {
 /// for a snapshot.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_6_3_22_an_ambiguous_snapshot_header_is_refused() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:amb", 10).await;
     let body = json!({
         "id": "urn:ngsi-ld:snapshot:amb", "type": "Snapshot",
@@ -1015,10 +1015,11 @@ async fn clause_6_3_22_an_ambiguous_snapshot_header_is_refused() {
 
 /// How many snap-index reverse-lookup markers point at `sid`. The markers
 /// share Kind::Snapshot storage with the snapshot documents themselves.
-fn index_markers(st: &AppState, sid: &str) -> usize {
+async fn index_markers(st: &AppState, sid: &str) -> usize {
     let idx = antares_model::TenantId::new("snap-index").expect("tenant");
     st.store
         .list(&idx, antares_sql::store::Kind::Snapshot)
+        .await
         .unwrap_or_default()
         .iter()
         .filter(|d| d["snapshot"] == sid)
@@ -1041,7 +1042,7 @@ async fn make_snapshot(st: &AppState, tenant: &[(&str, &str)], prio: i64) -> Str
 /// take victim slots, so snapshots still inside the cap get deleted.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_5_15_eviction_counts_snapshots_only() {
-    let mut st = state();
+    let mut st = state().await;
     st.snapshot_cap = 2;
     // priorities below the markers' default 5 so an unguarded sort puts the
     // snapshots ahead of the markers in the victim order. The markers live
@@ -1066,7 +1067,7 @@ async fn clause_5_5_15_eviction_counts_snapshots_only() {
     let (_, _, meta) = send_h(&st, "GET", &lo, None, t).await;
     let sid = meta["id"].as_str().expect("id").to_owned();
     assert_eq!(
-        index_markers(&st, &sid),
+        index_markers(&st, &sid).await,
         1,
         "the reverse index survives the eviction pass"
     );
@@ -1077,11 +1078,15 @@ async fn clause_5_5_15_eviction_counts_snapshots_only() {
 /// satisfy purges nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_7_purge_spares_the_snapshot_index() {
-    let st = state();
+    let st = state().await;
     let loc = make_snapshot(&st, &[], 5).await;
     let ready = wait_ready(&st, &loc).await;
     let sid = ready["id"].as_str().expect("id").to_owned();
-    assert_eq!(index_markers(&st, &sid), 1, "marker written at creation");
+    assert_eq!(
+        index_markers(&st, &sid).await,
+        1,
+        "marker written at creation"
+    );
 
     // Every snapshot carries snapshotPriority (defaulted at creation), so only
     // the markers satisfy this q. The purge runs on the owner tenant because
@@ -1097,7 +1102,7 @@ async fn clause_5_16_7_purge_spares_the_snapshot_index() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
     assert_eq!(
-        index_markers(&st, &sid),
+        index_markers(&st, &sid).await,
         1,
         "5.16.7.4: the reverse index is not purgeable as a snapshot"
     );
@@ -1110,7 +1115,7 @@ async fn clause_5_16_7_purge_spares_the_snapshot_index() {
 /// lowest-snapshotPriority snapshot is evicted exactly as on a create.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_5_15_clone_respects_the_cap() {
-    let mut st = state();
+    let mut st = state().await;
     st.snapshot_cap = 2;
     let mk = |prio: i64| {
         json!({"type": "Snapshot", "snapshotPriority": prio,
@@ -1153,7 +1158,7 @@ async fn clause_5_5_15_clone_respects_the_cap() {
 /// looked up, so a malformed id is 400 and never the 404 of an absent one.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_3_snapshot_id_must_be_a_uri() {
-    let st = state();
+    let st = state().await;
     for bad in [
         "notauri",
         "snapshot",
@@ -1215,7 +1220,7 @@ async fn clause_5_16_1_a_refused_copy_is_not_reported_as_a_filled_snapshot() {
     use antares_store::Kind;
     use std::sync::Arc;
 
-    let mut st = state();
+    let mut st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:refused", 80).await;
     // wrapped AFTER the seed: the entity has to exist for the query to match
     // it, and it is the copy INTO the snapshot that is refused
@@ -1273,7 +1278,7 @@ async fn clause_5_16_1_a_refused_copy_is_not_reported_as_a_filled_snapshot() {
 /// not a snapshot of an evolution, and it reports the query a success.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_1_the_temporal_copy_outlives_the_auto_recorded_stub() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:hist", 80).await;
     // a second instance, so the source history is longer than any stub the
     // Entity copy can leave behind

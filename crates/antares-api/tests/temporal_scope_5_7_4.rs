@@ -255,7 +255,7 @@ async fn clause_5_7_4_4_scope_valid_only_after_window_no_match() {
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_4_4_scopeq_on_auto_recorded_evolution() {
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st); // temporal auto-recording
+    antares_api::wire(&mut st).await; // temporal auto-recording
 
     let (status, b) = post(
         &st,

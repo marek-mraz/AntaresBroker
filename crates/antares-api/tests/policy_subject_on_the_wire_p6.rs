@@ -210,7 +210,7 @@ async fn a_forwarded_subscription_copy_carries_no_subject() {
     // the forwarded copy's notification endpoint is this broker's own URL
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = state();
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (port, seen) = peer("{}");
     let (code, body) = call(
         &st,
@@ -274,7 +274,7 @@ async fn a_change_event_carries_no_subject() {
     let mut st = state();
     // after `wire`, which installs the pipeline's own flush: this test is
     // about what the queue carries, so it stands in for that consumer
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     st.change_flush = Some(Arc::new(move |batch| {
         if let Ok(mut v) = recorder.lock() {
             for (tenant, before, after) in batch {

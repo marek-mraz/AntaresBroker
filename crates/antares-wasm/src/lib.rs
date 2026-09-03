@@ -59,7 +59,18 @@ impl Broker {
         );
         // Same in-process matcher/notifier path as bus=local: the
         // store's change hook feeds it, no bus process exists to talk to.
-        antares_api::wire(&mut state);
+        // The browser constructors are JS-callable and cannot await, and
+        // every driver in a wasm composition is the in-process memory arm,
+        // whose futures complete on their first poll. One that suspended
+        // would mean this composition grew a step no browser build has: the
+        // matcher then takes the store-scan fallback `wire` documents
+        // instead of the page losing its broker.
+        if futures_util::FutureExt::now_or_never(antares_api::wire(&mut state)).is_none() {
+            tracing::error!(
+                "wiring did not complete synchronously; \
+                 matching falls back to a store scan per change"
+            );
+        }
         // 5.8.1.4: distributed subscriptions hand this URL to the remote
         // broker as the notification callback. wasm32 has no process env
         // (the native default reads ANTARES_PUBLIC_URL + appends the port),

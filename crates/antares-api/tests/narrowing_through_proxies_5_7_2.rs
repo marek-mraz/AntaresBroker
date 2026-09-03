@@ -137,7 +137,7 @@ async fn consumer(chain_port: u16) -> AppState {
         scope_q: Some("/BB/#".into()),
         ..Filter::default()
     })));
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (code, body) = send(
         &st,
         "POST",

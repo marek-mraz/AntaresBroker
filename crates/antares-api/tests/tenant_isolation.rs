@@ -361,7 +361,7 @@ async fn no_operation_of_one_tenant_touches_another_tenants_document() {
     let mut st = AppState::new("test-write-isolation".into());
     // the temporal attacks below need a Temporal Evolution to attack: the
     // auto-record hook is what writes one, and AppState::new installs none
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     const A: &str = "tenant-owner";
     const B: &str = "tenant-intruder";
     const ENT: &str = "urn:ngsi-ld:Isolation:owned";
@@ -784,7 +784,7 @@ async fn a_change_in_one_tenant_never_reaches_another_tenants_endpoint() {
 
     antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("test-notify-isolation".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     const A: &str = "tenant-listener";
     const B: &str = "tenant-eavesdropper";
     const SUB_A: &str = "urn:ngsi-ld:Subscription:listener";

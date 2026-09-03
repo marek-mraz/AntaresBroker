@@ -127,14 +127,16 @@ impl ExampleStore {
 
     /// The (tenant, before, after) change feed the in-process matcher runs
     /// on. Entities only — a subscription write is not an entity change.
-    fn emit(&self, tenant: &TenantId, before: Option<Value>, after: Option<Value>) {
-        if let Some(h) = self
+    async fn emit(&self, tenant: &TenantId, before: Option<Value>, after: Option<Value>) {
+        // cloned out of the lock first: a read guard cannot be held across
+        // the await the hook now costs.
+        let hook = self
             .hook
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            h(tenant, before, after);
+            .clone();
+        if let Some(h) = hook {
+            h(tenant, before, after).await;
         }
     }
 
@@ -157,14 +159,13 @@ impl ExampleStore {
     }
 }
 
+#[async_trait::async_trait]
 impl CurrentStateDriver for ExampleStore {
-    fn ping(&self) -> Result<(), NgsiError> {
+    async fn ping(&self) -> Result<(), NgsiError> {
         Ok(())
     }
 
-    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async {})
-    }
+    async fn close(&self) {}
 
     fn version_info(&self) -> Value {
         json!({"engine": NAME, "storage": "in-process ordered map"})
@@ -177,7 +178,7 @@ impl CurrentStateDriver for ExampleStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(h);
     }
 
-    fn create(
+    async fn create(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -187,37 +188,45 @@ impl CurrentStateDriver for ExampleStore {
         self.note_tenant(tenant);
         let key = (tenant.as_str().to_owned(), slot(kind), id.to_owned());
         let now = now();
-        let mut docs = self.write();
-        // An expired row is not a row: a create over one succeeds (4.22).
-        if docs.get(&key).is_some_and(|d| !gone(kind, d, &now)) {
-            return Ok(false);
+        {
+            let mut docs = self.write();
+            // An expired row is not a row: a create over one succeeds (4.22).
+            if docs.get(&key).is_some_and(|d| !gone(kind, d, &now)) {
+                return Ok(false);
+            }
+            docs.insert(key, doc.clone());
         }
-        docs.insert(key, doc.clone());
-        drop(docs);
         if kind == Kind::Entity {
-            self.emit(tenant, None, Some(doc));
+            self.emit(tenant, None, Some(doc)).await;
         }
         Ok(true)
     }
 
-    fn batch_create(
+    async fn batch_create(
         &self,
         tenant: &TenantId,
         items: Vec<(String, Value)>,
     ) -> Result<Vec<bool>, NgsiError> {
-        items
-            .into_iter()
-            .map(|(id, doc)| CurrentStateDriver::create(self, tenant, Kind::Entity, &id, doc))
-            .collect()
+        let mut out = Vec::with_capacity(items.len());
+        for (id, doc) in items {
+            out.push(CurrentStateDriver::create(self, tenant, Kind::Entity, &id, doc).await?);
+        }
+        Ok(out)
     }
 
-    fn batch_delete(&self, tenant: &TenantId, ids: &[String]) -> Result<Vec<bool>, NgsiError> {
-        ids.iter()
-            .map(|id| CurrentStateDriver::delete(self, tenant, Kind::Entity, id))
-            .collect()
+    async fn batch_delete(
+        &self,
+        tenant: &TenantId,
+        ids: &[String],
+    ) -> Result<Vec<bool>, NgsiError> {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            out.push(CurrentStateDriver::delete(self, tenant, Kind::Entity, id).await?);
+        }
+        Ok(out)
     }
 
-    fn batch_upsert(
+    async fn batch_upsert(
         &self,
         tenant: &TenantId,
         items: Vec<(String, Value)>,
@@ -225,21 +234,14 @@ impl CurrentStateDriver for ExampleStore {
         // Created-flags: the opposite polarity of `upsert`, which answers
         // whether the row was already there. The batch path splits 201 from
         // 204 (5.6.8) with these.
-        items
-            .into_iter()
-            .map(|(id, doc)| {
-                Ok(!CurrentStateDriver::upsert(
-                    self,
-                    tenant,
-                    Kind::Entity,
-                    &id,
-                    doc,
-                )?)
-            })
-            .collect()
+        let mut out = Vec::with_capacity(items.len());
+        for (id, doc) in items {
+            out.push(!CurrentStateDriver::upsert(self, tenant, Kind::Entity, &id, doc).await?);
+        }
+        Ok(out)
     }
 
-    fn upsert(
+    async fn upsert(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -249,28 +251,32 @@ impl CurrentStateDriver for ExampleStore {
         self.note_tenant(tenant);
         let key = (tenant.as_str().to_owned(), slot(kind), id.to_owned());
         let now = now();
-        let mut docs = self.write();
-        let prev = docs.insert(key, doc.clone());
-        drop(docs);
+        let prev = self.write().insert(key, doc.clone());
         let existed = prev.as_ref().is_some_and(|d| !gone(kind, d, &now));
         if kind == Kind::Entity {
-            self.emit(tenant, existed.then_some(prev).flatten(), Some(doc));
+            self.emit(tenant, existed.then_some(prev).flatten(), Some(doc))
+                .await;
         }
         Ok(existed)
     }
 
-    fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
+    async fn get(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+    ) -> Result<Option<Value>, NgsiError> {
         Ok(self.live(tenant, kind, id))
     }
 
-    fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
+    async fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
         let now = now();
         let prev = self
             .write()
             .remove(&(tenant.as_str().to_owned(), slot(kind), id.to_owned()));
         let existed = prev.as_ref().is_some_and(|d| !gone(kind, d, &now));
         if kind == Kind::Entity && existed {
-            self.emit(tenant, prev, None);
+            self.emit(tenant, prev, None).await;
         }
         Ok(existed)
     }
@@ -279,11 +285,11 @@ impl CurrentStateDriver for ExampleStore {
     /// can replace the Entity between the decision and the delete. A backend
     /// that reads first and deletes after keeps that window open, which is
     /// why the trait requires this method rather than defaulting it.
-    fn delete_entity_if(
+    async fn delete_entity_if(
         &self,
         tenant: &TenantId,
         id: &str,
-        keep: &dyn Fn(&Value) -> bool,
+        keep: &(dyn for<'v> Fn(&'v Value) -> bool + Sync),
     ) -> Result<bool, NgsiError> {
         let now = now();
         let key = (
@@ -300,12 +306,12 @@ impl CurrentStateDriver for ExampleStore {
         };
         let existed = prev.is_some();
         if existed {
-            self.emit(tenant, prev, None);
+            self.emit(tenant, prev, None).await;
         }
         Ok(existed)
     }
 
-    fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
+    async fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
         Ok(self.rows(tenant, kind))
     }
 
@@ -315,7 +321,7 @@ impl CurrentStateDriver for ExampleStore {
     /// matching that tenant's subscriptions. The map is ordered by
     /// `(tenant, kind, id)`, so the walk is a range and the cursor is a
     /// comparison on the key — no row is cloned before it is wanted.
-    fn list_page(
+    async fn list_page(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -345,7 +351,7 @@ impl CurrentStateDriver for ExampleStore {
     /// reference plugin and would not be in a database-backed one — copy the
     /// semantics, not the strategy: a backend with a query language pushes
     /// LIMIT/OFFSET and count(*) down and reads neither more nor less.
-    fn list_slice(
+    async fn list_slice(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -357,7 +363,7 @@ impl CurrentStateDriver for ExampleStore {
         Ok((all.into_iter().skip(offset).take(limit).collect(), total))
     }
 
-    fn matching_registrations(
+    async fn matching_registrations(
         &self,
         tenant: &TenantId,
         _ids: Option<&[String]>,
@@ -368,7 +374,7 @@ impl CurrentStateDriver for ExampleStore {
         Ok(self.rows(tenant, Kind::Registration))
     }
 
-    fn query_entities(
+    async fn query_entities(
         &self,
         tenant: &TenantId,
         _f: &filter::EntityFilter<'_>,
@@ -384,7 +390,7 @@ impl CurrentStateDriver for ExampleStore {
         })
     }
 
-    fn mutate_boxed<'a>(
+    async fn mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -393,34 +399,37 @@ impl CurrentStateDriver for ExampleStore {
     ) -> Result<Option<Result<(), ()>>, NgsiError> {
         let key = (tenant.as_str().to_owned(), slot(kind), id.to_owned());
         let now = now();
-        let mut docs = self.write();
-        // ADR-0005 / ETSI 047_06: read-modify-write under ONE lock, and a
-        // missing row is None — never an insert. A get-then-upsert here
-        // would let a bookkeeping writeback resurrect a deleted row.
-        let Some(current) = docs.get(&key).filter(|d| !gone(kind, d, &now)) else {
-            return Ok(None);
+        let (before, next, verdict) = {
+            let mut docs = self.write();
+            // ADR-0005 / ETSI 047_06: read-modify-write under ONE lock, and a
+            // missing row is None — never an insert. A get-then-upsert here
+            // would let a bookkeeping writeback resurrect a deleted row.
+            let Some(current) = docs.get(&key).filter(|d| !gone(kind, d, &now)) else {
+                return Ok(None);
+            };
+            let before = current.clone();
+            let mut next = current.clone();
+            let verdict = f(&mut next);
+            if verdict.is_ok() {
+                docs.insert(key, next.clone());
+            }
+            (before, next, verdict)
         };
-        let before = current.clone();
-        let mut next = current.clone();
-        let verdict = f(&mut next);
-        if verdict.is_ok() {
-            docs.insert(key, next.clone());
-        }
-        drop(docs);
         if verdict.is_ok() && kind == Kind::Entity {
-            self.emit(tenant, Some(before), Some(next));
+            self.emit(tenant, Some(before), Some(next)).await;
         }
         Ok(Some(verdict))
     }
 
-    fn batch_mutate_boxed<'a>(
+    async fn batch_mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         ids: &[String],
         mut f: BatchMutateFn<'a>,
     ) -> Result<Vec<Option<Result<(), ()>>>, NgsiError> {
-        ids.iter()
-            .map(|id| {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            out.push(
                 CurrentStateDriver::mutate_boxed(
                     self,
                     tenant,
@@ -428,11 +437,13 @@ impl CurrentStateDriver for ExampleStore {
                     id,
                     Box::new(|v| f(id, v)),
                 )
-            })
-            .collect()
+                .await?,
+            );
+        }
+        Ok(out)
     }
 
-    fn sweep_expired(&self) -> usize {
+    async fn sweep_expired(&self) -> usize {
         // 4.22: the reads above already hide expired context; this is the
         // memory the sweep gets back — whole entities past their stamp, and
         // the expired instances still sitting inside live documents.
@@ -462,7 +473,7 @@ impl CurrentStateDriver for ExampleStore {
         dead.len() + pruned
     }
 
-    fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+    async fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
         Ok(tenant.as_str() == TenantId::DEFAULT
             || self
                 .tenants
@@ -479,7 +490,7 @@ impl CurrentStateDriver for ExampleStore {
     /// fires a periodic notification — with no error anywhere. A superset is
     /// allowed and a subset is a silent outage, so when in doubt a backend
     /// returns more.
-    fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
+    async fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
         let kinds = [
             slot(Kind::Subscription),
             slot(Kind::CSourceSubscription),
@@ -494,7 +505,7 @@ impl CurrentStateDriver for ExampleStore {
         Ok(out.into_iter().collect())
     }
 
-    fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
+    async fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
         let mut out: BTreeSet<String> = self
             .tenants
             .read()
@@ -505,8 +516,8 @@ impl CurrentStateDriver for ExampleStore {
         Ok(out.into_iter().collect())
     }
 
-    fn tenant_stats_one(&self, tenant: &TenantId) -> Result<Option<TenantStats>, NgsiError> {
-        if !self.tenant_exists(tenant)? {
+    async fn tenant_stats_one(&self, tenant: &TenantId) -> Result<Option<TenantStats>, NgsiError> {
+        if !self.tenant_exists(tenant).await? {
             return Ok(None);
         }
         let count = |k: Kind| self.rows(tenant, k).len() as u64;
@@ -523,8 +534,8 @@ impl CurrentStateDriver for ExampleStore {
         }))
     }
 
-    fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
-        if !self.tenant_exists(tenant)? {
+    async fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        if !self.tenant_exists(tenant).await? {
             return Ok(false);
         }
         // One hold of the lock: collecting the keys under a read guard and
@@ -547,7 +558,7 @@ impl CurrentStateDriver for ExampleStore {
     /// plugin store enforces exactly what the built-in ones do — an
     /// implementation that ignored `tenant` here would hand one Tenant's term
     /// mappings to another.
-    fn context_put(
+    async fn context_put(
         &self,
         tenant: Option<&TenantId>,
         id: &str,
@@ -570,7 +581,11 @@ impl CurrentStateDriver for ExampleStore {
         Ok(())
     }
 
-    fn context_get(&self, tenant: Option<&TenantId>, id: &str) -> Result<Option<Value>, NgsiError> {
+    async fn context_get(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+    ) -> Result<Option<Value>, NgsiError> {
         Ok(self
             .contexts
             .read()
@@ -580,7 +595,7 @@ impl CurrentStateDriver for ExampleStore {
             .cloned())
     }
 
-    fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
+    async fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
         let mut rows = self
             .contexts
             .write()
@@ -597,7 +612,7 @@ impl CurrentStateDriver for ExampleStore {
     /// Rows without their `body`: a body may be 5 MiB and only the `Cached`
     /// rows are capped in number, so a plugin that returned whole rows here
     /// would put gigabytes on the boot path.
-    fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
+    async fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
         Ok(self
             .contexts
             .read()
@@ -615,16 +630,15 @@ impl CurrentStateDriver for ExampleStore {
     }
 }
 
+#[async_trait::async_trait]
 impl TemporalDriver for ExampleStore {
-    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async {})
-    }
+    async fn close(&self) {}
 
     fn version_info(&self) -> Value {
         json!({"engine": NAME, "storage": "in-process ordered map"})
     }
 
-    fn temporal_append(
+    async fn temporal_append(
         &self,
         tenant: &TenantId,
         id: &str,
@@ -633,12 +647,19 @@ impl TemporalDriver for ExampleStore {
     ) -> Result<(), NgsiError> {
         // 5.6.6: history belongs to an entity that still exists — an append
         // racing a delete must not recreate it.
-        if CurrentStateDriver::get(self, tenant, Kind::Entity, id)?.is_none() {
+        if CurrentStateDriver::get(self, tenant, Kind::Entity, id)
+            .await?
+            .is_none()
+        {
             return Ok(());
         }
-        if CurrentStateDriver::get(self, tenant, Kind::Temporal, id)?.is_none() {
+        if CurrentStateDriver::get(self, tenant, Kind::Temporal, id)
+            .await?
+            .is_none()
+        {
             // The loser of a concurrent create race just extends below.
-            let _ = CurrentStateDriver::create(self, tenant, Kind::Temporal, id, shell.clone())?;
+            let _ =
+                CurrentStateDriver::create(self, tenant, Kind::Temporal, id, shell.clone()).await?;
         }
         CurrentStateDriver::mutate_boxed(
             self,
@@ -672,11 +693,12 @@ impl TemporalDriver for ExampleStore {
                 }
                 Ok(())
             }),
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
-    fn query_temporal(
+    async fn query_temporal(
         &self,
         tenant: &TenantId,
         _f: &filter::TemporalFilter<'_>,
@@ -692,7 +714,7 @@ impl TemporalDriver for ExampleStore {
         })
     }
 
-    fn get_temporal(
+    async fn get_temporal(
         &self,
         tenant: &TenantId,
         id: &str,
@@ -702,36 +724,36 @@ impl TemporalDriver for ExampleStore {
         Ok(self.live(tenant, Kind::Temporal, id))
     }
 
-    fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, NgsiError> {
-        CurrentStateDriver::get(self, tenant, Kind::Temporal, id)
+    async fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, NgsiError> {
+        CurrentStateDriver::get(self, tenant, Kind::Temporal, id).await
     }
 
-    fn create(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
-        CurrentStateDriver::create(self, tenant, Kind::Temporal, id, doc)
+    async fn create(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
+        CurrentStateDriver::create(self, tenant, Kind::Temporal, id, doc).await
     }
 
-    fn upsert(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
-        CurrentStateDriver::upsert(self, tenant, Kind::Temporal, id, doc)
+    async fn upsert(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
+        CurrentStateDriver::upsert(self, tenant, Kind::Temporal, id, doc).await
     }
 
-    fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, NgsiError> {
-        CurrentStateDriver::delete(self, tenant, Kind::Temporal, id)
+    async fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, NgsiError> {
+        CurrentStateDriver::delete(self, tenant, Kind::Temporal, id).await
     }
 
-    fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, NgsiError> {
-        CurrentStateDriver::list(self, tenant, Kind::Temporal)
+    async fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, NgsiError> {
+        CurrentStateDriver::list(self, tenant, Kind::Temporal).await
     }
 
-    fn mutate_boxed<'a>(
+    async fn mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         id: &str,
         f: MutateFn<'a>,
     ) -> Result<Option<Result<(), ()>>, NgsiError> {
-        CurrentStateDriver::mutate_boxed(self, tenant, Kind::Temporal, id, f)
+        CurrentStateDriver::mutate_boxed(self, tenant, Kind::Temporal, id, f).await
     }
 
-    fn attr_instance_count(&self, tenant: &TenantId) -> Result<u64, NgsiError> {
+    async fn attr_instance_count(&self, tenant: &TenantId) -> Result<u64, NgsiError> {
         Ok(self
             .rows(tenant, Kind::Temporal)
             .iter()
@@ -740,7 +762,7 @@ impl TemporalDriver for ExampleStore {
             .sum())
     }
 
-    fn purge_tenant(&self, tenant: &TenantId) -> Result<(), NgsiError> {
+    async fn purge_tenant(&self, tenant: &TenantId) -> Result<(), NgsiError> {
         // The current-state purge already drops every kind, this seam
         // included; nothing is left to do here.
         let _ = tenant;

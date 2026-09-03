@@ -89,6 +89,7 @@ async fn state_with_a_seeded_map() -> AppState {
                    "entityMap": {"urn:ngsi-ld:Vehicle:one": ["@none"]},
                    "linkedMaps": {}}),
         )
+        .await
         .expect("seed the map");
     st
 }

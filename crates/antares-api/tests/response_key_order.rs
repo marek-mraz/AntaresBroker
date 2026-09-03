@@ -61,7 +61,7 @@ fn before(body: &str, key: &str, after: &str) {
 /// probe that catches plain alphabetical serialization.
 async fn seeded() -> AppState {
     let mut st = AppState::new("test".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     for n in 1..=2 {
         let (status, body) = post(
             &st,
@@ -169,7 +169,7 @@ async fn capture_raw() -> (String, tokio::sync::mpsc::Receiver<String>) {
 async fn notification_data_entities_lead_with_id_then_type() {
     antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (uri, mut rx) = capture_raw().await;
     let (status, body) = post(
         &st,

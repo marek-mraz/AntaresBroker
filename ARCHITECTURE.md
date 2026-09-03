@@ -14,9 +14,10 @@ approximate and mark weight, not authority.
 
 One binary (`crates/antares-broker`) serves ETSI CIM 009 V1.9.1 over HTTP
 (`crates/antares-api`, axum). Handlers negotiate the request
-(`negotiate.rs`), call a synchronous store trait
+(`negotiate.rs`), await a store trait
 (`crates/antares-store`), and return. The store fires a change hook on
-every write; the hook records history synchronously and hands the change
+every write and awaits it, so the history that write produced is there for
+the next read; the hook hands the change
 to the notification pipeline (`notify.rs`), which matches subscriptions
 from an in-memory mirror and delivers over HTTP or MQTT
 (`crates/antares-notifier`). Storage is a ladder behind one trait:
@@ -112,12 +113,10 @@ TCP accept (broker main.rs, TCP_NODELAY)
  → respond: compact, representation (repr.rs), paging Link headers, status
 ```
 
-Handlers are synchronous with respect to the store: `antares-sql`'s
-Postgres driver bridges sqlx through `tokio::task::block_in_place`
-(`store/pg/entity.rs::wait`, 37 call sites under `store/pg/`). Every
-Postgres round trip therefore parks a runtime worker, the composition root
-sizes the blocking-thread ceiling at `ANTARES_MAX_CONNECTIONS + 1024`
-(`broker/src/main.rs` `runtime`). The pool (`ANTARES_PG_POOL`, 20) answers
+Handlers await the store: every driver method is an `async fn`
+(ADR-0022), object-safe through `#[async_trait::async_trait]`, so a caller
+waiting on Postgres holds no thread and store parallelism is bounded by the
+connection pool rather than by an OS-thread ceiling. The pool (`ANTARES_PG_POOL`, 20) answers
 503 with `Retry-After` after its 5 s acquire timeout — the driver marks a
 `PoolTimedOut` with `antares_model::error::DB_OVERLOADED` and
 `negotiate::ApiError::Overloaded` renders it — and every transaction opens
@@ -209,21 +208,18 @@ pair, one schema (`crates/antares-sql/migrations/`: `0001_init.sql`,
 
 Stated so they are not rediscovered. Each is measured, not guessed.
 
-- The store trait is synchronous over async I/O (ADR-0005). Every
-  Postgres call goes through `block_in_place`; the blocking-thread
-  ceiling is sized from the connection cap (`antares-broker` `runtime`)
-  so a parked caller always wakes; parallelism above the store is
-  bounded by that ceiling, and a current-thread runtime cannot host the
-  Postgres driver at all (`Handle::block_on` inside it panics), which is
-  why the crate's own `#[tokio::test]` suites reach only the memory and
-  redb stores. A dedicated Postgres runtime removes the ceiling but
-  makes every round trip a cross-thread wakeup (measured p99 at 500
-  updates/s: 49 ms to 2 s), so it is not the exit. This is the single
-  largest architectural lever left; reversing it touches every driver
-  and every store call in `antares-api` (116 `st.store.` and 21
-  `st.temporal.` expressions), and the object-safe shape for it
-  already exists in the tree: `antares-notifier`'s `DeliveryFuture`, a
-  boxed `Send` future returned from a trait method.
+- Every trait method allocates: `#[async_trait::async_trait]` boxes one
+  future per store call (ADR-0022), which is what makes `Arc<dyn
+  CurrentStateDriver>` possible at all. Native `async fn` in a trait is
+  object-safe only behind a nightly feature; when it lands on stable the
+  attribute comes off and the allocation with it, without touching a call
+  site.
+- Query evaluation is synchronous and the store is not, so the 4.9
+  linked-entity terms resolve by cache-and-retry (`notify::linked_eval`):
+  the evaluator runs against a cache, the URIs it missed are fetched
+  together, and it runs again. A link chain of depth *n* costs *n* passes
+  over the expression. The alternative is an async evaluator, which would
+  put a store on `antares-ql` and `antares-matcher`.
 - `antares-api` is acyclic: no module reaches itself through
   `crate::<module>` references, so the largest strongly connected
   component of its 31 modules is one. What two resources share lives in

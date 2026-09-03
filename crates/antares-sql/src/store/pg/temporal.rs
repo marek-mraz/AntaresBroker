@@ -16,8 +16,6 @@ use serde_json::Value;
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 
-use super::entity::wait;
-
 pub struct PgTemporalStore {
     pool: PgPool,
     /// Set when this instance serves only the temporal seam: it never holds
@@ -368,52 +366,55 @@ impl PgTemporalStore {
     /// calls absent, and `AnyStore::upsert` reads that `false` as "already
     /// there" and falls through to `mutate`, which refuses an expired entity
     /// too: the upsert would write nothing and report success.
-    pub fn create(&self, tenant: &TenantId, id: &str, doc: &Value) -> Result<bool, sqlx::Error> {
+    pub async fn create(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        doc: &Value,
+    ) -> Result<bool, sqlx::Error> {
         let (types, scopes, created, modified) = extract(doc);
         let meta = meta_of(doc);
         let rows = decompose(doc);
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
-            let reaped = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DELETE FROM temporal_entities m \
-                 WHERE m.tenant_id = $1 AND m.id = $2 AND NOT {NOT_EXPIRED}"
-            )))
-            .bind(tenant.as_str())
-            .bind(id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if reaped == 1 {
-                sqlx::query("DELETE FROM attr_instances WHERE tenant_id = $1 AND entity_id = $2")
-                    .bind(tenant.as_str())
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            let n = sqlx::query(
-                "INSERT INTO temporal_entities
-                   (tenant_id, id, types, scopes, meta, created_at, modified_at)
-                 VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz)
-                 ON CONFLICT (tenant_id, id) DO NOTHING",
-            )
-            .bind(tenant.as_str())
-            .bind(id)
-            .bind(&types)
-            .bind(&scopes)
-            .bind(&meta)
-            .bind(&created)
-            .bind(&modified)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if n == 1 {
-                insert_rows(&mut tx, tenant, id, rows).await?;
-            }
-            tx.commit().await?;
-            Ok(n == 1)
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        crate::store::pg::claim_tenant(&mut tx, tenant).await?;
+        let reaped = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM temporal_entities m \
+             WHERE m.tenant_id = $1 AND m.id = $2 AND NOT {NOT_EXPIRED}"
+        )))
+        .bind(tenant.as_str())
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if reaped == 1 {
+            sqlx::query("DELETE FROM attr_instances WHERE tenant_id = $1 AND entity_id = $2")
+                .bind(tenant.as_str())
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let n = sqlx::query(
+            "INSERT INTO temporal_entities
+               (tenant_id, id, types, scopes, meta, created_at, modified_at)
+             VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz)
+             ON CONFLICT (tenant_id, id) DO NOTHING",
+        )
+        .bind(tenant.as_str())
+        .bind(id)
+        .bind(&types)
+        .bind(&scopes)
+        .bind(&meta)
+        .bind(&created)
+        .bind(&modified)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if n == 1 {
+            insert_rows(&mut tx, tenant, id, rows).await?;
+        }
+        tx.commit().await?;
+        Ok(n == 1)
     }
 
     /// Append-only fast path (auto-recording, 5.6.12 adds): NO reconstruction,
@@ -427,7 +428,7 @@ impl PgTemporalStore {
     /// delete would ever clean it. The `FOR KEY SHARE` lock is what makes the
     /// check hold: it lets concurrent updates of the same entity through and
     /// makes a concurrent DELETE wait until this append has committed.
-    pub fn append(
+    pub async fn append(
         &self,
         tenant: &TenantId,
         id: &str,
@@ -437,110 +438,106 @@ impl PgTemporalStore {
         let (types, scopes, created, modified) = extract(shell);
         let meta = meta_of(shell);
         let rows = decompose(additions);
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            if !self.temporal_only {
-                let live = sqlx::query(
-                    "SELECT 1 FROM entities WHERE tenant_id = $1 AND id = $2 FOR KEY SHARE",
-                )
-                .bind(tenant.as_str())
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
-                if live.is_none() {
-                    tx.commit().await?;
-                    return Ok(());
-                }
-            }
-            // DO NOTHING froze types/scopes at first touch — an
-            // entity gaining a type stayed invisible to type-filtered
-            // temporal queries forever. The shell carries the CURRENT
-            // entity, so refresh on change; the IS DISTINCT FROM guard keeps
-            // the common no-change append from churning the meta row.
-            sqlx::query(
-                "INSERT INTO temporal_entities
-                   (tenant_id, id, types, scopes, meta, created_at, modified_at)
-                 VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz)
-                 ON CONFLICT (tenant_id, id) DO UPDATE SET
-                   types = EXCLUDED.types,
-                   scopes = EXCLUDED.scopes,
-                   meta = EXCLUDED.meta,
-                   modified_at = EXCLUDED.modified_at
-                 WHERE temporal_entities.types IS DISTINCT FROM EXCLUDED.types
-                    OR temporal_entities.scopes IS DISTINCT FROM EXCLUDED.scopes
-                    OR temporal_entities.meta IS DISTINCT FROM EXCLUDED.meta",
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        if !self.temporal_only {
+            let live = sqlx::query(
+                "SELECT 1 FROM entities WHERE tenant_id = $1 AND id = $2 FOR KEY SHARE",
             )
             .bind(tenant.as_str())
             .bind(id)
-            .bind(&types)
-            .bind(&scopes)
-            .bind(&meta)
-            .bind(&created)
-            .bind(&modified)
-            .execute(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
-            insert_rows(&mut tx, tenant, id, rows).await?;
-            tx.commit().await?;
-            Ok(())
-        })
+            if live.is_none() {
+                tx.commit().await?;
+                return Ok(());
+            }
+        }
+        // DO NOTHING froze types/scopes at first touch — an
+        // entity gaining a type stayed invisible to type-filtered
+        // temporal queries forever. The shell carries the CURRENT
+        // entity, so refresh on change; the IS DISTINCT FROM guard keeps
+        // the common no-change append from churning the meta row.
+        sqlx::query(
+            "INSERT INTO temporal_entities
+               (tenant_id, id, types, scopes, meta, created_at, modified_at)
+             VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz)
+             ON CONFLICT (tenant_id, id) DO UPDATE SET
+               types = EXCLUDED.types,
+               scopes = EXCLUDED.scopes,
+               meta = EXCLUDED.meta,
+               modified_at = EXCLUDED.modified_at
+             WHERE temporal_entities.types IS DISTINCT FROM EXCLUDED.types
+                OR temporal_entities.scopes IS DISTINCT FROM EXCLUDED.scopes
+                OR temporal_entities.meta IS DISTINCT FROM EXCLUDED.meta",
+        )
+        .bind(tenant.as_str())
+        .bind(id)
+        .bind(&types)
+        .bind(&scopes)
+        .bind(&meta)
+        .bind(&created)
+        .bind(&modified)
+        .execute(&mut *tx)
+        .await?;
+        insert_rows(&mut tx, tenant, id, rows).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
-    pub fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
-        self.get_range(tenant, id, &TemporalFilter::default())
+    pub async fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
+        self.get_range(tenant, id, &TemporalFilter::default()).await
     }
 
     /// 5.6.16 Delete Temporal Evolution: `true` when it was there, `false`
     /// for "no existing Entity whose id (URI) is equivalent held locally",
     /// which the caller answers as ResourceNotFound. 4.22 decides what "held
     /// locally" means, the same way `get_range` and `query` decide it.
-    pub fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let n = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DELETE FROM temporal_entities m \
-                 WHERE m.tenant_id = $1 AND m.id = $2 AND {NOT_EXPIRED}"
-            )))
-            .bind(tenant.as_str())
-            .bind(id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            // no FK: a partitioned table cannot be the referencing side of a
-            // cascade from temporal_entities — clean the instances explicitly,
-            // and only for the row this call actually removed. An expired
-            // entity is refused above and keeps its history until the 4.22
-            // reap or a create replaces it; wiping it here would destroy the
-            // history behind a 404.
-            if n == 1 {
-                sqlx::query("DELETE FROM attr_instances WHERE tenant_id = $1 AND entity_id = $2")
-                    .bind(tenant.as_str())
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            tx.commit().await?;
-            Ok(n == 1)
-        })
+    pub async fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, sqlx::Error> {
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let n = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM temporal_entities m \
+             WHERE m.tenant_id = $1 AND m.id = $2 AND {NOT_EXPIRED}"
+        )))
+        .bind(tenant.as_str())
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        // no FK: a partitioned table cannot be the referencing side of a
+        // cascade from temporal_entities — clean the instances explicitly,
+        // and only for the row this call actually removed. An expired
+        // entity is refused above and keeps its history until the 4.22
+        // reap or a create replaces it; wiping it here would destroy the
+        // history behind a 404.
+        if n == 1 {
+            sqlx::query("DELETE FROM attr_instances WHERE tenant_id = $1 AND entity_id = $2")
+                .bind(tenant.as_str())
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(n == 1)
     }
 
     /// Temporal query: entity narrowing (ids/types/attrs) in the WHERE,
     /// instance pruning (range + lastN cap) in the reconstruction, and —
     /// when the caller passes a page — entity qualification + LIMIT/OFFSET
     /// in SQL, so a temporal query no longer materializes the whole tenant.
-    pub fn query(
+    pub async fn query(
         &self,
         tenant: &TenantId,
         f: &TemporalFilter<'_>,
     ) -> Result<TemporalOutcome, sqlx::Error> {
-        self.query_inner(tenant, f, f.aggregate.is_some())
+        self.query_inner(tenant, f, f.aggregate.is_some()).await
     }
 
     /// `push_agg`: compute the filter's 4.5.19 aggregation in SQL; a row
     /// whose windowed values are not all numeric makes the whole query fall
     /// back to instance reconstruction (one extra round trip, only then).
-    fn query_inner(
+    async fn query_inner(
         &self,
         tenant: &TenantId,
         f: &TemporalFilter<'_>,
@@ -720,7 +717,7 @@ impl PgTemporalStore {
             "SELECT m.meta || {attr_expr}{select_total} FROM temporal_entities m \
              WHERE {where_sql}{tail}"
         );
-        wait(async {
+        let first: Result<Option<TemporalOutcome>, sqlx::Error> = async {
             let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // `sql` is compiler literals + $n placeholders only.
@@ -780,16 +777,19 @@ impl PgTemporalStore {
                 total,
                 aggregated,
             }))
-        })
-        .and_then(|out| match out {
+        }
+        .await;
+        match first? {
             Some(out) => Ok(out),
-            None => self.query_inner(tenant, f, false),
-        })
+            // the fallback re-runs the same statement without the pushed
+            // aggregation; boxed because an async fn cannot recurse inline
+            None => Box::pin(self.query_inner(tenant, f, false)).await,
+        }
     }
 
     /// Single-entity fetch with the same instance pruning (Retrieve
     /// Temporal Evolution, 5.7.3). `None` = entity absent.
-    pub fn get_range(
+    pub async fn get_range(
         &self,
         tenant: &TenantId,
         id: &str,
@@ -808,23 +808,21 @@ impl PgTemporalStore {
             "SELECT m.meta || {attr_expr} FROM temporal_entities m \
              WHERE m.tenant_id = $1 AND m.id = $2 AND {NOT_EXPIRED}"
         );
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                .bind(tenant.as_str())
-                .bind(id);
-            for b in &binds {
-                qy = qy.bind(b);
-            }
-            let row = qy.fetch_optional(&mut *tx).await?;
-            tx.commit().await?;
-            Ok(row.map(|r| r.get::<Value, _>(0)))
-        })
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(tenant.as_str())
+            .bind(id);
+        for b in &binds {
+            qy = qy.bind(b);
+        }
+        let row = qy.fetch_optional(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(row.map(|r| r.get::<Value, _>(0)))
     }
 
-    pub fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, sqlx::Error> {
-        Ok(self.query(tenant, &TemporalFilter::default())?.rows)
+    pub async fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, sqlx::Error> {
+        Ok(self.query(tenant, &TemporalFilter::default()).await?.rows)
     }
 
     /// Row-locked read-modify-write over the RECONSTRUCTED doc, written back
@@ -832,119 +830,117 @@ impl PgTemporalStore {
     /// changed or removed instances touch the table — never a full-history
     /// rewrite (the old resync's O(history) write amplification, and the
     /// thing that fought hypertable compression).
-    pub fn mutate<T, E>(
+    pub async fn mutate<T, E>(
         &self,
         tenant: &TenantId,
         id: &str,
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Result<Option<Result<T, E>>, sqlx::Error> {
-        wait(async {
-            let mut tx = super::begin(&self.pool).await?;
-            crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            // the meta row is the serialization point (FOR UPDATE). 4.22
-            // qualifies it: 5.6.12 to 5.6.15 reach the history through here,
-            // and none of them may modify an entity every read calls absent.
-            let row = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SELECT m.meta FROM temporal_entities m \
-                 WHERE m.tenant_id = $1 AND m.id = $2 AND {NOT_EXPIRED} FOR UPDATE"
-            )))
-            .bind(tenant.as_str())
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some(row) = row else {
-                tx.commit().await?;
-                return Ok(None);
-            };
-            let meta: Value = row.get(0);
-            // reconstruct the full doc inside the same transaction
-            let attrs_row = sqlx::query(
-                "SELECT COALESCE((SELECT jsonb_object_agg(g.attr_id, g.insts) FROM (
-                    SELECT ai.attr_id,
-                           jsonb_agg(ai.data ORDER BY ai.created_at, ai.observed_at, ai.instance_id) AS insts
-                    FROM attr_instances ai
-                    WHERE ai.tenant_id = $1 AND ai.entity_id = $2
-                    GROUP BY ai.attr_id) g), '{}'::jsonb)",
-            )
-            .bind(tenant.as_str())
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-            let attrs: Value = attrs_row.get(0);
-            let mut doc = meta;
-            if let (Some(d), Some(a)) = (doc.as_object_mut(), attrs.as_object()) {
-                for (k, v) in a {
-                    d.insert(k.clone(), v.clone());
-                }
+        let mut tx = super::begin(&self.pool).await?;
+        crate::store::pg::set_tenant(&mut tx, tenant).await?;
+        // the meta row is the serialization point (FOR UPDATE). 4.22
+        // qualifies it: 5.6.12 to 5.6.15 reach the history through here,
+        // and none of them may modify an entity every read calls absent.
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT m.meta FROM temporal_entities m \
+             WHERE m.tenant_id = $1 AND m.id = $2 AND {NOT_EXPIRED} FOR UPDATE"
+        )))
+        .bind(tenant.as_str())
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let meta: Value = row.get(0);
+        // reconstruct the full doc inside the same transaction
+        let attrs_row = sqlx::query(
+            "SELECT COALESCE((SELECT jsonb_object_agg(g.attr_id, g.insts) FROM (
+                SELECT ai.attr_id,
+                       jsonb_agg(ai.data ORDER BY ai.created_at, ai.observed_at, ai.instance_id) AS insts
+                FROM attr_instances ai
+                WHERE ai.tenant_id = $1 AND ai.entity_id = $2
+                GROUP BY ai.attr_id) g), '{}'::jsonb)",
+        )
+        .bind(tenant.as_str())
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let attrs: Value = attrs_row.get(0);
+        let mut doc = meta;
+        if let (Some(d), Some(a)) = (doc.as_object_mut(), attrs.as_object()) {
+            for (k, v) in a {
+                d.insert(k.clone(), v.clone());
             }
-            let before_rows = decompose(&doc);
-            match f(&mut doc) {
-                Ok(t) => {
-                    let (types, scopes, _created, modified) = extract(&doc);
-                    let after_rows = decompose(&doc);
-                    // diff by logical identity (attr, instanceId); a changed
-                    // observed_at moves the physical row → delete + insert
-                    let key = |r: &Value| -> (String, String) {
-                        (
-                            r["attr_id"].as_str().unwrap_or("").to_owned(),
-                            r["instance_id"].as_str().unwrap_or("").to_owned(),
-                        )
-                    };
-                    let old: std::collections::HashMap<(String, String), &Value> =
-                        before_rows.iter().map(|r| (key(r), r)).collect();
-                    let new: std::collections::HashMap<(String, String), &Value> =
-                        after_rows.iter().map(|r| (key(r), r)).collect();
-                    let mut deletes: Vec<Value> = Vec::new();
-                    for (k, o) in &old {
-                        match new.get(k) {
-                            None => deletes.push(serde_json::json!({"a": k.0, "i": k.1})),
-                            Some(n) if n["observed_at"] != o["observed_at"] => {
-                                deletes.push(serde_json::json!({"a": k.0, "i": k.1}))
-                            }
-                            _ => {}
+        }
+        let before_rows = decompose(&doc);
+        match f(&mut doc) {
+            Ok(t) => {
+                let (types, scopes, _created, modified) = extract(&doc);
+                let after_rows = decompose(&doc);
+                // diff by logical identity (attr, instanceId); a changed
+                // observed_at moves the physical row → delete + insert
+                let key = |r: &Value| -> (String, String) {
+                    (
+                        r["attr_id"].as_str().unwrap_or("").to_owned(),
+                        r["instance_id"].as_str().unwrap_or("").to_owned(),
+                    )
+                };
+                let old: std::collections::HashMap<(String, String), &Value> =
+                    before_rows.iter().map(|r| (key(r), r)).collect();
+                let new: std::collections::HashMap<(String, String), &Value> =
+                    after_rows.iter().map(|r| (key(r), r)).collect();
+                let mut deletes: Vec<Value> = Vec::new();
+                for (k, o) in &old {
+                    match new.get(k) {
+                        None => deletes.push(serde_json::json!({"a": k.0, "i": k.1})),
+                        Some(n) if n["observed_at"] != o["observed_at"] => {
+                            deletes.push(serde_json::json!({"a": k.0, "i": k.1}))
                         }
+                        _ => {}
                     }
-                    let upserts: Vec<Value> = after_rows
-                        .iter()
-                        .filter(|r| old.get(&key(r)).is_none_or(|o| *o != *r))
-                        .cloned()
-                        .collect();
-                    if !deletes.is_empty() {
-                        sqlx::query(
-                            "DELETE FROM attr_instances t
-                             USING jsonb_array_elements($3::jsonb) AS e
-                             WHERE t.tenant_id = $1 AND t.entity_id = $2
-                               AND t.attr_id = e->>'a' AND t.instance_id = e->>'i'",
-                        )
-                        .bind(tenant.as_str())
-                        .bind(id)
-                        .bind(Value::Array(deletes))
-                        .execute(&mut *tx)
-                        .await?;
-                    }
-                    insert_rows(&mut tx, tenant, id, upserts).await?;
+                }
+                let upserts: Vec<Value> = after_rows
+                    .iter()
+                    .filter(|r| old.get(&key(r)).is_none_or(|o| *o != *r))
+                    .cloned()
+                    .collect();
+                if !deletes.is_empty() {
                     sqlx::query(
-                        "UPDATE temporal_entities SET meta = $3, types = $4, scopes = $5,
-                           modified_at = $6::timestamptz
-                         WHERE tenant_id = $1 AND id = $2",
+                        "DELETE FROM attr_instances t
+                         USING jsonb_array_elements($3::jsonb) AS e
+                         WHERE t.tenant_id = $1 AND t.entity_id = $2
+                           AND t.attr_id = e->>'a' AND t.instance_id = e->>'i'",
                     )
                     .bind(tenant.as_str())
                     .bind(id)
-                    .bind(meta_of(&doc))
-                    .bind(&types)
-                    .bind(&scopes)
-                    .bind(&modified)
+                    .bind(Value::Array(deletes))
                     .execute(&mut *tx)
                     .await?;
-                    tx.commit().await?;
-                    Ok(Some(Ok(t)))
                 }
-                Err(e) => {
-                    tx.rollback().await?;
-                    Ok(Some(Err(e)))
-                }
+                insert_rows(&mut tx, tenant, id, upserts).await?;
+                sqlx::query(
+                    "UPDATE temporal_entities SET meta = $3, types = $4, scopes = $5,
+                       modified_at = $6::timestamptz
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(tenant.as_str())
+                .bind(id)
+                .bind(meta_of(&doc))
+                .bind(&types)
+                .bind(&scopes)
+                .bind(&modified)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(Some(Ok(t)))
             }
-        })
+            Err(e) => {
+                tx.rollback().await?;
+                Ok(Some(Err(e)))
+            }
+        }
     }
 }
 

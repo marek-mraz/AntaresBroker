@@ -12,9 +12,9 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-fn state() -> AppState {
+async fn state() -> AppState {
     let mut st = AppState::new("antares-em-usage".into());
-    antares_api::wire(&mut st); // temporal auto-recording
+    antares_api::wire(&mut st).await; // temporal auto-recording
     st
 }
 
@@ -99,7 +99,7 @@ fn map_header(headers: &axum::http::HeaderMap) -> Option<String> {
 /// NGSILD-EntityMap location; the map holds the entity under "@none".
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_1_4_retrieve_entitymap_true_creates_map() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:r1", 30).await;
 
     let (status, headers, body) = get(
@@ -124,7 +124,7 @@ async fn clause_5_7_1_4_retrieve_entitymap_true_creates_map() {
 /// yields a fresh map, not an error.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_1_4_unknown_map_reference_recreates() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:r2", 30).await;
 
     let (status, headers, body) = get_with_map(
@@ -149,7 +149,7 @@ async fn clause_5_7_1_4_unknown_map_reference_recreates() {
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_1_4_live_map_gates_registrations() {
     antares_jsonld::allow_private_egress(true);
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:r3", 30).await;
 
     // canned Context Source serving one extra attribute for r3
@@ -228,7 +228,7 @@ async fn clause_5_7_1_4_live_map_gates_registrations() {
 /// map holding the entity ("@none" for locally held data).
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_3_4_temporal_retrieve_entitymap_true_creates_map() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:t1", 30).await;
 
     let (status, headers, body) = get(
@@ -247,7 +247,7 @@ async fn clause_5_7_3_4_temporal_retrieve_entitymap_true_creates_map() {
 /// outside the map must NOT be returned, and the map location is echoed.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_4_4_live_map_fixes_the_result_set() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:q1", 30).await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:q2", 60).await;
 
@@ -285,7 +285,7 @@ async fn clause_5_7_4_4_live_map_fixes_the_result_set() {
 /// new EntityMap shall be created" — the temporal query recreates (201).
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_4_4_unknown_map_recreates_201() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:q3", 30).await;
 
     let (status, headers, body) = get_with_map(
@@ -307,7 +307,7 @@ async fn clause_5_7_4_4_unknown_map_recreates_201() {
 /// query paths and the retrieval that carries it through — refuses.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_6_4_3_2_2_a_repeated_entitymap_header_names_no_map() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:dup1", 30).await;
 
     // a live map to make the first value a plausible one: a request naming

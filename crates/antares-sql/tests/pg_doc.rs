@@ -44,6 +44,7 @@ async fn list_page_walks_every_row_in_id_order_without_a_ceiling() {
             &id,
             &json!({"id": id, "type": "Subscription"}),
         )
+        .await
         .expect("insert");
     }
 
@@ -53,6 +54,7 @@ async fn list_page_walks_every_row_in_id_order_without_a_ceiling() {
     loop {
         let page = s
             .list_page(&t, DocKind::Subscription, after.as_deref(), 10)
+            .await
             .expect("page");
         let short = page.len() < 10;
         for d in &page {
@@ -74,6 +76,7 @@ async fn list_page_walks_every_row_in_id_order_without_a_ceiling() {
     // `after` is EXCLUSIVE: the row it names is not repeated.
     let page = s
         .list_page(&t, DocKind::Subscription, Some(&seen[0]), 5)
+        .await
         .expect("page");
     assert_eq!(page[0]["id"].as_str(), Some(seen[1].as_str()), "{page:?}");
 
@@ -85,6 +88,7 @@ async fn list_page_walks_every_row_in_id_order_without_a_ceiling() {
             Some("urn:ngsi-ld:Subscription:zzz"),
             10,
         )
+        .await
         .expect("page");
     assert!(page.is_empty(), "{page:?}");
 
@@ -136,6 +140,7 @@ async fn the_page_cursor_and_the_page_order_are_the_same_comparison() {
             id,
             &json!({"id": id, "type": "Subscription"}),
         )
+        .await
         .expect("seed");
     }
 
@@ -144,6 +149,7 @@ async fn the_page_cursor_and_the_page_order_are_the_same_comparison() {
     loop {
         let page = s
             .list_page(&t, DocKind::Subscription, after.as_deref(), 3)
+            .await
             .expect("page");
         let short = page.len() < 3;
         for d in &page {
@@ -180,6 +186,7 @@ async fn the_page_cursor_and_the_page_order_are_the_same_comparison() {
     // page that still advances reaches the last row.
     assert_eq!(
         s.list_page(&t, DocKind::Subscription, None, 100)
+            .await
             .expect("wide")
             .len(),
         ids.len()
@@ -188,6 +195,7 @@ async fn the_page_cursor_and_the_page_order_are_the_same_comparison() {
     let mut steps = 0;
     while let Some(d) = s
         .list_page(&t, DocKind::Subscription, cursor.as_deref(), 1)
+        .await
         .expect("one")
         .pop()
     {
@@ -198,7 +206,9 @@ async fn the_page_cursor_and_the_page_order_are_the_same_comparison() {
 
     for id in ids {
         assert!(
-            s.delete(&t, DocKind::Subscription, id).expect("delete"),
+            s.delete(&t, DocKind::Subscription, id)
+                .await
+                .expect("delete"),
             "the row is addressed by its own id: {id}"
         );
     }
@@ -220,26 +230,30 @@ async fn doc_kinds_roundtrip_and_extract_bookkeeping() {
         DocKind::CSourceSubscription,
     ] {
         let id = format!("urn:x:{kind:?}");
-        let _ = s.delete(&t, kind, &id);
+        let _ = s.delete(&t, kind, &id).await;
         let doc = json!({"id": id, "type": "doc", "n": 1});
         assert!(
-            !s.upsert(&t, kind, &id, &doc).expect("insert"),
+            !s.upsert(&t, kind, &id, &doc).await.expect("insert"),
             "fresh insert"
         );
         assert!(s
             .upsert(&t, kind, &id, &json!({"id": id, "n": 2}))
+            .await
             .expect("update"));
-        assert_eq!(s.get(&t, kind, &id).expect("get").expect("present")["n"], 2);
-        assert_eq!(s.list(&t, kind).expect("list").len(), 1);
+        assert_eq!(
+            s.get(&t, kind, &id).await.expect("get").expect("present")["n"],
+            2
+        );
+        assert_eq!(s.list(&t, kind).await.expect("list").len(), 1);
         // cross-tenant invisible
         let other = TenantId::new("pgdoc_other").expect("t");
-        assert!(s.get(&other, kind, &id).expect("get").is_none());
-        assert!(s.delete(&t, kind, &id).expect("delete"));
+        assert!(s.get(&other, kind, &id).await.expect("get").is_none());
+        assert!(s.delete(&t, kind, &id).await.expect("delete"));
     }
 
     // Rows-are-truth: bookkeeping columns really extracted from the doc.
     let id = "urn:ngsi-ld:Subscription:bk";
-    let _ = s.delete(&t, DocKind::Subscription, id);
+    let _ = s.delete(&t, DocKind::Subscription, id).await;
     let doc = json!({
         "id": id, "type": "Subscription", "isActive": false,
         "expiresAt": "2027-01-01T00:00:00Z",
@@ -250,14 +264,18 @@ async fn doc_kinds_roundtrip_and_extract_bookkeeping() {
         }
     });
     s.upsert(&t, DocKind::Subscription, id, &doc)
+        .await
         .expect("upsert");
     let (active, sent) = s
         .status_row(&t, DocKind::Subscription, id)
+        .await
         .expect("status")
         .expect("row");
     assert!(!active, "isActive:false extracted");
     assert_eq!(sent, 7, "notification.timesSent extracted");
-    s.delete(&t, DocKind::Subscription, id).expect("cleanup");
+    s.delete(&t, DocKind::Subscription, id)
+        .await
+        .expect("cleanup");
 }
 
 /// `jsonld_contexts` is ONE cross-tenant keyspace and the Cached ceiling
@@ -278,15 +296,16 @@ async fn jsonld_contexts_roundtrip() {
     // generated tenant is the default Tenant's.
     let owner = TenantId::default();
     let id = "https://example.org/ctx/test.jsonld";
-    let _ = s.context_delete(None, id);
+    let _ = s.context_delete(None, id).await;
     s.context_put(
         None,
         id,
         &json!({"@context": {"n": "https://x/n"}}),
         "Cached",
     )
+    .await
     .expect("put");
-    assert!(s.context_get(None, id).expect("get").is_some());
+    assert!(s.context_get(None, id).await.expect("get").is_some());
     // The listing read carries metadata and never the stored document: a
     // body is accepted up to 5 MiB and only the Cached rows are capped in
     // number, so a read that carried bodies was gigabytes on the boot path.
@@ -298,8 +317,9 @@ async fn jsonld_contexts_roundtrip() {
                 "body": {"@context": {"big": "https://x/big"}}}),
         "Hosted",
     )
+    .await
     .expect("put");
-    let meta = s.context_list_meta(Some(&owner)).expect("list");
+    let meta = s.context_list_meta(Some(&owner)).await.expect("list");
     let probe = meta
         .iter()
         .find(|c| c["localId"] == "urn:meta:probe")
@@ -311,6 +331,7 @@ async fn jsonld_contexts_roundtrip() {
     assert_eq!(probe["kind"], "Hosted", "the metadata itself survives");
     assert_eq!(
         s.context_get(Some(&owner), "urn:meta:probe")
+            .await
             .expect("get")
             .expect("row")["body"]["@context"]["big"],
         "https://x/big",
@@ -318,9 +339,10 @@ async fn jsonld_contexts_roundtrip() {
     );
     assert!(s
         .context_delete(Some(&owner), "urn:meta:probe")
+        .await
         .expect("delete"));
-    assert!(s.context_delete(None, id).expect("delete"));
-    assert!(s.context_get(None, id).expect("get").is_none());
+    assert!(s.context_delete(None, id).await.expect("delete"));
+    assert!(s.context_get(None, id).await.expect("get").is_none());
 }
 
 /// The 047_06 leftover-subscription bug: a bookkeeping writeback racing a
@@ -338,39 +360,48 @@ async fn mutate_never_resurrects_a_deleted_row() {
 
     // plain sequential: mutate after delete is a None, not an insert
     s.upsert(&t, DocKind::CSourceSubscription, id, &json!({"id": id}))
+        .await
         .expect("insert");
-    assert!(s.delete(&t, DocKind::CSourceSubscription, id).expect("del"));
+    assert!(s
+        .delete(&t, DocKind::CSourceSubscription, id)
+        .await
+        .expect("del"));
     let r = s
         .mutate(&t, DocKind::CSourceSubscription, id, |d| {
             d["status"] = json!("failed");
             Ok::<(), ()>(())
         })
+        .await
         .expect("mutate");
     assert!(r.is_none(), "mutate on a deleted row must be None");
     assert!(s
         .get(&t, DocKind::CSourceSubscription, id)
+        .await
         .expect("get")
         .is_none());
 
     // racing: closure holds the row lock while a delete lands concurrently
     s.upsert(&t, DocKind::CSourceSubscription, id, &json!({"id": id}))
+        .await
         .expect("insert");
     let (s1, s2) = (s.clone(), s.clone());
     let (t1, t2) = (t.clone(), t.clone());
-    let m = tokio::task::spawn_blocking(move || {
+    let m = tokio::spawn(async move {
         s1.mutate(&t1, DocKind::CSourceSubscription, id, |d| {
             std::thread::sleep(std::time::Duration::from_millis(300));
             d["status"] = json!("failed");
             Ok::<(), ()>(())
         })
+        .await
     });
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let d = tokio::task::spawn_blocking(move || s2.delete(&t2, DocKind::CSourceSubscription, id));
+    let d = tokio::spawn(async move { s2.delete(&t2, DocKind::CSourceSubscription, id).await });
     let (m, d) = (m.await.expect("join"), d.await.expect("join"));
     m.expect("mutate ok");
     d.expect("delete ok");
     assert!(
         s.get(&t, DocKind::CSourceSubscription, id)
+            .await
             .expect("get")
             .is_none(),
         "row must be gone after mutate+delete in any interleaving"
@@ -420,6 +451,7 @@ async fn clause_5_13_1_cached_contexts_are_capped_oldest_first() {
     .expect("seed hosted");
 
     s.context_put(None, "ctxcap:new", &json!({"@context": {}}), "Cached")
+        .await
         .expect("put one over the ceiling");
     let count = |kind: &'static str| {
         let pool = pool.clone();
@@ -437,19 +469,29 @@ async fn clause_5_13_1_cached_contexts_are_capped_oldest_first() {
         "the ceiling holds after the put"
     );
     assert!(
-        s.context_get(None, "ctxcap:new").expect("get").is_some(),
+        s.context_get(None, "ctxcap:new")
+            .await
+            .expect("get")
+            .is_some(),
         "the new entry is the one kept"
     );
     assert!(
-        s.context_get(None, "ctxcap:1").expect("get").is_none(),
+        s.context_get(None, "ctxcap:1")
+            .await
+            .expect("get")
+            .is_none(),
         "the oldest Cached entry is the one evicted"
     );
     assert!(
-        s.context_get(None, "ctxcap:2").expect("get").is_some(),
+        s.context_get(None, "ctxcap:2")
+            .await
+            .expect("get")
+            .is_some(),
         "eviction stops at the ceiling — the second-oldest stays"
     );
     assert!(
         s.context_get(Some(&TenantId::default()), "ctxcap:hosted")
+            .await
             .expect("get")
             .is_some(),
         "a Hosted entry is tenant-authored and must never be evicted"
@@ -462,6 +504,7 @@ async fn clause_5_13_1_cached_contexts_are_capped_oldest_first() {
         &json!({"@context": {}}),
         "Hosted",
     )
+    .await
     .expect("put hosted");
     assert_eq!(count("Hosted").await, 2, "both Hosted entries stay");
     assert_eq!(count("Cached").await, cap, "a Hosted put evicts nothing");
@@ -517,36 +560,45 @@ async fn clause_5_12_matching_registrations_narrows_by_type_and_id() {
         ("urn:csr:m:attrs", json!({"propertyNames": ["speed"]})),
     ];
     for (id, info) in &seed {
-        let _ = s.delete(&t, DocKind::Registration, id);
+        let _ = s.delete(&t, DocKind::Registration, id).await;
         s.upsert(&t, DocKind::Registration, id, &reg(id, info.clone()))
+            .await
             .expect("seed");
     }
     // a same-shaped registration in a DIFFERENT tenant must never surface
     let foreign = "urn:csr:m:foreign";
-    let _ = s.delete(&other, DocKind::Registration, foreign);
+    let _ = s.delete(&other, DocKind::Registration, foreign).await;
     s.upsert(
         &other,
         DocKind::Registration,
         foreign,
         &reg(foreign, json!({"entities": [{"type": "Vehicle"}]})),
     )
+    .await
     .expect("seed foreign");
 
-    let ids_of = |ids: Option<Vec<String>>, types: Option<Vec<String>>| {
-        let mut got: Vec<String> = s
-            .matching_registrations(&t, ids.as_deref(), types.as_deref())
-            .expect("matching")
-            .iter()
-            .map(|d| d["id"].as_str().unwrap_or_default().to_owned())
-            .collect();
-        got.sort();
-        got
-    };
+    // a macro, not a closure: the query is awaited and an async closure is not
+    // a stable language feature
+    macro_rules! ids_of {
+        ($ids:expr, $types:expr) => {{
+            let ids: Option<Vec<String>> = $ids;
+            let types: Option<Vec<String>> = $types;
+            let mut got: Vec<String> = s
+                .matching_registrations(&t, ids.as_deref(), types.as_deref())
+                .await
+                .expect("matching")
+                .iter()
+                .map(|d| d["id"].as_str().unwrap_or_default().to_owned())
+                .collect();
+            got.sort();
+            got
+        }};
+    }
     let ty = |t: &str| Some(vec![t.to_owned()]);
 
     // no narrowing at all: every registration of this tenant, and nothing else
     assert_eq!(
-        ids_of(None, None),
+        ids_of!(None, None),
         [
             "urn:csr:m:attrs",
             "urn:csr:m:pattern",
@@ -558,7 +610,7 @@ async fn clause_5_12_matching_registrations_narrows_by_type_and_id() {
 
     // by type: the Room registration drops out; the unconstrained ones stay
     assert_eq!(
-        ids_of(None, ty("Vehicle")),
+        ids_of!(None, ty("Vehicle")),
         [
             "urn:csr:m:attrs",
             "urn:csr:m:pattern",
@@ -568,14 +620,14 @@ async fn clause_5_12_matching_registrations_narrows_by_type_and_id() {
     );
     // a type nobody registered for keeps only the type-less registrations
     assert_eq!(
-        ids_of(None, ty("Bridge")),
+        ids_of!(None, ty("Bridge")),
         ["urn:csr:m:attrs", "urn:csr:m:pattern"]
     );
 
     // by id: a registration bound to a DIFFERENT explicit id drops out,
     // the idPattern row survives (the regex is the matcher's business)
     assert_eq!(
-        ids_of(Some(vec!["urn:e:room1".into()]), None),
+        ids_of!(Some(vec!["urn:e:room1".into()]), None),
         [
             "urn:csr:m:attrs",
             "urn:csr:m:pattern",
@@ -586,7 +638,7 @@ async fn clause_5_12_matching_registrations_narrows_by_type_and_id() {
 
     // both dimensions compose
     assert_eq!(
-        ids_of(Some(vec!["urn:e:v9".into()]), ty("Vehicle")),
+        ids_of!(Some(vec!["urn:e:v9".into()]), ty("Vehicle")),
         [
             "urn:csr:m:attrs",
             "urn:csr:m:pattern",
@@ -596,9 +648,12 @@ async fn clause_5_12_matching_registrations_narrows_by_type_and_id() {
     );
 
     for (id, _) in &seed {
-        s.delete(&t, DocKind::Registration, id).expect("cleanup");
+        s.delete(&t, DocKind::Registration, id)
+            .await
+            .expect("cleanup");
     }
     s.delete(&other, DocKind::Registration, foreign)
+        .await
         .expect("cleanup");
 }
 
@@ -623,6 +678,7 @@ async fn registration_maintains_csource_index() {
         }]
     });
     s.upsert(&t, DocKind::Registration, "urn:csr:idx1", &reg)
+        .await
         .expect("upsert");
     let count = |pool: &sqlx::PgPool| {
         let pool = pool.clone();
@@ -651,12 +707,14 @@ async fn registration_maintains_csource_index() {
         "information": [{"entities": [{"id": "urn:e:1", "type": "T"}]}]
     });
     s.upsert(&t, DocKind::Registration, "urn:csr:idx1", &reg2)
+        .await
         .expect("update");
     assert_eq!(count(&pool).await, 1, "rebuilt to the narrowed shape");
 
     // delete cascades the index rows away (FK ON DELETE CASCADE)
     assert!(s
         .delete(&t, DocKind::Registration, "urn:csr:idx1")
+        .await
         .expect("delete"));
     assert_eq!(count(&pool).await, 0, "cascade cleaned the index");
     // A registration's own `location` becomes an indexed geometry so
@@ -670,6 +728,7 @@ async fn registration_maintains_csource_index() {
                      "coordinates": [[[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]]]}
     });
     s.upsert(&t, DocKind::Registration, geo_id, &geo_reg)
+        .await
         .expect("upsert geo reg");
     let inside: bool = sqlx::query_scalar(
         "SELECT bool_or(ST_Within(ST_SetSRID(ST_Point(2, 2), 4326), location))
@@ -712,6 +771,7 @@ async fn record_delivery_returns_the_pre_image_it_actually_overwrote() {
                 "notification": {"endpoint": {"uri": "http://127.0.0.1:9"},
                                  "lastSuccess": t0}}),
     )
+    .await
     .expect("seed");
 
     // The other attempt's UPDATE, landed but not yet committed: it holds the
@@ -731,8 +791,9 @@ async fn record_delivery_returns_the_pre_image_it_actually_overwrote() {
     .expect("the competing attempt writes");
 
     let (s2, t2s) = (s.clone(), t.clone());
-    let recording = tokio::task::spawn_blocking(move || {
+    let recording = tokio::spawn(async move {
         s2.record_delivery(&t2s, DocKind::Subscription, id, t2)
+            .await
     });
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert!(
@@ -755,5 +816,5 @@ async fn record_delivery_returns_the_pre_image_it_actually_overwrote() {
     );
     assert_eq!(doc["notification"]["lastSuccess"], json!(t2));
     assert_eq!(doc["notification"]["timesSent"], json!(1));
-    let _ = s.delete(&t, DocKind::Subscription, id);
+    let _ = s.delete(&t, DocKind::Subscription, id).await;
 }

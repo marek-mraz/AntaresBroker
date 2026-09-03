@@ -33,9 +33,18 @@ pub fn stored_object(doc: &mut Value) -> Result<&mut serde_json::Map<String, Val
         .ok_or_else(|| NgsiError::InternalError("stored document is not a JSON object".into()))
 }
 
+/// What a [`ChangeHook`] call returns: the hook records temporal history
+/// through the temporal driver, which is asynchronous, so the driver that
+/// fires the hook awaits it before its own write returns.
+pub type HookFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
 /// Called with (tenant, before, after) on every entity write — the local-mode
-/// change feed: create ⇒ (None, Some), delete ⇒ (Some, None).
-pub type ChangeHook = Box<dyn Fn(&TenantId, Option<Value>, Option<Value>) + Send + Sync>;
+/// change feed: create ⇒ (None, Some), delete ⇒ (Some, None). Shared rather
+/// than owned: a driver clones it out of its lock before awaiting, since a
+/// lock guard cannot be held across an await.
+pub type ChangeHook = std::sync::Arc<
+    dyn for<'a> Fn(&'a TenantId, Option<Value>, Option<Value>) -> HookFuture<'a> + Send + Sync,
+>;
 
 /// Which resource family an operation touches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,16 +165,16 @@ pub struct TenantStats {
 /// typed `Result<T, E>` travels through [`CurrentStateDriverExt::mutate`]'s
 /// side slot; the boxed closure only signals commit (`Ok`) vs reject
 /// (`Err`) to the driver.
-pub type MutateFn<'a> = Box<dyn FnOnce(&mut Value) -> Result<(), ()> + 'a>;
+pub type MutateFn<'a> = Box<dyn FnOnce(&mut Value) -> Result<(), ()> + Send + 'a>;
 /// Per-id variant for batch mutation; the driver calls it once per PRESENT
 /// id, in input order — the ext trait's error slot depends on that order.
-pub type BatchMutateFn<'a> = Box<dyn FnMut(&str, &mut Value) -> Result<(), ()> + 'a>;
+pub type BatchMutateFn<'a> = Box<dyn FnMut(&str, &mut Value) -> Result<(), ()> + Send + 'a>;
 /// The delivery stamp expressed as a `mutate`. This is the rule itself —
 /// what `timesSent`, `lastNotification`, `lastSuccess` and `status` become
 /// after one attempt (5.2.14.2) — so a backend that reimplements
 /// [`CurrentStateDriver::record_delivery`] in its own query language is
 /// reimplementing THIS, and the two must agree.
-pub fn record_delivery_via_mutate(
+pub async fn record_delivery_via_mutate(
     d: &(impl CurrentStateDriver + ?Sized),
     tenant: &TenantId,
     kind: Kind,
@@ -194,7 +203,8 @@ pub fn record_delivery_via_mutate(
             prev_success,
         });
         Ok(())
-    })?;
+    })
+    .await?;
     Ok(out)
 }
 
@@ -211,7 +221,7 @@ pub fn record_delivery_via_mutate(
 /// a registration that has only ever succeeded carries no `timesFailed` and
 /// no `lastFailure`, and one that has only ever failed carries no
 /// `lastSuccess`. `status` always names the LAST attempt.
-pub fn record_forward_via_mutate(
+pub async fn record_forward_via_mutate(
     d: &(impl CurrentStateDriver + ?Sized),
     tenant: &TenantId,
     id: &str,
@@ -235,7 +245,8 @@ pub fn record_forward_via_mutate(
         }
         out = Some(doc.clone());
         Ok(())
-    })?;
+    })
+    .await?;
     Ok(out)
 }
 
@@ -284,16 +295,17 @@ pub fn context_row_visible(row: &Value, tenant: Option<&TenantId>) -> bool {
 /// an insert (a bookkeeping writeback racing a DELETE must not resurrect
 /// the row). Backends map their internal failures to
 /// `NgsiError::InternalError` with a GENERIC client-visible detail.
+#[async_trait::async_trait]
 pub trait CurrentStateDriver: Send + Sync {
     /// Readiness RIGHT NOW — a lost database flips /q/ready to 503.
-    fn ping(&self) -> Result<(), NgsiError>;
+    async fn ping(&self) -> Result<(), NgsiError>;
     /// (Queued writers, peak) of a single-writer commit section, if the
     /// backend has one.
     fn commit_queue(&self) -> Option<(usize, usize)> {
         None
     }
     /// Drain: finish in-flight work and disconnect cleanly.
-    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+    async fn close(&self);
     /// What this driver runs on, for `/q/health`: engine, server version,
     /// extensions — whatever an operator needs to tell two deployments of
     /// the same backend name apart. Read from state captured at startup,
@@ -309,18 +321,18 @@ pub trait CurrentStateDriver: Send + Sync {
         let _ = on;
     }
     /// Outbox drain: oldest-first page of pending rows `(seq, tenant, event)`.
-    fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, Value)>, NgsiError> {
+    async fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, Value)>, NgsiError> {
         let _ = limit;
         Ok(Vec::new())
     }
     /// Outbox drain: delete EXACTLY the published rows.
-    fn outbox_ack(&self, seqs: &[i64]) -> Result<u64, NgsiError> {
+    async fn outbox_ack(&self, seqs: &[i64]) -> Result<u64, NgsiError> {
         let _ = seqs;
         Ok(0)
     }
 
     /// Insert a document; `false` if the id already exists (nothing written).
-    fn create(
+    async fn create(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -328,17 +340,18 @@ pub trait CurrentStateDriver: Send + Sync {
         doc: Value,
     ) -> Result<bool, NgsiError>;
     /// Batch create (entities only); created-flags in input order.
-    fn batch_create(
+    async fn batch_create(
         &self,
         tenant: &TenantId,
         items: Vec<(String, Value)>,
     ) -> Result<Vec<bool>, NgsiError>;
     /// Batch delete (entities only); deleted-flags in input order, a
     /// duplicate id deletes once and reads absent the second time.
-    fn batch_delete(&self, tenant: &TenantId, ids: &[String]) -> Result<Vec<bool>, NgsiError>;
+    async fn batch_delete(&self, tenant: &TenantId, ids: &[String])
+        -> Result<Vec<bool>, NgsiError>;
     /// Batch upsert with REPLACE semantics (entities only); created-flags in
     /// input order.
-    fn batch_upsert(
+    async fn batch_upsert(
         &self,
         tenant: &TenantId,
         items: Vec<(String, Value)>,
@@ -348,7 +361,7 @@ pub trait CurrentStateDriver: Send + Sync {
     /// The polarity is the opposite of [`Self::batch_upsert`], which answers
     /// created-flags — the batch path needs them to split 201 from 204
     /// (5.6.8) while the single path ignores the value.
-    fn upsert(
+    async fn upsert(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -356,9 +369,14 @@ pub trait CurrentStateDriver: Send + Sync {
         doc: Value,
     ) -> Result<bool, NgsiError>;
     /// Read one document; `None` if absent.
-    fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError>;
+    async fn get(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+    ) -> Result<Option<Value>, NgsiError>;
     /// Delete one document; `false` if it was absent.
-    fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError>;
+    async fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError>;
     /// Delete one Entity, but only if `keep` accepts the stored document.
     /// `false` = absent OR refused; the caller cannot tell the two apart and
     /// does not need to, because 5.6.6.4 gives the same answer to both: an
@@ -370,18 +388,18 @@ pub trait CurrentStateDriver: Send + Sync {
     /// deleted and recreated under the same id, and the delete then lands on
     /// a document the caller never inspected. A backend inheriting a default
     /// would keep the race with no compile error to say so.
-    fn delete_entity_if(
+    async fn delete_entity_if(
         &self,
         tenant: &TenantId,
         id: &str,
-        keep: &dyn Fn(&Value) -> bool,
+        keep: &(dyn for<'v> Fn(&'v Value) -> bool + Sync),
     ) -> Result<bool, NgsiError>;
     /// Every document of this kind in the tenant.
     ///
     /// A backend may refuse a tenant that holds too many to materialize
     /// (5.5.6 TooManyResults). That is right for a client query and wrong
     /// for a reader that must see ALL of them — use [`Self::list_page`].
-    fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError>;
+    async fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError>;
     /// One id-ordered page of documents, for the internal readers that must
     /// see every one of them and so cannot be refused: ids strictly greater
     /// than `after`, at most `limit`. A short page means the end.
@@ -396,7 +414,7 @@ pub trait CurrentStateDriver: Send + Sync {
     /// `list` is the read that may refuse. A backend inheriting that would
     /// silently reacquire the outage this method exists to prevent, with no
     /// compile error to say so.
-    fn list_page(
+    async fn list_page(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -422,7 +440,7 @@ pub trait CurrentStateDriver: Send + Sync {
     ///
     /// Required for the same reason `list_page` is: the obvious default
     /// slices `list`, and `list` is the read that may refuse.
-    fn list_slice(
+    async fn list_slice(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -431,7 +449,7 @@ pub trait CurrentStateDriver: Send + Sync {
     ) -> Result<(Vec<Value>, usize), NgsiError>;
     /// Registrations that can match these ids/types (a backend may narrow;
     /// returning the full tenant list is always correct).
-    fn matching_registrations(
+    async fn matching_registrations(
         &self,
         tenant: &TenantId,
         ids: Option<&[String]>,
@@ -439,14 +457,14 @@ pub trait CurrentStateDriver: Send + Sync {
     ) -> Result<Vec<Value>, NgsiError>;
     /// Query Entities with the filter pushed down where the backend can
     /// take it; the caller re-checks unless the outcome says `decided`.
-    fn query_entities(
+    async fn query_entities(
         &self,
         tenant: &TenantId,
         f: &filter::EntityFilter<'_>,
     ) -> Result<filter::QueryOutcome, NgsiError>;
     /// Read-modify-write under the row lock; `None` = absent (never an
     /// insert), `Some(Err)` = the closure rejected, nothing committed.
-    fn mutate_boxed<'a>(
+    async fn mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -454,7 +472,7 @@ pub trait CurrentStateDriver: Send + Sync {
         f: MutateFn<'a>,
     ) -> Result<Option<Result<(), ()>>, NgsiError>;
     /// Batch read-modify-write (entities only); results align with `ids`.
-    fn batch_mutate_boxed<'a>(
+    async fn batch_mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         ids: &[String],
@@ -472,18 +490,18 @@ pub trait CurrentStateDriver: Send + Sync {
     /// should override it with one statement: at fan-out every delivery on
     /// one subscription contends for that row, so the lock hold time — not
     /// the statement count — is what serializes delivery.
-    fn record_delivery(
+    async fn record_delivery(
         &self,
         tenant: &TenantId,
         kind: Kind,
         id: &str,
         now: &str,
     ) -> Result<Option<Delivery>, NgsiError> {
-        record_delivery_via_mutate(self, tenant, kind, id, now)
+        record_delivery_via_mutate(self, tenant, kind, id, now).await
     }
     /// Reap expired docs/instances (backends with their own maintenance job
     /// return 0).
-    fn sweep_expired(&self) -> usize {
+    async fn sweep_expired(&self) -> usize {
         0
     }
     /// Table 5.2.9-2 forward bookkeeping: stamp one distributed operation on
@@ -496,17 +514,17 @@ pub trait CurrentStateDriver: Send + Sync {
     // request fans out to is one contended row; a backend whose `mutate`
     // locks that row across a network round trip can collapse it into one
     // statement the way `record_delivery` does, once a profile asks.
-    fn record_forward(
+    async fn record_forward(
         &self,
         tenant: &TenantId,
         id: &str,
         now: &str,
         ok: bool,
     ) -> Result<Option<Value>, NgsiError> {
-        record_forward_via_mutate(self, tenant, id, now, ok)
+        record_forward_via_mutate(self, tenant, id, now, ok).await
     }
     /// 5.5.10: the default Tenant implicitly exists; others once created.
-    fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError>;
+    async fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError>;
     /// The iteration domain of the interval sweep and of every mirror
     /// hydration: a tenant holding a Subscription, a Context Source
     /// Registration Subscription OR a Registration SHALL appear. A superset
@@ -521,24 +539,24 @@ pub trait CurrentStateDriver: Send + Sync {
     /// alone whenever it is installed. A domain that stopped at
     /// subscription-holding tenants left a tenant with registrations and no
     /// subscription forwarding to no Context Source at all.
-    fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError>;
+    async fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError>;
     /// Every tenant the backend knows, sorted. The default Tenant is listed
     /// even when empty (5.5.10: it always exists). Names only: at the
     /// 10 000-tenant target (ADR-0001) an inventory carrying per-kind counts
     /// would cost a count per kind per tenant, so the counts are paid per
     /// lookup in `tenant_stats_one`.
-    fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
+    async fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
         Err(NgsiError::OperationNotSupported("tenant inventory".into()))
     }
     /// What one tenant holds; `None` when it does not exist.
-    fn tenant_stats_one(&self, tenant: &TenantId) -> Result<Option<TenantStats>, NgsiError> {
+    async fn tenant_stats_one(&self, tenant: &TenantId) -> Result<Option<TenantStats>, NgsiError> {
         let _ = tenant;
         Err(NgsiError::OperationNotSupported("tenant inventory".into()))
     }
     /// Remove every current-state document of one tenant; `false` when the
     /// tenant did not exist. The default Tenant is emptied but keeps
     /// existing.
-    fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+    async fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
         let _ = tenant;
         Err(NgsiError::OperationNotSupported("tenant purge".into()))
     }
@@ -550,14 +568,22 @@ pub trait CurrentStateDriver: Send + Sync {
     /// and is reachable with any `tenant`, and every other kind is reachable
     /// only by the Tenant named in its `owner` member. A backend that ignores
     /// the parameter fails the driver contract.
-    fn context_put(&self, tenant: Option<&TenantId>, id: &str, doc: Value)
-        -> Result<(), NgsiError>;
+    async fn context_put(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+        doc: Value,
+    ) -> Result<(), NgsiError>;
     /// Read a stored @context document by id; `None` if absent or owned by
     /// another Tenant.
-    fn context_get(&self, tenant: Option<&TenantId>, id: &str) -> Result<Option<Value>, NgsiError>;
+    async fn context_get(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+    ) -> Result<Option<Value>, NgsiError>;
     /// Delete a stored @context document; `false` if it was absent or owned
     /// by another Tenant.
-    fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError>;
+    async fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError>;
     /// Every stored @context document.
     /// Every stored `@context` row WITHOUT its `body` member — the url,
     /// localId, kind, owner and usage counters, and not the document.
@@ -568,7 +594,20 @@ pub trait CurrentStateDriver: Send + Sync {
     /// gigabytes — on the boot path, where it decides whether the broker
     /// starts at all. The callers that need one body ask for it by id
     /// ([`Self::context_get`]); nothing needs them all at once.
-    fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError>;
+    async fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError>;
+}
+
+/// The typed-slot lock, taken and released inside one closure call. A
+/// poisoned slot is read through: the panic that poisoned it is already on
+/// its way out of the driver, and the value behind it is whatever the
+/// closure managed to write.
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The same, for taking the slot's value once the driver has answered.
+fn into_inner<T>(m: std::sync::Mutex<T>) -> T {
+    m.into_inner().unwrap_or_else(|p| p.into_inner())
 }
 
 /// Typed sugar over the boxed mutate seam — call sites keep their
@@ -577,66 +616,70 @@ pub trait CurrentStateDriver: Send + Sync {
 pub trait CurrentStateDriverExt {
     /// Typed read-modify-write: `None` = absent, `Some(Err(e))` = the closure
     /// rejected and nothing was committed.
-    fn mutate<T, E>(
+    fn mutate<T: Send, E: Send>(
         &self,
         tenant: &TenantId,
         kind: Kind,
         id: &str,
-        f: impl FnOnce(&mut Value) -> Result<T, E>,
-    ) -> Result<Option<Result<T, E>>, NgsiError>;
+        f: impl FnOnce(&mut Value) -> Result<T, E> + Send,
+    ) -> impl std::future::Future<Output = Result<Option<Result<T, E>>, NgsiError>> + Send;
     /// Typed batch read-modify-write (entities only); results align with `ids`.
-    fn batch_mutate<E>(
+    fn batch_mutate<E: Send>(
         &self,
         tenant: &TenantId,
         ids: &[String],
-        f: impl FnMut(&str, &mut Value) -> Result<(), E>,
-    ) -> Result<Vec<Option<Result<(), E>>>, NgsiError>;
+        f: impl FnMut(&str, &mut Value) -> Result<(), E> + Send,
+    ) -> impl std::future::Future<Output = Result<Vec<Option<Result<(), E>>>, NgsiError>> + Send;
 }
 
 impl<S: CurrentStateDriver + ?Sized> CurrentStateDriverExt for S {
-    fn mutate<T, E>(
+    async fn mutate<T: Send, E: Send>(
         &self,
         tenant: &TenantId,
         kind: Kind,
         id: &str,
-        f: impl FnOnce(&mut Value) -> Result<T, E>,
+        f: impl FnOnce(&mut Value) -> Result<T, E> + Send,
     ) -> Result<Option<Result<T, E>>, NgsiError> {
-        let slot = std::cell::RefCell::new(None);
-        let r = self.mutate_boxed(
-            tenant,
-            kind,
-            id,
-            Box::new(|v| {
-                let r = f(v);
-                let flag = if r.is_ok() { Ok(()) } else { Err(()) };
-                *slot.borrow_mut() = Some(r);
-                flag
-            }),
-        )?;
-        Ok(r.and_then(|_| slot.into_inner()))
+        let slot = std::sync::Mutex::new(None);
+        let r = self
+            .mutate_boxed(
+                tenant,
+                kind,
+                id,
+                Box::new(|v| {
+                    let r = f(v);
+                    let flag = if r.is_ok() { Ok(()) } else { Err(()) };
+                    *lock(&slot) = Some(r);
+                    flag
+                }),
+            )
+            .await?;
+        Ok(r.and_then(|_| into_inner(slot)))
     }
 
-    fn batch_mutate<E>(
+    async fn batch_mutate<E: Send>(
         &self,
         tenant: &TenantId,
         ids: &[String],
-        mut f: impl FnMut(&str, &mut Value) -> Result<(), E>,
+        mut f: impl FnMut(&str, &mut Value) -> Result<(), E> + Send,
     ) -> Result<Vec<Option<Result<(), E>>>, NgsiError> {
         // Errors land in the queue in closure-call order, which the trait
         // contract fixes to input order over present ids.
-        let errs = std::cell::RefCell::new(std::collections::VecDeque::new());
-        let r = self.batch_mutate_boxed(
-            tenant,
-            ids,
-            Box::new(|id, v| match f(id, v) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    errs.borrow_mut().push_back(e);
-                    Err(())
-                }
-            }),
-        )?;
-        let mut errs = errs.into_inner();
+        let errs = std::sync::Mutex::new(std::collections::VecDeque::new());
+        let r = self
+            .batch_mutate_boxed(
+                tenant,
+                ids,
+                Box::new(|id, v| match f(id, v) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        lock(&errs).push_back(e);
+                        Err(())
+                    }
+                }),
+            )
+            .await?;
+        let mut errs = into_inner(errs);
         let mut out = Vec::with_capacity(r.len());
         for slot in r {
             out.push(match slot {
@@ -697,12 +740,13 @@ pub struct TemporalEvent {
 /// benign no-ops on a driver without temporal support; the CLIENT-facing
 /// operations answer `OperationNotSupported` (422 per CIM 009
 /// Table 6.3.2-1) instead.
+#[async_trait::async_trait]
 pub trait TemporalDriver: Send + Sync {
     /// The drain: one call carries a whole request's events, in production
     /// order. The default folds consecutive events of one entity into a
     /// single `temporal_append` (scope changes go through `mutate`, as
     /// 4.5.6 shapes them); a bulk writer overrides this and sees the batch.
-    fn event_list(&self, evs: &[TemporalEvent]) -> Result<(), NgsiError> {
+    async fn event_list(&self, evs: &[TemporalEvent]) -> Result<(), NgsiError> {
         let mut i = 0;
         while i < evs.len() {
             let (tenant, id) = (&evs[i].tenant, evs[i].entity_id.as_str());
@@ -725,7 +769,8 @@ pub trait TemporalDriver: Send + Sync {
                             }
                         }
                         Ok::<(), ()>(())
-                    })?;
+                    })
+                    .await?;
                 } else {
                     if let Some(arr) = additions
                         .entry(ev.attr.clone())
@@ -738,7 +783,8 @@ pub trait TemporalDriver: Send + Sync {
                 j += 1;
             }
             if !additions.is_empty() {
-                self.temporal_append(tenant, id, shell, &Value::Object(additions))?;
+                self.temporal_append(tenant, id, shell, &Value::Object(additions))
+                    .await?;
             }
             i = j;
         }
@@ -751,17 +797,17 @@ pub trait TemporalDriver: Send + Sync {
     }
     /// Stored attribute instances of one tenant (inventory); a driver
     /// without history reports 0.
-    fn attr_instance_count(&self, tenant: &TenantId) -> Result<u64, NgsiError> {
+    async fn attr_instance_count(&self, tenant: &TenantId) -> Result<u64, NgsiError> {
         let _ = tenant;
         Ok(0)
     }
     /// Remove the whole history of one tenant; nothing to do without history.
-    fn purge_tenant(&self, tenant: &TenantId) -> Result<(), NgsiError> {
+    async fn purge_tenant(&self, tenant: &TenantId) -> Result<(), NgsiError> {
         let _ = tenant;
         Ok(())
     }
     /// Readiness of the temporal backend; the default is always ready.
-    fn ping(&self) -> Result<(), NgsiError> {
+    async fn ping(&self) -> Result<(), NgsiError> {
         Ok(())
     }
     /// What this temporal driver runs on, for `/q/health`; the same
@@ -774,14 +820,12 @@ pub trait TemporalDriver: Send + Sync {
     /// shutdown path closes it here. May be called more than once — when one
     /// instance serves both seams it is closed through each of them — so an
     /// implementation makes it idempotent. The default has nothing to close.
-    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async {})
-    }
+    async fn close(&self) {}
     /// Auto-recording fast path: append instances, creating the meta shell
     /// on first touch — and only for an entity that still exists (5.6.6
     /// deletes history; an append overlapping the delete must not recreate
     /// it).
-    fn temporal_append(
+    async fn temporal_append(
         &self,
         tenant: &TenantId,
         id: &str,
@@ -802,13 +846,13 @@ pub trait TemporalDriver: Send + Sync {
         false
     }
     /// Query Temporal Evolution (5.7.4) with pushdown where possible.
-    fn query_temporal(
+    async fn query_temporal(
         &self,
         tenant: &TenantId,
         f: &filter::TemporalFilter<'_>,
     ) -> Result<filter::TemporalOutcome, NgsiError>;
     /// Retrieve Temporal Evolution (5.7.3) with instance pruning.
-    fn get_temporal(
+    async fn get_temporal(
         &self,
         tenant: &TenantId,
         id: &str,
@@ -816,20 +860,20 @@ pub trait TemporalDriver: Send + Sync {
     ) -> Result<Option<Value>, NgsiError>;
     /// Raw temporal document access (the 5.6.11-5.6.16 edit/delete paths
     /// and internal copies).
-    fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, NgsiError>;
+    async fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, NgsiError>;
     /// Insert a temporal document; `false` if the id already exists.
-    fn create(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError>;
+    async fn create(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError>;
     /// Insert or replace a temporal document. `true` means it was ALREADY
     /// there and this call replaced it; `false` means this call created it,
     /// the same polarity as the current-state seam.
-    fn upsert(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError>;
+    async fn upsert(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError>;
     /// Delete an entity's whole history; `false` if it had none.
-    fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, NgsiError>;
+    async fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, NgsiError>;
     /// Every temporal document in the tenant.
-    fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, NgsiError>;
+    async fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, NgsiError>;
     /// Read-modify-write of one temporal document under its row lock;
     /// `None` = absent (never an insert), `Some(Err)` = rejected, not committed.
-    fn mutate_boxed<'a>(
+    async fn mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         id: &str,
@@ -842,33 +886,35 @@ pub trait TemporalDriver: Send + Sync {
 pub trait TemporalDriverExt {
     /// Typed read-modify-write of one temporal document: `None` = absent,
     /// `Some(Err(e))` = the closure rejected and nothing was committed.
-    fn mutate<T, E>(
+    fn mutate<T: Send, E: Send>(
         &self,
         tenant: &TenantId,
         id: &str,
-        f: impl FnOnce(&mut Value) -> Result<T, E>,
-    ) -> Result<Option<Result<T, E>>, NgsiError>;
+        f: impl FnOnce(&mut Value) -> Result<T, E> + Send,
+    ) -> impl std::future::Future<Output = Result<Option<Result<T, E>>, NgsiError>> + Send;
 }
 
 impl<S: TemporalDriver + ?Sized> TemporalDriverExt for S {
-    fn mutate<T, E>(
+    async fn mutate<T: Send, E: Send>(
         &self,
         tenant: &TenantId,
         id: &str,
-        f: impl FnOnce(&mut Value) -> Result<T, E>,
+        f: impl FnOnce(&mut Value) -> Result<T, E> + Send,
     ) -> Result<Option<Result<T, E>>, NgsiError> {
-        let slot = std::cell::RefCell::new(None);
-        let r = self.mutate_boxed(
-            tenant,
-            id,
-            Box::new(|v| {
-                let r = f(v);
-                let flag = if r.is_ok() { Ok(()) } else { Err(()) };
-                *slot.borrow_mut() = Some(r);
-                flag
-            }),
-        )?;
-        Ok(r.and_then(|_| slot.into_inner()))
+        let slot = std::sync::Mutex::new(None);
+        let r = self
+            .mutate_boxed(
+                tenant,
+                id,
+                Box::new(|v| {
+                    let r = f(v);
+                    let flag = if r.is_ok() { Ok(()) } else { Err(()) };
+                    *lock(&slot) = Some(r);
+                    flag
+                }),
+            )
+            .await?;
+        Ok(r.and_then(|_| into_inner(slot)))
     }
 }
 
@@ -881,11 +927,12 @@ fn unsupported() -> NgsiError {
     NgsiError::OperationNotSupported("no temporal store is configured".into())
 }
 
+#[async_trait::async_trait]
 impl TemporalDriver for NoTemporal {
     fn supported(&self) -> bool {
         false
     }
-    fn temporal_append(
+    async fn temporal_append(
         &self,
         _tenant: &TenantId,
         _id: &str,
@@ -894,14 +941,14 @@ impl TemporalDriver for NoTemporal {
     ) -> Result<(), NgsiError> {
         Ok(())
     }
-    fn query_temporal(
+    async fn query_temporal(
         &self,
         _tenant: &TenantId,
         _f: &filter::TemporalFilter<'_>,
     ) -> Result<filter::TemporalOutcome, NgsiError> {
         Err(unsupported())
     }
-    fn get_temporal(
+    async fn get_temporal(
         &self,
         _tenant: &TenantId,
         _id: &str,
@@ -909,22 +956,22 @@ impl TemporalDriver for NoTemporal {
     ) -> Result<Option<Value>, NgsiError> {
         Err(unsupported())
     }
-    fn get(&self, _tenant: &TenantId, _id: &str) -> Result<Option<Value>, NgsiError> {
+    async fn get(&self, _tenant: &TenantId, _id: &str) -> Result<Option<Value>, NgsiError> {
         Ok(None)
     }
-    fn create(&self, _tenant: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
+    async fn create(&self, _tenant: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
         Ok(false)
     }
-    fn upsert(&self, _tenant: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
+    async fn upsert(&self, _tenant: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
         Ok(false)
     }
-    fn delete(&self, _tenant: &TenantId, _id: &str) -> Result<bool, NgsiError> {
+    async fn delete(&self, _tenant: &TenantId, _id: &str) -> Result<bool, NgsiError> {
         Ok(false)
     }
-    fn list(&self, _tenant: &TenantId) -> Result<Vec<Value>, NgsiError> {
+    async fn list(&self, _tenant: &TenantId) -> Result<Vec<Value>, NgsiError> {
         Ok(Vec::new())
     }
-    fn mutate_boxed<'a>(
+    async fn mutate_boxed<'a>(
         &self,
         _tenant: &TenantId,
         _id: &str,
@@ -960,17 +1007,14 @@ mod tests {
     /// A minimal driver proving the boxed seam round-trips typed results:
     /// present row → the closure's T and E cross intact; absent → None.
     struct OneDoc(std::sync::Mutex<Option<Value>>);
+    #[async_trait::async_trait]
     impl CurrentStateDriver for OneDoc {
-        fn ping(&self) -> Result<(), NgsiError> {
+        async fn ping(&self) -> Result<(), NgsiError> {
             Ok(())
         }
-        fn close<'a>(
-            &'a self,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
-        }
+        async fn close(&self) {}
         fn set_change_hook(&self, _h: ChangeHook) {}
-        fn create(
+        async fn create(
             &self,
             _t: &TenantId,
             _k: Kind,
@@ -980,14 +1024,14 @@ mod tests {
             *self.0.lock().expect("lock") = Some(doc);
             Ok(true)
         }
-        fn batch_create(
+        async fn batch_create(
             &self,
             _t: &TenantId,
             _items: Vec<(String, Value)>,
         ) -> Result<Vec<bool>, NgsiError> {
             unimplemented!()
         }
-        fn list_page(
+        async fn list_page(
             &self,
             _t: &TenantId,
             _k: Kind,
@@ -996,7 +1040,7 @@ mod tests {
         ) -> Result<Vec<Value>, NgsiError> {
             unimplemented!()
         }
-        fn list_slice(
+        async fn list_slice(
             &self,
             _t: &TenantId,
             _k: Kind,
@@ -1005,17 +1049,21 @@ mod tests {
         ) -> Result<(Vec<Value>, usize), NgsiError> {
             unimplemented!()
         }
-        fn batch_delete(&self, _t: &TenantId, _ids: &[String]) -> Result<Vec<bool>, NgsiError> {
+        async fn batch_delete(
+            &self,
+            _t: &TenantId,
+            _ids: &[String],
+        ) -> Result<Vec<bool>, NgsiError> {
             unimplemented!()
         }
-        fn batch_upsert(
+        async fn batch_upsert(
             &self,
             _t: &TenantId,
             _items: Vec<(String, Value)>,
         ) -> Result<Vec<bool>, NgsiError> {
             unimplemented!()
         }
-        fn upsert(
+        async fn upsert(
             &self,
             _t: &TenantId,
             _k: Kind,
@@ -1024,24 +1072,29 @@ mod tests {
         ) -> Result<bool, NgsiError> {
             unimplemented!()
         }
-        fn get(&self, _t: &TenantId, _k: Kind, _id: &str) -> Result<Option<Value>, NgsiError> {
+        async fn get(
+            &self,
+            _t: &TenantId,
+            _k: Kind,
+            _id: &str,
+        ) -> Result<Option<Value>, NgsiError> {
             Ok(self.0.lock().expect("lock").clone())
         }
-        fn delete(&self, _t: &TenantId, _k: Kind, _id: &str) -> Result<bool, NgsiError> {
+        async fn delete(&self, _t: &TenantId, _k: Kind, _id: &str) -> Result<bool, NgsiError> {
             unimplemented!()
         }
-        fn delete_entity_if(
+        async fn delete_entity_if(
             &self,
             _t: &TenantId,
             _id: &str,
-            _keep: &dyn Fn(&Value) -> bool,
+            _keep: &(dyn for<'v> Fn(&'v Value) -> bool + Sync),
         ) -> Result<bool, NgsiError> {
             unimplemented!()
         }
-        fn list(&self, _t: &TenantId, _k: Kind) -> Result<Vec<Value>, NgsiError> {
+        async fn list(&self, _t: &TenantId, _k: Kind) -> Result<Vec<Value>, NgsiError> {
             unimplemented!()
         }
-        fn matching_registrations(
+        async fn matching_registrations(
             &self,
             _t: &TenantId,
             _ids: Option<&[String]>,
@@ -1049,14 +1102,14 @@ mod tests {
         ) -> Result<Vec<Value>, NgsiError> {
             unimplemented!()
         }
-        fn query_entities(
+        async fn query_entities(
             &self,
             _t: &TenantId,
             _f: &filter::EntityFilter<'_>,
         ) -> Result<filter::QueryOutcome, NgsiError> {
             unimplemented!()
         }
-        fn mutate_boxed<'a>(
+        async fn mutate_boxed<'a>(
             &self,
             _t: &TenantId,
             _k: Kind,
@@ -1078,7 +1131,7 @@ mod tests {
                 }
             }
         }
-        fn batch_mutate_boxed<'a>(
+        async fn batch_mutate_boxed<'a>(
             &self,
             _t: &TenantId,
             _ids: &[String],
@@ -1086,13 +1139,13 @@ mod tests {
         ) -> Result<Vec<Option<Result<(), ()>>>, NgsiError> {
             unimplemented!()
         }
-        fn tenant_exists(&self, _t: &TenantId) -> Result<bool, NgsiError> {
+        async fn tenant_exists(&self, _t: &TenantId) -> Result<bool, NgsiError> {
             Ok(true)
         }
-        fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
+        async fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
             Ok(Vec::new())
         }
-        fn context_put(
+        async fn context_put(
             &self,
             _t: Option<&TenantId>,
             _id: &str,
@@ -1100,32 +1153,38 @@ mod tests {
         ) -> Result<(), NgsiError> {
             Ok(())
         }
-        fn context_get(
+        async fn context_get(
             &self,
             _t: Option<&TenantId>,
             _id: &str,
         ) -> Result<Option<Value>, NgsiError> {
             Ok(None)
         }
-        fn context_delete(&self, _t: Option<&TenantId>, _id: &str) -> Result<bool, NgsiError> {
+        async fn context_delete(
+            &self,
+            _t: Option<&TenantId>,
+            _id: &str,
+        ) -> Result<bool, NgsiError> {
             Ok(false)
         }
-        fn context_list_meta(&self, _t: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
+        async fn context_list_meta(&self, _t: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
             Ok(Vec::new())
         }
     }
 
-    #[test]
-    fn typed_mutate_round_trips_through_the_boxed_seam() {
+    #[tokio::test]
+    async fn typed_mutate_round_trips_through_the_boxed_seam() {
         let t = TenantId::new("t").expect("tenant");
         let d: std::sync::Arc<dyn CurrentStateDriver> =
             std::sync::Arc::new(OneDoc(std::sync::Mutex::new(None)));
         // absent → None, closure never runs
         let r = d
             .mutate::<u32, &str>(&t, Kind::Entity, "x", |_| panic!("must not run"))
+            .await
             .expect("driver ok");
         assert!(r.is_none());
         d.create(&t, Kind::Entity, "x", serde_json::json!({"n": 1}))
+            .await
             .expect("create");
         // typed success crosses the boundary AND the write commits
         let r = d
@@ -1133,10 +1192,14 @@ mod tests {
                 v["n"] = serde_json::json!(2);
                 Ok(7)
             })
+            .await
             .expect("driver ok");
         assert_eq!(r, Some(Ok(7)));
         assert_eq!(
-            d.get(&t, Kind::Entity, "x").expect("get").expect("doc")["n"],
+            d.get(&t, Kind::Entity, "x")
+                .await
+                .expect("get")
+                .expect("doc")["n"],
             2
         );
         // typed error crosses the boundary AND the write is discarded
@@ -1145,10 +1208,14 @@ mod tests {
                 v["n"] = serde_json::json!(99);
                 Err("rejected")
             })
+            .await
             .expect("driver ok");
         assert_eq!(r, Some(Err("rejected")));
         assert_eq!(
-            d.get(&t, Kind::Entity, "x").expect("get").expect("doc")["n"],
+            d.get(&t, Kind::Entity, "x")
+                .await
+                .expect("get")
+                .expect("doc")["n"],
             2,
             "a rejecting closure must not commit"
         );
@@ -1161,8 +1228,9 @@ mod tests {
         appends: std::sync::Mutex<Vec<(String, Value)>>,
         doc: std::sync::Mutex<Option<Value>>,
     }
+    #[async_trait::async_trait]
     impl TemporalDriver for Recorder {
-        fn temporal_append(
+        async fn temporal_append(
             &self,
             _t: &TenantId,
             id: &str,
@@ -1175,14 +1243,14 @@ mod tests {
                 .push((id.to_owned(), additions.clone()));
             Ok(())
         }
-        fn query_temporal(
+        async fn query_temporal(
             &self,
             _t: &TenantId,
             _f: &filter::TemporalFilter<'_>,
         ) -> Result<filter::TemporalOutcome, NgsiError> {
             unimplemented!()
         }
-        fn get_temporal(
+        async fn get_temporal(
             &self,
             _t: &TenantId,
             _id: &str,
@@ -1190,23 +1258,23 @@ mod tests {
         ) -> Result<Option<Value>, NgsiError> {
             unimplemented!()
         }
-        fn get(&self, _t: &TenantId, _id: &str) -> Result<Option<Value>, NgsiError> {
+        async fn get(&self, _t: &TenantId, _id: &str) -> Result<Option<Value>, NgsiError> {
             Ok(self.doc.lock().expect("lock").clone())
         }
-        fn create(&self, _t: &TenantId, _id: &str, doc: Value) -> Result<bool, NgsiError> {
+        async fn create(&self, _t: &TenantId, _id: &str, doc: Value) -> Result<bool, NgsiError> {
             *self.doc.lock().expect("lock") = Some(doc);
             Ok(true)
         }
-        fn upsert(&self, _t: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
+        async fn upsert(&self, _t: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
             unimplemented!()
         }
-        fn delete(&self, _t: &TenantId, _id: &str) -> Result<bool, NgsiError> {
+        async fn delete(&self, _t: &TenantId, _id: &str) -> Result<bool, NgsiError> {
             unimplemented!()
         }
-        fn list(&self, _t: &TenantId) -> Result<Vec<Value>, NgsiError> {
+        async fn list(&self, _t: &TenantId) -> Result<Vec<Value>, NgsiError> {
             unimplemented!()
         }
-        fn mutate_boxed<'a>(
+        async fn mutate_boxed<'a>(
             &self,
             _t: &TenantId,
             _id: &str,
@@ -1234,8 +1302,8 @@ mod tests {
     /// The drain folds one request's events into ONE append per entity run
     /// — a 2-attribute entity is one call carrying both, not two — and
     /// keeps production order across entities.
-    #[test]
-    fn event_list_folds_a_request_into_one_append_per_entity_run() {
+    #[tokio::test]
+    async fn event_list_folds_a_request_into_one_append_per_entity_run() {
         let d = Recorder::default();
         d.event_list(&[
             ev(TemporalOp::AttrCreated, "urn:a", "speed", 1),
@@ -1244,6 +1312,7 @@ mod tests {
             ev(TemporalOp::AttrModified, "urn:b", "speed", 4),
             ev(TemporalOp::AttrModified, "urn:a", "speed", 5),
         ])
+        .await
         .expect("drain ok");
         let appends = d.appends.lock().expect("lock").clone();
         let ids: Vec<&str> = appends.iter().map(|(id, _)| id.as_str()).collect();
@@ -1268,8 +1337,8 @@ mod tests {
 
     /// 4.5.6: a scope change becomes a scope instance on the held temporal
     /// doc (array-of-instances form), not an attribute append.
-    #[test]
-    fn event_list_records_scope_changes_as_scope_instances() {
+    #[tokio::test]
+    async fn event_list_records_scope_changes_as_scope_instances() {
         let t = TenantId::new("t").expect("tenant");
         let d = Recorder::default();
         d.create(
@@ -1277,16 +1346,17 @@ mod tests {
             "urn:a",
             serde_json::json!({"id": "urn:a", "scope": "/old"}),
         )
+        .await
         .expect("create");
         let mut scope = ev(TemporalOp::ScopeChanged, "urn:a", "scope", 0);
         scope.instance = serde_json::json!({"type": "Property", "value": "/new",
                                             "observedAt": "2026-01-01T00:00:00Z"});
-        d.event_list(&[scope]).expect("drain ok");
+        d.event_list(&[scope]).await.expect("drain ok");
         assert!(
             d.appends.lock().expect("lock").is_empty(),
             "no attribute append for a scope change"
         );
-        let doc = d.get(&t, "urn:a").expect("get").expect("doc");
+        let doc = d.get(&t, "urn:a").await.expect("get").expect("doc");
         assert_eq!(doc["scope"][0]["value"], "/new", "{doc}");
         assert_eq!(
             doc["scope"].as_array().map(Vec::len),
@@ -1295,13 +1365,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn no_temporal_degrades_without_panicking() {
+    #[tokio::test]
+    async fn no_temporal_degrades_without_panicking() {
         let t = TenantId::new("t").expect("tenant");
         let d: std::sync::Arc<dyn TemporalDriver> = std::sync::Arc::new(NoTemporal);
         assert!(!d.supported());
         // client-facing reads: the spec error, not a panic
-        let e = match d.query_temporal(&t, &filter::TemporalFilter::default()) {
+        let e = match d
+            .query_temporal(&t, &filter::TemporalFilter::default())
+            .await
+        {
             Err(e) => e,
             Ok(_) => panic!("query_temporal on NoTemporal must be unsupported"),
         };
@@ -1310,11 +1383,13 @@ mod tests {
         // internal bookkeeping: benign no-ops
         assert!(d
             .temporal_append(&t, "x", &Value::Null, &Value::Null)
+            .await
             .is_ok());
-        assert!(!d.delete(&t, "x").expect("ok"));
-        assert!(d.list(&t).expect("ok").is_empty());
+        assert!(!d.delete(&t, "x").await.expect("ok"));
+        assert!(d.list(&t).await.expect("ok").is_empty());
         assert!(d
             .mutate::<(), ()>(&t, "x", |_| Ok(()))
+            .await
             .expect("ok")
             .is_none());
     }

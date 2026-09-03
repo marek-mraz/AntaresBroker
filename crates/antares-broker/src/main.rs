@@ -324,7 +324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    runtime(max_connections()?)?.block_on(async {
+    runtime()?.block_on(async {
         let drivers = build_drivers(&store_name).await?;
         run(
             port,
@@ -896,7 +896,7 @@ async fn run(
             .map_err(|_| "ANTARES_BUS=nats requires ANTARES_NATS_URL")?;
         wiring::wire_nats(&mut state, &url, roles).await?;
     } else {
-        antares_api::wire(&mut state); // in-process matcher + notifier + interval firing
+        antares_api::wire(&mut state).await; // in-process matcher + notifier + interval firing
     }
     telemetry::spawn_sampler(state.clone());
 
@@ -911,7 +911,12 @@ async fn run(
         // could make impossible by storing large @contexts.
         // No Tenant: the store then hands back the rows that belong to none
         // (ADR-0021), which is exactly the `Cached` set this warm wants.
-        for row in state.store.context_list_meta(None).unwrap_or_default() {
+        for row in state
+            .store
+            .context_list_meta(None)
+            .await
+            .unwrap_or_default()
+        {
             if row.get("kind").and_then(|v| v.as_str()) != Some("Cached") {
                 continue;
             }
@@ -922,7 +927,7 @@ async fn run(
             ) else {
                 continue;
             };
-            let Some(full) = state.store.context_get(None, id).ok().flatten() else {
+            let Some(full) = state.store.context_get(None, id).await.ok().flatten() else {
                 continue;
             };
             if let Some(v) = full.pointer("/body/@context") {
@@ -945,7 +950,7 @@ async fn run(
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
         loop {
             tick.tick().await;
-            let n = sweeper.sweep_expired();
+            let n = sweeper.sweep_expired().await;
             if n > 0 {
                 tracing::debug!("4.22 sweep reaped {n} expired entities");
             }
@@ -1120,17 +1125,12 @@ fn max_connections() -> Result<usize, Box<dyn std::error::Error>> {
         .unwrap_or(10_000))
 }
 
-/// The request runtime. Every store call parks its thread under
-/// `block_in_place` while the future runs, and past tokio's blocking-thread
-/// ceiling (512 by default) a parked `block_in_place` also parks the core it
-/// ran on: with every core parked nothing polls the I/O and timer driver,
-/// so the very futures the threads wait for can never complete and the
-/// process stops at zero CPU. The ceiling is therefore set above the number
-/// of callers that can exist at once: one per served connection plus the
-/// notification, federation and interval work behind them.
-fn runtime(max_connections: usize) -> std::io::Result<tokio::runtime::Runtime> {
+/// The request runtime. Store calls are futures the workers poll, so a
+/// waiting caller holds no thread and the blocking pool carries only what
+/// is genuinely blocking — the `file` mode's per-commit fsync, which redb
+/// serializes behind its single writer. Tokio's own bounds hold.
+fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
-        .max_blocking_threads(max_connections + 1024)
         .enable_all()
         .build()
 }
@@ -1347,45 +1347,6 @@ mod config_key_tests {
 }
 
 #[cfg(test)]
-mod runtime_tests {
-    use super::*;
-
-    /// More parked store callers than tokio's default ceiling must still
-    /// wake: the bridge below is the shape of `antares_sql`'s `wait`, and
-    /// with the default ceiling this many callers park every core.
-    #[test]
-    fn callers_beyond_tokio_default_ceiling_still_wake() {
-        const CALLERS: usize = 600;
-        let rt = runtime(64).expect("runtime");
-        let run = std::thread::spawn(move || {
-            rt.block_on(async {
-                let tasks: Vec<_> = (0..CALLERS)
-                    .map(|_| {
-                        tokio::spawn(async {
-                            let h = tokio::runtime::Handle::current();
-                            tokio::task::block_in_place(|| {
-                                h.block_on(tokio::time::sleep(std::time::Duration::from_millis(50)))
-                            })
-                        })
-                    })
-                    .collect();
-                for t in tasks {
-                    t.await.expect("task");
-                }
-            })
-        });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while !run.is_finished() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(
-            run.is_finished(),
-            "parked callers never woke: the runtime is wedged"
-        );
-    }
-}
-
-#[cfg(test)]
 mod accept_loop_tests {
     use super::{accept, accept_backoff};
 
@@ -1569,7 +1530,7 @@ mod driver_registry_tests {
             temporal_choice(name, None).expect("ok"),
             TemporalChoice::SameAsStore
         );
-        let drivers = super::runtime(1)
+        let drivers = super::runtime()
             .expect("runtime")
             .block_on(super::build_drivers(name))
             .expect("the plugin driver builds");

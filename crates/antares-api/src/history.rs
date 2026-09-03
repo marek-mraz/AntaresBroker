@@ -54,7 +54,7 @@ pub(crate) fn buffer_change(change: crate::mirror::Change) -> Option<crate::mirr
 
 /// Hand one event to the seam: buffered when a request is in flight,
 /// drained on the spot otherwise.
-pub(crate) fn push(st: &AppState, ev: TemporalEvent) {
+pub(crate) async fn push(st: &AppState, ev: TemporalEvent) {
     #[cfg(not(target_arch = "wasm32"))]
     let ev = {
         let mut slot = Some(ev);
@@ -73,7 +73,7 @@ pub(crate) fn push(st: &AppState, ev: TemporalEvent) {
             None => return,
         }
     };
-    drain(st, vec![ev]);
+    drain(st, vec![ev]).await;
 }
 
 /// The gate chain: an event enters history only if every gate admits it.
@@ -96,7 +96,7 @@ fn observed_gate(st: &AppState, ev: &TemporalEvent) -> bool {
 }
 
 /// The consumer side: one `event_list` call per drained batch.
-pub(crate) fn drain(st: &AppState, evs: Vec<TemporalEvent>) {
+pub(crate) async fn drain(st: &AppState, evs: Vec<TemporalEvent>) {
     let evs: Vec<TemporalEvent> = evs
         .into_iter()
         .filter(|ev| GATES.iter().all(|gate| gate(st, ev)))
@@ -104,7 +104,7 @@ pub(crate) fn drain(st: &AppState, evs: Vec<TemporalEvent>) {
     if evs.is_empty() {
         return;
     }
-    if let Err(e) = st.temporal.event_list(&evs) {
+    if let Err(e) = st.temporal.event_list(&evs).await {
         DRAIN_ERRORS.fetch_add(1, Ordering::Relaxed);
         metrics::counter!("antares_temporal_drain_errors_total").increment(1);
         tracing::warn!(events = evs.len(), "temporal drain failed: {e}");
@@ -131,7 +131,7 @@ pub(crate) async fn layer(
                 .await
         })
         .await;
-    drain(&st, evs);
+    drain(&st, evs).await;
     if !changes.is_empty() {
         if let Some(flush) = &st.change_flush {
             flush(changes);
@@ -154,11 +154,11 @@ pub(crate) async fn layer(
 /// delete_temporal_on_core_delete: entity deletion removes its temporal
 /// representation too (suite configuration parity). Skipped on bus=nats
 /// api pods — the recorder applies the entityDeleted fence instead.
-pub(crate) fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
+pub(crate) async fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
     if !st.record_locally() {
         return;
     }
-    if let Err(e) = st.temporal.delete(tenant, id) {
+    if let Err(e) = st.temporal.delete(tenant, id).await {
         tracing::warn!("temporal mirror delete failed: {e}");
     }
 }
@@ -169,7 +169,7 @@ pub(crate) fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
 /// typed null shapes for the LanguageProperty/JsonProperty/Vocab/List
 /// subtypes). Each recorded instance carries an instanceId — the clause
 /// SHOULD that makes 5.6.14/5.6.15 selective modification possible.
-pub(crate) fn mirror_delete_attr(
+pub(crate) async fn mirror_delete_attr(
     st: &AppState,
     tenant: &TenantId,
     id: &str,
@@ -178,83 +178,86 @@ pub(crate) fn mirror_delete_attr(
     ts: &str,
 ) -> bool {
     let mut had = false;
-    let r = st.temporal.mutate(tenant, id, |doc| {
-        // The mirror writes nothing into a document the temporal driver
-        // handed back in a shape the contract forbids; `had` stays false and
-        // the caller reports that nothing was mirrored.
-        let Some(target) = doc.as_object_mut() else {
-            return Ok::<(), std::convert::Infallible>(());
-        };
-        if attr_iri == "scope" {
-            // scope deletion: temporal scope becomes an instance array with
-            // value [] (the 020_19/020_20 shape)
-            had = true;
-            let inst = serde_json::json!({
-                "type": "Property",
-                "value": [],
-                "instanceId": format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()),
-                "deletedAt": ts,
-            });
-            match target.get_mut("scope").and_then(Value::as_array_mut) {
-                Some(arr) if arr.first().is_some_and(|i| i.is_object()) => arr.push(inst),
-                _ => {
-                    target.insert("scope".into(), Value::Array(vec![inst]));
+    let r = st
+        .temporal
+        .mutate(tenant, id, |doc| {
+            // The mirror writes nothing into a document the temporal driver
+            // handed back in a shape the contract forbids; `had` stays false and
+            // the caller reports that nothing was mirrored.
+            let Some(target) = doc.as_object_mut() else {
+                return Ok::<(), std::convert::Infallible>(());
+            };
+            if attr_iri == "scope" {
+                // scope deletion: temporal scope becomes an instance array with
+                // value [] (the 020_19/020_20 shape)
+                had = true;
+                let inst = serde_json::json!({
+                    "type": "Property",
+                    "value": [],
+                    "instanceId": format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()),
+                    "deletedAt": ts,
+                });
+                match target.get_mut("scope").and_then(Value::as_array_mut) {
+                    Some(arr) if arr.first().is_some_and(|i| i.is_object()) => arr.push(inst),
+                    _ => {
+                        target.insert("scope".into(), Value::Array(vec![inst]));
+                    }
                 }
+                return Ok::<(), std::convert::Infallible>(());
             }
-            return Ok::<(), std::convert::Infallible>(());
-        }
-        if let Some(arr) = target.get_mut(attr_iri).and_then(Value::as_array_mut) {
-            if arr.is_empty() {
-                return Ok(());
+            if let Some(arr) = target.get_mut(attr_iri).and_then(Value::as_array_mut) {
+                if arr.is_empty() {
+                    return Ok(());
+                }
+                had = true;
+                let atype = arr
+                    .first()
+                    .and_then(|i| i.get("type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Property")
+                    .to_owned();
+                let mut inst = Map::new();
+                inst.insert("type".into(), Value::String(atype.clone()));
+                let null = Value::String("urn:ngsi-ld:null".into());
+                match atype.as_str() {
+                    "Relationship" => {
+                        inst.insert("object".into(), null);
+                    }
+                    "LanguageProperty" => {
+                        inst.insert(
+                            "languageMap".into(),
+                            serde_json::json!({"@none": "urn:ngsi-ld:null"}),
+                        );
+                    }
+                    "JsonProperty" => {
+                        inst.insert("json".into(), null);
+                    }
+                    "VocabProperty" => {
+                        inst.insert("vocab".into(), null);
+                    }
+                    "ListProperty" => {
+                        inst.insert("valueList".into(), null);
+                    }
+                    "ListRelationship" => {
+                        inst.insert("objectList".into(), null);
+                    }
+                    _ => {
+                        inst.insert("value".into(), null);
+                    }
+                }
+                if let Some(ds) = dataset_id {
+                    inst.insert("datasetId".into(), Value::String(ds.to_owned()));
+                }
+                inst.insert(
+                    "instanceId".into(),
+                    Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4())),
+                );
+                inst.insert("deletedAt".into(), Value::String(ts.to_owned()));
+                arr.push(Value::Object(inst));
             }
-            had = true;
-            let atype = arr
-                .first()
-                .and_then(|i| i.get("type"))
-                .and_then(Value::as_str)
-                .unwrap_or("Property")
-                .to_owned();
-            let mut inst = Map::new();
-            inst.insert("type".into(), Value::String(atype.clone()));
-            let null = Value::String("urn:ngsi-ld:null".into());
-            match atype.as_str() {
-                "Relationship" => {
-                    inst.insert("object".into(), null);
-                }
-                "LanguageProperty" => {
-                    inst.insert(
-                        "languageMap".into(),
-                        serde_json::json!({"@none": "urn:ngsi-ld:null"}),
-                    );
-                }
-                "JsonProperty" => {
-                    inst.insert("json".into(), null);
-                }
-                "VocabProperty" => {
-                    inst.insert("vocab".into(), null);
-                }
-                "ListProperty" => {
-                    inst.insert("valueList".into(), null);
-                }
-                "ListRelationship" => {
-                    inst.insert("objectList".into(), null);
-                }
-                _ => {
-                    inst.insert("value".into(), null);
-                }
-            }
-            if let Some(ds) = dataset_id {
-                inst.insert("datasetId".into(), Value::String(ds.to_owned()));
-            }
-            inst.insert(
-                "instanceId".into(),
-                Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4())),
-            );
-            inst.insert("deletedAt".into(), Value::String(ts.to_owned()));
-            arr.push(Value::Object(inst));
-        }
-        Ok(())
-    });
+            Ok(())
+        })
+        .await;
     if let Err(e) = r {
         tracing::warn!("temporal attr mirror failed: {e}");
     }

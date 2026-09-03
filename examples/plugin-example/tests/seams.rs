@@ -79,6 +79,7 @@ async fn the_surface_answers_only_for_the_requesting_tenant() {
                 &format!("urn:ngsi-ld:Seam:a{i}"),
                 json!({"id": format!("urn:ngsi-ld:Seam:a{i}")}),
             )
+            .await
             .expect("create");
     }
     store
@@ -88,6 +89,7 @@ async fn the_surface_answers_only_for_the_requesting_tenant() {
             "urn:ngsi-ld:Seam:b0",
             json!({"id": "urn:ngsi-ld:Seam:b0"}),
         )
+        .await
         .expect("create");
 
     let count = |body: &str| -> Value { serde_json::from_str(body).expect("json") };
@@ -163,8 +165,8 @@ fn a_socketless_binding_declares_itself() {
 /// largest id anyone expects is a bound some id sorts above: that row is
 /// stored, retrievable by id, and invisible to every listing, query and page
 /// — a silent partial answer, which is the one thing a driver may never give.
-#[test]
-fn a_row_is_listed_whatever_its_id_sorts_next_to() {
+#[tokio::test]
+async fn a_row_is_listed_whatever_its_id_sorts_next_to() {
     let store = ExampleStore::new();
     let t = TenantId::new("pluginrange").expect("tenant");
     let ids = [
@@ -177,14 +179,19 @@ fn a_row_is_listed_whatever_its_id_sorts_next_to() {
     for id in ids {
         store
             .create(&t, Kind::Entity, id, json!({"id": id}))
+            .await
             .expect("create");
         assert!(
-            store.get(&t, Kind::Entity, id).expect("get").is_some(),
+            store
+                .get(&t, Kind::Entity, id)
+                .await
+                .expect("get")
+                .is_some(),
             "{id:?} is stored"
         );
     }
 
-    let listed = store.list(&t, Kind::Entity).expect("list").len();
+    let listed = store.list(&t, Kind::Entity).await.expect("list").len();
     assert_eq!(listed, ids.len(), "every stored row is listed");
 
     let mut walked = 0;
@@ -192,6 +199,7 @@ fn a_row_is_listed_whatever_its_id_sorts_next_to() {
     loop {
         let page = store
             .list_page(&t, Kind::Entity, after.as_deref(), 2)
+            .await
             .expect("page");
         if page.is_empty() {
             break;
@@ -204,10 +212,10 @@ fn a_row_is_listed_whatever_its_id_sorts_next_to() {
     }
     assert_eq!(walked, ids.len(), "the cursor walk sees every row too");
 
-    let purged = store.purge_tenant(&t).expect("purge");
+    let purged = store.purge_tenant(&t).await.expect("purge");
     assert!(purged);
     assert_eq!(
-        store.list(&t, Kind::Entity).expect("list").len(),
+        store.list(&t, Kind::Entity).await.expect("list").len(),
         0,
         "and the purge leaves nothing behind"
     );

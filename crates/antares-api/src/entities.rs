@@ -119,11 +119,12 @@ async fn create_entity_inner(
         body: Some(&expanded),
     )
     .await?;
-    let regs =
-        match crate::federation::write_plan(st, &tenant, &spec, &parsed.ctx, params, headers)? {
-            crate::federation::WritePlan::Answered(r) => return Ok(*r),
-            crate::federation::WritePlan::Forward(regs) => regs,
-        };
+    let regs = match crate::federation::write_plan(st, &tenant, &spec, &parsed.ctx, params, headers)
+        .await?
+    {
+        crate::federation::WritePlan::Answered(r) => return Ok(*r),
+        crate::federation::WritePlan::Forward(regs) => regs,
+    };
     if !regs.is_empty() {
         let mut conflicts = Vec::new();
         let mut fwd = Vec::new();
@@ -151,7 +152,8 @@ async fn create_entity_inner(
             stamp_new(&mut local_exp, &now_iso());
             if st
                 .store
-                .create(&tenant, Kind::Entity, &id, local_exp.clone())?
+                .create(&tenant, Kind::Entity, &id, local_exp.clone())
+                .await?
             {
                 parts.push(crate::federation::Part {
                     status: 201,
@@ -192,7 +194,8 @@ async fn create_entity_inner(
     stamp_new(&mut expanded, &now_iso());
     if !st
         .store
-        .create(&tenant, Kind::Entity, &id, expanded.clone())?
+        .create(&tenant, Kind::Entity, &id, expanded.clone())
+        .await?
     {
         return Err(NgsiError::AlreadyExists(format!("entity {id} already exists")).into());
     }
@@ -270,7 +273,7 @@ async fn retrieve_entity_inner(
     let join = parse_join(params)?;
     check_linked_projection(&repr, &join)?;
     antares_model::EntityId::new(id)?;
-    let local_doc = st.store.get(&tenant, Kind::Entity, id)?;
+    let local_doc = st.store.get(&tenant, Kind::Entity, id).await?;
     let looped = crate::federation::via_loop(
         headers,
         &crate::federation::alias_for(&st.host_alias, &tenant),
@@ -284,7 +287,10 @@ async fn retrieve_entity_inner(
             ..Default::default()
         };
         // only a loop that suppressed a real forward is abnormal behaviour
-        if !crate::federation::matching_regs(st, &tenant, &spec, &ctx, headers)?.is_empty() {
+        if !crate::federation::matching_regs(st, &tenant, &spec, &ctx, headers)
+            .await?
+            .is_empty()
+        {
             warnings.push(crate::federation::warning(
                 199,
                 &crate::federation::alias_for(&st.host_alias, &tenant),
@@ -358,8 +364,11 @@ async fn retrieve_entity_inner(
     // exist, an error of type ResourceNotFound shall be raised" — because a
     // refusal here would tell the caller the Entity is there.
     if let Some(ast) = &filter.q {
-        let lookup = |uri: &str| st.store.get(&tenant, Kind::Entity, uri).ok().flatten();
-        if !antares_ql::eval::eval_q(ast, &doc, &ctx, &lookup) {
+        if !crate::notify::linked_eval(st, &tenant, |l| {
+            antares_ql::eval::eval_q(ast, &doc, &ctx, l)
+        })
+        .await
+        {
             return Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into());
         }
     }
@@ -390,16 +399,19 @@ async fn retrieve_entity_inner(
     if let Some((mode, level)) = &join {
         let held = contained_by(params);
         let complete = match mode.as_str() {
-            "inline" => inline_join_beyond(
-                st,
-                &tenant,
-                &ctx,
-                &repr,
-                &mut payload,
-                *level,
-                &held,
-                &mut { MAX_JOIN_LOOKUPS },
-            ),
+            "inline" => {
+                inline_join_beyond(
+                    st,
+                    &tenant,
+                    &ctx,
+                    &repr,
+                    &mut payload,
+                    *level,
+                    &held,
+                    &mut { MAX_JOIN_LOOKUPS },
+                )
+                .await
+            }
             "flat" => {
                 let mut linked = std::collections::BTreeMap::new();
                 let complete = collect_flat_beyond(
@@ -411,7 +423,8 @@ async fn retrieve_entity_inner(
                     &mut linked,
                     &held,
                     &mut { MAX_JOIN_LOOKUPS },
-                );
+                )
+                .await;
                 if !linked.is_empty() {
                     let mut arr = vec![payload];
                     for (_, (ldoc, lrepr)) in linked {
@@ -572,7 +585,8 @@ async fn query_entities_outer(
         .into());
     }
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
-    let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, headers, &map_id) else {
+    let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, headers, &map_id).await
+    else {
         // 5.5.14: expired or inaccessible → a new EntityMap is created
         params.insert("entityMap".into(), "true".into());
         return query_entities_inner(st, &params, headers, &filter).await;
@@ -617,7 +631,7 @@ async fn query_entities_outer(
         } else {
             Vec::new()
         };
-        let docs = filter_entities_fed(st, &tenant, &p, &ctx, fed)?;
+        let docs = filter_entities_fed(st, &tenant, &p, &ctx, fed).await?;
         let matched: std::collections::HashSet<&str> = docs
             .iter()
             .filter_map(|d| d.get("id").and_then(Value::as_str))
@@ -658,7 +672,7 @@ async fn query_entities_outer(
     if count {
         more = total > offset + limit;
     }
-    crate::entity_map::map_put(st, &tenant, map.clone())?;
+    crate::entity_map::map_put(st, &tenant, map.clone()).await?;
     // fix the final fetch to exactly the page's survivors (5.5.14: an empty
     // set is fixed to nothing); one extra page-sized fetch keeps the whole
     // repr pipeline shared instead of forked
@@ -771,7 +785,7 @@ async fn query_entities_inner(
     // than active (ETSI 019_19 orders without local).
     crate::paging::check_collation(params)?;
     if params.contains_key("orderBy")
-        && crate::federation::would_federate(st, &tenant, &ctx, params, headers)?
+        && crate::federation::would_federate(st, &tenant, &ctx, params, headers).await?
     {
         return Err(NgsiError::BadRequestData(
             "orderBy requires local scope — ordering is never applied to \
@@ -833,7 +847,7 @@ async fn query_entities_inner(
     } else {
         if crate::federation::active(params)
             && looped
-            && crate::federation::would_federate(st, &tenant, &ctx, params, headers)?
+            && crate::federation::would_federate(st, &tenant, &ctx, params, headers).await?
         {
             warnings.push(crate::federation::warning(
                 199,
@@ -857,7 +871,8 @@ async fn query_entities_inner(
         fed,
         push_page.then_some((p_offset, p_limit)),
         push_proj.then_some(&repr),
-    )?;
+    )
+    .await?;
     let mut matches = filtered.docs;
     if let Some(spec) = params.get("orderBy") {
         order_entities(&mut matches, spec, params, &ctx)?;
@@ -893,7 +908,8 @@ async fn query_entities_inner(
             "inline" => {
                 for p in &mut payload {
                     complete &=
-                        inline_join_beyond(st, &tenant, &ctx, &repr, p, *level, &held, &mut budget);
+                        inline_join_beyond(st, &tenant, &ctx, &repr, p, *level, &held, &mut budget)
+                            .await;
                 }
             }
             "flat" => {
@@ -908,7 +924,8 @@ async fn query_entities_inner(
                         &mut linked,
                         &held,
                         &mut budget,
-                    );
+                    )
+                    .await;
                 }
                 let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
                 for (id, (ldoc, lrepr)) in linked {
@@ -974,14 +991,18 @@ pub(crate) fn qualifies_non_wide(
 }
 
 /// Same, with federated candidate docs merged in before filtering (4.3.6.7).
-pub fn filter_entities_fed(
+pub async fn filter_entities_fed(
     st: &AppState,
     tenant: &TenantId,
     params: &HashMap<String, String>,
     ctx: &antares_jsonld::Context,
     fed: Vec<(bool, Value)>,
 ) -> ApiResult<Vec<Value>> {
-    Ok(filter_entities_paged(st, tenant, params, ctx, fed, None, None)?.docs)
+    Ok(
+        filter_entities_paged(st, tenant, params, ctx, fed, None, None)
+            .await?
+            .docs,
+    )
 }
 
 /// What the paged variant produced. `paged` = the store already applied
@@ -1036,7 +1057,7 @@ fn page_pushdown_allowed(fed_is_empty: bool, params: &HashMap<String, String>) -
 /// predicates compiled exactly. `proj` = the parsed representation, offered
 /// for projection pushdown (pick/omit/attrs top-level heads) under the same
 /// exactness gate.
-pub fn filter_entities_paged(
+pub async fn filter_entities_paged(
     st: &AppState,
     tenant: &TenantId,
     params: &HashMap<String, String>,
@@ -1150,42 +1171,45 @@ pub fn filter_entities_paged(
     // post-merge loop below applies them instead (`decided` is already
     // false whenever `fed` is non-empty).
     let split_agg = crate::federation::split_entities(params) && !fed.is_empty();
-    let outcome = st.store.query_entities(
-        tenant,
-        &antares_store::filter::EntityFilter {
-            ids: ids.as_deref(),
-            // 5.2.33: id takes precedence over idPattern, so the literal
-            // narrows only when no id selector was given
-            id_literal: if ids.is_none() {
-                params
-                    .get("idPattern")
-                    .and_then(|p| antares_store::filter::id_pattern_literal(p))
-            } else {
-                None
+    let outcome = st
+        .store
+        .query_entities(
+            tenant,
+            &antares_store::filter::EntityFilter {
+                ids: ids.as_deref(),
+                // 5.2.33: id takes precedence over idPattern, so the literal
+                // narrows only when no id selector was given
+                id_literal: if ids.is_none() {
+                    params
+                        .get("idPattern")
+                        .and_then(|p| antares_store::filter::id_pattern_literal(p))
+                } else {
+                    None
+                },
+                types: type_sel.as_deref(),
+                attrs: if split_agg {
+                    None
+                } else {
+                    attr_filter.as_deref()
+                },
+                q: if split_agg { None } else { q_ast.as_ref() },
+                scope_q: if split_agg {
+                    None
+                } else {
+                    scope_q.map(String::as_str)
+                },
+                geo: if split_agg { None } else { geo_spec.as_ref() },
+                expand: &expand,
+                page: page.map(|(offset, limit)| antares_store::filter::Page {
+                    offset: offset as i64,
+                    limit: limit as i64,
+                    count: params.get("count").map(String::as_str) == Some("true"),
+                }),
+                keep_attrs: keep_attrs.as_deref(),
+                drop_attrs: drop_attrs.as_deref(),
             },
-            types: type_sel.as_deref(),
-            attrs: if split_agg {
-                None
-            } else {
-                attr_filter.as_deref()
-            },
-            q: if split_agg { None } else { q_ast.as_ref() },
-            scope_q: if split_agg {
-                None
-            } else {
-                scope_q.map(String::as_str)
-            },
-            geo: if split_agg { None } else { geo_spec.as_ref() },
-            expand: &expand,
-            page: page.map(|(offset, limit)| antares_store::filter::Page {
-                offset: offset as i64,
-                limit: limit as i64,
-                count: params.get("count").map(String::as_str) == Some("true"),
-            }),
-            keep_attrs: keep_attrs.as_deref(),
-            drop_attrs: drop_attrs.as_deref(),
-        },
-    )?;
+        )
+        .await?;
     let decided = outcome.decided && fed.is_empty() && !geo_uncompiled;
     let paged = outcome.paged && fed.is_empty();
     let total = outcome.total.map(|t| t as usize);
@@ -1236,8 +1260,7 @@ pub fn filter_entities_paged(
             if let Some(ast) = &q_ast {
                 // 4.9 linked-entity subqueries (attr{path}) resolve through
                 // the local store, same tenant.
-                let lookup = |uri: &str| st.store.get(tenant, Kind::Entity, uri).ok().flatten();
-                if !eval_q(ast, &doc, ctx, &lookup) {
+                if !crate::notify::linked_eval(st, tenant, |l| eval_q(ast, &doc, ctx, l)).await {
                     continue;
                 }
             }
@@ -1289,11 +1312,12 @@ pub async fn delete_entity(
                 .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect()),
             ..Default::default()
         };
-        let regs =
-            match crate::federation::write_plan(&st, &tenant, &spec, &ctx, &params, &headers)? {
-                crate::federation::WritePlan::Answered(r) => return Ok(*r),
-                crate::federation::WritePlan::Forward(regs) => regs,
-            };
+        let regs = match crate::federation::write_plan(&st, &tenant, &spec, &ctx, &params, &headers)
+            .await?
+        {
+            crate::federation::WritePlan::Answered(r) => return Ok(*r),
+            crate::federation::WritePlan::Forward(regs) => regs,
+        };
         // 5.6.6.4: the ?type selector narrows the target — an entity of a
         // non-matching type is "not known" for this delete. The selector is
         // tested inside the delete, under the row lock: read first and delete
@@ -1303,8 +1327,8 @@ pub async fn delete_entity(
         if !regs.is_empty() {
             let proxy_match = regs.iter().any(|r| r.is_proxy());
             let mut parts = Vec::new();
-            if st.store.delete_entity_if(&tenant, &id, &keep)? {
-                mirror_delete_entity(&st, &tenant, &id);
+            if st.store.delete_entity_if(&tenant, &id, &keep).await? {
+                mirror_delete_entity(&st, &tenant, &id).await;
                 parts.push(crate::federation::Part {
                     status: 204,
                     detail: "deleted locally".into(),
@@ -1350,8 +1374,8 @@ pub async fn delete_entity(
                 &tenant,
             ));
         }
-        if st.store.delete_entity_if(&tenant, &id, &keep)? {
-            mirror_delete_entity(&st, &tenant, &id);
+        if st.store.delete_entity_if(&tenant, &id, &keep).await? {
+            mirror_delete_entity(&st, &tenant, &id).await;
             Ok::<_, ApiError>(no_content(&tenant))
         } else {
             Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into())
@@ -1429,7 +1453,7 @@ fn purge_next_offset(
 /// 5.6.21.4 "And thereafter": with no Attribute-name list, delete every
 /// matched Entity found locally; with a restrictive list, delete those
 /// Attributes from them; with an exclusionary list, delete all but those.
-fn purge_locally(
+async fn purge_locally(
     st: &AppState,
     tenant: &TenantId,
     params: &HashMap<String, String>,
@@ -1448,7 +1472,8 @@ fn purge_locally(
             Vec::new(),
             Some((offset, PURGE_CHUNK)),
             None,
-        )?;
+        )
+        .await?;
         let rows = batch.rows;
         let ids: Vec<String> = batch
             .docs
@@ -1459,25 +1484,28 @@ fn purge_locally(
             0
         } else if prune {
             let mut changed = 0usize;
-            st.store.batch_mutate(tenant, &ids, |_, doc| {
-                let target = antares_store::stored_object(doc)?;
-                let attrs: Vec<String> = target.keys().filter(|k| !is_meta(k)).cloned().collect();
-                let before = target.len();
-                for a in attrs {
-                    let purge = match (keep, drop) {
-                        (Some(keep), _) => !keep.contains(&a),
-                        (_, Some(drop)) => drop.contains(&a),
-                        _ => true,
-                    };
-                    if purge {
-                        target.remove(&a);
+            st.store
+                .batch_mutate(tenant, &ids, |_, doc| {
+                    let target = antares_store::stored_object(doc)?;
+                    let attrs: Vec<String> =
+                        target.keys().filter(|k| !is_meta(k)).cloned().collect();
+                    let before = target.len();
+                    for a in attrs {
+                        let purge = match (keep, drop) {
+                            (Some(keep), _) => !keep.contains(&a),
+                            (_, Some(drop)) => drop.contains(&a),
+                            _ => true,
+                        };
+                        if purge {
+                            target.remove(&a);
+                        }
                     }
-                }
-                if target.len() != before {
-                    changed += 1;
-                }
-                Ok::<(), NgsiError>(())
-            })?;
+                    if target.len() != before {
+                        changed += 1;
+                    }
+                    Ok::<(), NgsiError>(())
+                })
+                .await?;
             // A prune keeps the Entity, but it may have removed the very
             // Attribute the query matched on (`attrs=speed&drop=speed`), which
             // takes it out of the match set and shifts the rest down. Whether
@@ -1491,10 +1519,10 @@ fn purge_locally(
             }
         } else {
             let mut gone = 0usize;
-            for (id, deleted) in ids.iter().zip(st.store.batch_delete(tenant, &ids)?) {
+            for (id, deleted) in ids.iter().zip(st.store.batch_delete(tenant, &ids).await?) {
                 if deleted {
                     gone += 1;
-                    mirror_delete_entity(st, tenant, id);
+                    mirror_delete_entity(st, tenant, id).await;
                 }
             }
             gone
@@ -1634,11 +1662,12 @@ async fn purge_inner(
         csf: params.get("csf").and_then(|c| antares_ql::parse_q(c).ok()),
         ..Default::default()
     };
-    let regs = match crate::federation::write_plan(st, &tenant, &spec, &ctx, params, headers)? {
-        crate::federation::WritePlan::Answered(r) => return Ok(*r),
-        crate::federation::WritePlan::Forward(regs) => regs,
-    };
-    purge_locally(st, &tenant, params, &ctx, &keep, &drop)?;
+    let regs =
+        match crate::federation::write_plan(st, &tenant, &spec, &ctx, params, headers).await? {
+            crate::federation::WritePlan::Answered(r) => return Ok(*r),
+            crate::federation::WritePlan::Forward(regs) => regs,
+        };
+    purge_locally(st, &tenant, params, &ctx, &keep, &drop).await?;
     if !regs.is_empty() {
         let mut parts = vec![crate::federation::Part {
             status: 204,
@@ -1746,11 +1775,12 @@ async fn merge_entity_inner(
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
     };
-    let regs =
-        match crate::federation::write_plan(st, &tenant, &spec, &parsed.ctx, params, headers)? {
-            crate::federation::WritePlan::Answered(r) => return Ok(*r),
-            crate::federation::WritePlan::Forward(regs) => regs,
-        };
+    let regs = match crate::federation::write_plan(st, &tenant, &spec, &parsed.ctx, params, headers)
+        .await?
+    {
+        crate::federation::WritePlan::Answered(r) => return Ok(*r),
+        crate::federation::WritePlan::Forward(regs) => regs,
+    };
     if !regs.is_empty() {
         let proxies: Vec<&crate::federation::FedReg> =
             regs.iter().filter(|r| r.is_proxy()).collect();
@@ -1761,7 +1791,8 @@ async fn merge_entity_inner(
         // selector narrows it on this path exactly as on the local-only one.
         let local_exists = st
             .store
-            .get(&tenant, Kind::Entity, id)?
+            .get(&tenant, Kind::Entity, id)
+            .await?
             .is_some_and(|d| crate::negotiate::matches_type_param(&d, params, &parsed.ctx));
         if (local_exists || proxies.is_empty()) && has_attrs {
             let mut local_frag = expand_entity(
@@ -1776,17 +1807,20 @@ async fn merge_entity_inner(
                 },
             )?;
             apply_common_observed_at(&mut local_frag, observed_at);
-            let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
-                if !crate::negotiate::matches_type_param(doc, params, &parsed.ctx) {
-                    return Err(NgsiError::ResourceNotFound(format!(
-                        "entity {id} does not match the type selector"
-                    )));
-                }
-                let mut frag = local_frag.clone();
-                apply_common_lang(doc, &mut frag, lang);
-                merge_into(doc, &frag, &ts);
-                Ok::<(), NgsiError>(())
-            })?;
+            let res = st
+                .store
+                .mutate(&tenant, Kind::Entity, id, |doc| {
+                    if !crate::negotiate::matches_type_param(doc, params, &parsed.ctx) {
+                        return Err(NgsiError::ResourceNotFound(format!(
+                            "entity {id} does not match the type selector"
+                        )));
+                    }
+                    let mut frag = local_frag.clone();
+                    apply_common_lang(doc, &mut frag, lang);
+                    merge_into(doc, &frag, &ts);
+                    Ok::<(), NgsiError>(())
+                })
+                .await?;
             parts.push(match res {
                 Some(Ok(())) => crate::federation::Part {
                     status: 204,
@@ -1835,18 +1869,21 @@ async fn merge_entity_inner(
         ));
     }
 
-    let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
-        // 5.6.17.4: the ?type selector narrows the merge target
-        if !crate::negotiate::matches_type_param(doc, params, &parsed.ctx) {
-            return Err(NgsiError::ResourceNotFound(format!(
-                "entity {id} does not match the type selector"
-            )));
-        }
-        let mut frag = fragment.clone();
-        apply_common_lang(doc, &mut frag, lang);
-        merge_into(doc, &frag, &ts);
-        Ok::<(), NgsiError>(())
-    })?;
+    let res = st
+        .store
+        .mutate(&tenant, Kind::Entity, id, |doc| {
+            // 5.6.17.4: the ?type selector narrows the merge target
+            if !crate::negotiate::matches_type_param(doc, params, &parsed.ctx) {
+                return Err(NgsiError::ResourceNotFound(format!(
+                    "entity {id} does not match the type selector"
+                )));
+            }
+            let mut frag = fragment.clone();
+            apply_common_lang(doc, &mut frag, lang);
+            merge_into(doc, &frag, &ts);
+            Ok::<(), NgsiError>(())
+        })
+        .await?;
     match res {
         None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
         Some(Err(e)) => Err(e.into()),
@@ -2067,14 +2104,17 @@ pub async fn replace_entity(
         // entity is "not known" for this replace.
         let local_doc = st
             .store
-            .get(&tenant, Kind::Entity, &id)?
+            .get(&tenant, Kind::Entity, &id)
+            .await?
             .filter(|d| crate::negotiate::matches_type_param(d, &params, &ctx0));
         let spec = crate::registry::CsrSpec {
             ids: Some(vec![id.clone()]),
             ..Default::default()
         };
         let regs =
-            match crate::federation::write_plan(&st, &tenant, &spec, &ctx0, &params, &headers)? {
+            match crate::federation::write_plan(&st, &tenant, &spec, &ctx0, &params, &headers)
+                .await?
+            {
                 crate::federation::WritePlan::Answered(r) => return Ok(*r),
                 crate::federation::WritePlan::Forward(regs) => regs,
             };
@@ -2096,26 +2136,29 @@ pub async fn replace_entity(
             }
             let ts = now_iso();
             stamp_new(&mut expanded, &ts);
-            let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
-                // 5.6.18.4: the ?type selector narrows the target here too —
-                // the type of the row being written is the one that counts
-                if !crate::negotiate::matches_type_param(doc, &params, &ctx0) {
-                    return Err(NgsiError::ResourceNotFound(format!(
-                        "entity {id} does not match the type selector"
-                    )));
-                }
-                // 4.8: "createdAt ... shall be the date and time at which the
-                // Entity was created" — the target's own stamp, read under
-                // the lock rather than from a snapshot another write may
-                // already have replaced.
-                if let (Some(o), Some(created)) =
-                    (expanded.as_object_mut(), doc.get("createdAt").cloned())
-                {
-                    o.insert("createdAt".into(), created);
-                }
-                *doc = expanded.clone();
-                Ok::<(), NgsiError>(())
-            })?;
+            let res = st
+                .store
+                .mutate(&tenant, Kind::Entity, &id, |doc| {
+                    // 5.6.18.4: the ?type selector narrows the target here too —
+                    // the type of the row being written is the one that counts
+                    if !crate::negotiate::matches_type_param(doc, &params, &ctx0) {
+                        return Err(NgsiError::ResourceNotFound(format!(
+                            "entity {id} does not match the type selector"
+                        )));
+                    }
+                    // 4.8: "createdAt ... shall be the date and time at which the
+                    // Entity was created" — the target's own stamp, read under
+                    // the lock rather than from a snapshot another write may
+                    // already have replaced.
+                    if let (Some(o), Some(created)) =
+                        (expanded.as_object_mut(), doc.get("createdAt").cloned())
+                    {
+                        o.insert("createdAt".into(), created);
+                    }
+                    *doc = expanded.clone();
+                    Ok::<(), NgsiError>(())
+                })
+                .await?;
             return match res {
                 None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
                 Some(Err(e)) => Err(e.into()),
@@ -2148,20 +2191,23 @@ pub async fn replace_entity(
                 stamp_new(&mut local_exp, &ts);
                 // the same row lock as the local-only path above: the read
                 // that found the target is not the write that replaces it
-                let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
-                    if !crate::negotiate::matches_type_param(doc, &params, &ctx0) {
-                        return Err(NgsiError::ResourceNotFound(format!(
-                            "entity {id} does not match the type selector"
-                        )));
-                    }
-                    if let (Some(o), Some(created)) =
-                        (local_exp.as_object_mut(), doc.get("createdAt").cloned())
-                    {
-                        o.insert("createdAt".into(), created);
-                    }
-                    *doc = local_exp.clone();
-                    Ok::<(), NgsiError>(())
-                })?;
+                let res = st
+                    .store
+                    .mutate(&tenant, Kind::Entity, &id, |doc| {
+                        if !crate::negotiate::matches_type_param(doc, &params, &ctx0) {
+                            return Err(NgsiError::ResourceNotFound(format!(
+                                "entity {id} does not match the type selector"
+                            )));
+                        }
+                        if let (Some(o), Some(created)) =
+                            (local_exp.as_object_mut(), doc.get("createdAt").cloned())
+                        {
+                            o.insert("createdAt".into(), created);
+                        }
+                        *doc = local_exp.clone();
+                        Ok::<(), NgsiError>(())
+                    })
+                    .await?;
                 match res {
                     Some(Ok(())) => parts.push(crate::federation::Part {
                         status: 204,
@@ -2261,7 +2307,8 @@ async fn retrieve_attr_inner(
     antares_model::check_attr_name(attr)?;
     let doc = st
         .store
-        .get(&tenant, Kind::Entity, id)?
+        .get(&tenant, Kind::Entity, id)
+        .await?
         .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
     let attr_iri = antares_jsonld::expand_attr_name(attr, &ctx)?;
     let node = doc.get(&attr_iri).ok_or_else(|| {
@@ -2368,7 +2415,9 @@ pub(crate) async fn build_query_map(
     // idPattern is invisible to the store, so a pushed page would slice the
     // wrong set — there the ceiling below is the only bound.
     let page = (!eff.contains_key("idPattern")).then_some((0, st.max_limit));
-    let mut local_docs = filter_entities_paged(st, tenant, &eff, ctx, Vec::new(), page, None)?.docs;
+    let mut local_docs = filter_entities_paged(st, tenant, &eff, ctx, Vec::new(), page, None)
+        .await?
+        .docs;
     local_docs.truncate(st.max_limit);
     let mut emap = Map::new();
     for d in &local_docs {
@@ -2756,8 +2805,8 @@ mod clause_4_5_23_bounds {
     /// 4.5.23.1: joinLevel bounds the depth, not the width — one retrieval
     /// may only buy MAX_JOIN_LOOKUPS Linked Entity reads, and the truncation
     /// is reported back to the caller.
-    #[test]
-    fn wide_inline_join_stops_at_the_lookup_budget() {
+    #[tokio::test]
+    async fn wide_inline_join_stops_at_the_lookup_budget() {
         let st = AppState::new("antares-test".into());
         let tenant = TenantId::default();
         let ctx = antares_jsonld::Loader::new().core();
@@ -2768,6 +2817,7 @@ mod clause_4_5_23_bounds {
                 ["https://uri.etsi.org/ngsi-ld/default-context/Wide"]});
             st.store
                 .upsert(&tenant, Kind::Entity, &id, doc)
+                .await
                 .expect("seed");
             targets.push(Value::String(id));
         }
@@ -2780,7 +2830,8 @@ mod clause_4_5_23_bounds {
             &crate::repr::Repr::default(),
             &mut compacted,
             1,
-        );
+        )
+        .await;
         assert!(!complete, "the budget was hit, so the walk is incomplete");
         assert_eq!(
             compacted["links"]["entity"]
@@ -2981,7 +3032,7 @@ mod clause_5_6_1_and_5_6_21 {
         );
     }
 
-    fn seed(st: &AppState, tenant: &TenantId, n: usize) {
+    async fn seed(st: &AppState, tenant: &TenantId, n: usize) {
         for i in 0..n {
             let id = format!("urn:ngsi-ld:Purge:{i:05}");
             let doc = json!({"id": &id,
@@ -2992,6 +3043,7 @@ mod clause_5_6_1_and_5_6_21 {
                     [{"type": "Property", "value": 1}]});
             st.store
                 .upsert(tenant, Kind::Entity, &id, doc)
+                .await
                 .expect("seed");
         }
     }
@@ -3011,7 +3063,7 @@ mod clause_5_6_1_and_5_6_21 {
         let st = AppState::new("antares-test".into());
         let tenant = TenantId::default();
         let n = PURGE_CHUNK * 2 + 7;
-        seed(&st, &tenant, n);
+        seed(&st, &tenant, n).await;
         let resp = purge_inner(&st, &purge_params(&[("type", "Purge")]), &HeaderMap::new())
             .await
             .expect("purge");
@@ -3019,6 +3071,7 @@ mod clause_5_6_1_and_5_6_21 {
         assert!(
             st.store
                 .list(&tenant, Kind::Entity)
+                .await
                 .expect("list")
                 .is_empty(),
             "entities survived the purge"
@@ -3033,7 +3086,7 @@ mod clause_5_6_1_and_5_6_21 {
         let st = AppState::new("antares-test".into());
         let tenant = TenantId::default();
         let n = PURGE_CHUNK * 2 + 7;
-        seed(&st, &tenant, n);
+        seed(&st, &tenant, n).await;
         let resp = purge_inner(
             &st,
             &purge_params(&[("type", "Purge"), ("keep", "name")]),
@@ -3042,7 +3095,7 @@ mod clause_5_6_1_and_5_6_21 {
         .await
         .expect("purge");
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        let left = st.store.list(&tenant, Kind::Entity).expect("list");
+        let left = st.store.list(&tenant, Kind::Entity).await.expect("list");
         assert_eq!(left.len(), n, "keep= prunes attributes, not entities");
         for doc in &left {
             assert!(
@@ -3064,7 +3117,7 @@ mod clause_5_6_1_and_5_6_21 {
     async fn purge_deletes_the_id_pattern_matches_and_nothing_else() {
         let st = AppState::new("antares-test".into());
         let tenant = TenantId::default();
-        seed(&st, &tenant, 30);
+        seed(&st, &tenant, 30).await;
         let resp = purge_inner(
             &st,
             &purge_params(&[("type", "Purge"), ("idPattern", "^urn:ngsi-ld:Purge:0000")]),
@@ -3076,6 +3129,7 @@ mod clause_5_6_1_and_5_6_21 {
         let left: Vec<String> = st
             .store
             .list(&tenant, Kind::Entity)
+            .await
             .expect("list")
             .iter()
             .filter_map(|d| d["id"].as_str().map(str::to_owned))
@@ -3151,15 +3205,18 @@ mod clause_5_6_1_and_5_6_21 {
             )),
             "postgres",
         );
-        for doc in st.store.list(&tenant, Kind::Entity).expect("list") {
+        for doc in st.store.list(&tenant, Kind::Entity).await.expect("list") {
             if let Some(id) = doc["id"].as_str() {
-                st.store.delete(&tenant, Kind::Entity, id).expect("clean");
+                st.store
+                    .delete(&tenant, Kind::Entity, id)
+                    .await
+                    .expect("clean");
             }
         }
         // more than two chunks, and the pattern matches every second id — so
         // no chunk the store pages is full once the pattern filtered it
         let n = PURGE_CHUNK * 2 + 200;
-        seed(&st, &tenant, n);
+        seed(&st, &tenant, n).await;
         // the purge must run AS the seeded tenant — with no NGSILD-Tenant
         // header it correctly purges the default tenant's (empty) match set
         // and every seeded row survives (5.5.10)
@@ -3176,6 +3233,7 @@ mod clause_5_6_1_and_5_6_21 {
         let left: Vec<String> = st
             .store
             .list(&tenant, Kind::Entity)
+            .await
             .expect("list")
             .iter()
             .filter_map(|d| d["id"].as_str().map(str::to_owned))
@@ -3196,7 +3254,10 @@ mod clause_5_6_1_and_5_6_21 {
             "an Entity the pattern does not match must not be purged"
         );
         for id in &left {
-            st.store.delete(&tenant, Kind::Entity, id).expect("clean");
+            st.store
+                .delete(&tenant, Kind::Entity, id)
+                .await
+                .expect("clean");
         }
     }
 

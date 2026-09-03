@@ -71,6 +71,9 @@ postgres = ["test-kit", "antares-sql/postgres"]
 sonic = ["dep:sonic-rs"]
 
 [dev-dependencies]
+# the storage seams are object-safe AND asynchronous: a test double
+# implements them through the same boxing macro the drivers use.
+async-trait = { workspace = true }
 antares-api = { workspace = true, features = ["test-kit", "postgres"] }
 http-body-util = { workspace = true }
 # capturing subscriber: the tests that prove a credential is not logged

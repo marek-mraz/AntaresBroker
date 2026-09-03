@@ -101,7 +101,10 @@ async fn current_state_still_works_and_records_no_history() {
     assert_eq!(body["id"], "urn:x:1");
     // the recorder produced nothing — the driver holds no doc for the entity
     let t = antares_model::TenantId::new(antares_model::TenantId::DEFAULT).expect("tenant");
-    assert_eq!(st.temporal.get(&t, "urn:x:1").expect("driver ok"), None);
+    assert_eq!(
+        st.temporal.get(&t, "urn:x:1").await.expect("driver ok"),
+        None
+    );
 }
 
 #[tokio::test]

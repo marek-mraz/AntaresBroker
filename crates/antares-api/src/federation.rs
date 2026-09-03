@@ -408,7 +408,7 @@ pub fn ctx_link_url(headers: &HeaderMap, source: &Value) -> String {
 /// mis-decides would silently lose a Context Source. A plain term is
 /// expanded first — the spec carries the parameter as the client wrote it
 /// (`Vehicle`), the index stores what [`reg_candidate`] compares: the IRI.
-fn reg_docs(
+async fn reg_docs(
     st: &AppState,
     tenant: &TenantId,
     spec: &crate::registry::CsrSpec,
@@ -431,7 +431,8 @@ fn reg_docs(
         Some(m) => Ok(m.matching(tenant.as_str(), ids, types.as_deref())),
         None => Ok(st
             .store
-            .matching_registrations(tenant, ids, types.as_deref())?
+            .matching_registrations(tenant, ids, types.as_deref())
+            .await?
             .into_iter()
             .map(std::sync::Arc::new)
             .collect()),
@@ -520,7 +521,7 @@ fn reg_candidate<'a>(
 /// one place every read and write path resolves its candidates. Keeping it
 /// out of the call sites is deliberate: a loop check the callers own is a
 /// loop check some caller forgets.
-pub fn matching_regs(
+pub async fn matching_regs(
     st: &AppState,
     tenant: &TenantId,
     spec: &crate::registry::CsrSpec,
@@ -531,7 +532,8 @@ pub fn matching_regs(
         return Ok(Vec::new());
     }
     let seen = via_tokens(headers);
-    let regs: Vec<FedReg> = reg_docs(st, tenant, spec, ctx)?
+    let regs: Vec<FedReg> = reg_docs(st, tenant, spec, ctx)
+        .await?
         .iter()
         .filter_map(|doc| {
             let infos = reg_candidate(doc, spec, ctx, &seen)?;
@@ -835,13 +837,14 @@ fn path_attr_segment(url: &str) -> Option<(std::ops::Range<usize>, String)> {
 /// runs, and a store that cannot take a counter must not turn a served
 /// response into an error. The registration mirror is not refreshed either:
 /// it exists to decide which registrations match, and no member here does.
-fn note_forward(st: &AppState, tenant: &TenantId, reg: &FedReg, ok: bool) {
+async fn note_forward(st: &AppState, tenant: &TenantId, reg: &FedReg, ok: bool) {
     if reg.cooldown_ms.is_some() {
         st.reg_cooldown_stamp(tenant, &reg.reg_id, ok);
     }
     if let Err(e) = st
         .store
         .record_forward(tenant, &reg.reg_id, &crate::state::now_iso(), ok)
+        .await
     {
         tracing::warn!(
             "forward bookkeeping for registration {} failed: {e}",
@@ -1183,7 +1186,7 @@ pub async fn forward(
             Some(r) => r,
             None => {
                 st.egress.record_failure(tenant.as_str(), &url);
-                note_forward(st, tenant, reg, false);
+                note_forward(st, tenant, reg, false).await;
                 return (504, Value::Null, Vec::new());
             }
         };
@@ -1196,7 +1199,7 @@ pub async fn forward(
                 // else unrelated registrations sharing its host:port starve.
                 let status = resp.status().as_u16();
                 st.egress.record_success(tenant.as_str(), &url);
-                note_forward(st, tenant, reg, (200..300).contains(&status));
+                note_forward(st, tenant, reg, (200..300).contains(&status)).await;
                 // 6.3.17: the peer's own values travel on (4.3.6.4), but
                 // only up to the cap — the list is written by the peer and
                 // sent by this broker, and past the cap one source would
@@ -1222,7 +1225,7 @@ pub async fn forward(
             }
             Err(e) if e.is_timeout() => {
                 st.egress.record_failure(tenant.as_str(), &url);
-                note_forward(st, tenant, reg, false);
+                note_forward(st, tenant, reg, false).await;
                 (504, Value::Null, Vec::new())
             }
             Err(_) => {
@@ -1233,7 +1236,7 @@ pub async fn forward(
                 // response was received from the registration endpoint"),
                 // never 299 ("An error response ... was received").
                 st.egress.record_success(tenant.as_str(), &url);
-                note_forward(st, tenant, reg, false);
+                note_forward(st, tenant, reg, false).await;
                 (503, Value::Null, Vec::new())
             }
         }
@@ -1486,7 +1489,8 @@ pub async fn fed_retrieve_temporal(
     };
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
-    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)?
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+        .await?
         .into_iter()
         // 5.7.3.4: a live EntityMap in use is the ONLY source of matching
         // registrations; its linked map location travels with the forward.
@@ -1679,7 +1683,8 @@ pub async fn fed_retrieve(
     };
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
-    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)?
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+        .await?
         .into_iter()
         // 5.8.6 splitEntities merge: "except for the one from which the
         // Notification has been received"
@@ -1827,7 +1832,7 @@ fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::registr
 /// presence of `local=true`: a query no registration matches executes locally
 /// whether or not the client said so. Reading it as "local=true is mandatory
 /// for orderBy" would fail ETSI's own 019_19, which orders without it.
-pub fn would_federate(
+pub async fn would_federate(
     st: &AppState,
     tenant: &TenantId,
     ctx: &Context,
@@ -1840,7 +1845,8 @@ pub fn would_federate(
     // the verdict only — no forwarding set is compiled for it
     let spec = query_spec(ctx, params);
     let seen = via_tokens(headers);
-    Ok(reg_docs(st, tenant, &spec, ctx)?
+    Ok(reg_docs(st, tenant, &spec, ctx)
+        .await?
         .iter()
         .any(|doc| reg_candidate(doc, &spec, ctx, &seen).is_some()))
 }
@@ -1882,7 +1888,8 @@ pub async fn fed_query(
     let spec = query_spec(ctx, params);
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
-    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)?
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+        .await?
         .into_iter()
         .filter(|r| r.query_op().is_some())
         .collect();
@@ -2097,7 +2104,8 @@ pub(crate) async fn fed_entity_maps(
     let spec = query_spec(ctx, params);
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
-    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)?
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+        .await?
         .into_iter()
         .filter(|reg| reg.supports(op))
         .collect();
@@ -2174,7 +2182,8 @@ pub async fn fed_query_temporal(
         .flatten();
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
-    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)?
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+        .await?
         .into_iter()
         .filter(|reg| reg.supports("queryTemporal"))
         .collect();
@@ -2431,7 +2440,7 @@ pub enum WritePlan {
 /// The prologue every distributed write shares (4.3.6, 6.3.18): the
 /// registrations of [`write_regs`] with [`handle_via_loop`] applied, so
 /// no operation re-derives the pair and the two cannot disagree.
-pub fn write_plan(
+pub async fn write_plan(
     st: &AppState,
     tenant: &TenantId,
     spec: &crate::registry::CsrSpec,
@@ -2439,7 +2448,7 @@ pub fn write_plan(
     params: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> Result<WritePlan, NgsiError> {
-    let mut regs = write_regs(st, tenant, spec, ctx, params, headers)?;
+    let mut regs = write_regs(st, tenant, spec, ctx, params, headers).await?;
     Ok(
         match handle_via_loop(
             headers,
@@ -2456,7 +2465,7 @@ pub fn write_plan(
 /// 4.3.6.2: "Auxiliary distributed operations are limited to context
 /// information consumption operations (see clause 5.7)" — so a write op
 /// only ever considers non-auxiliary matching registrations.
-pub fn write_regs(
+pub async fn write_regs(
     st: &AppState,
     tenant: &TenantId,
     spec: &crate::registry::CsrSpec,
@@ -2467,7 +2476,8 @@ pub fn write_regs(
     if !active(params) {
         return Ok(Vec::new());
     }
-    Ok(matching_regs(st, tenant, spec, ctx, headers)?
+    Ok(matching_regs(st, tenant, spec, ctx, headers)
+        .await?
         .into_iter()
         .filter(|r| r.mode != "auxiliary")
         .collect())
@@ -2923,8 +2933,8 @@ mod tests {
     /// gives a registration the peer's `contextSourceAlias` "which is used to
     /// identify loops". A source already in the chain is therefore not a
     /// match — and the tenant-specific alias keeps that per (source, tenant).
-    #[test]
-    fn registered_alias_in_the_via_chain_is_not_a_matching_registration() {
+    #[tokio::test]
+    async fn registered_alias_in_the_via_chain_is_not_a_matching_registration() {
         let st = AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -2944,6 +2954,7 @@ mod tests {
             }
             st.store
                 .create(&tenant, Kind::Registration, id, doc)
+                .await
                 .expect("seed registration");
         }
         let spec = crate::registry::CsrSpec {
@@ -2952,10 +2963,14 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let all = matching_regs(&st, &tenant, &spec, &ctx, &hdrs(None)).expect("registrations");
+        let all = matching_regs(&st, &tenant, &spec, &ctx, &hdrs(None))
+            .await
+            .expect("registrations");
         assert_eq!(all.len(), 3, "no Via ⇒ every registration matches");
         let via = hdrs(Some("1.1 peer1"));
-        let left = matching_regs(&st, &tenant, &spec, &ctx, &via).expect("registrations");
+        let left = matching_regs(&st, &tenant, &spec, &ctx, &via)
+            .await
+            .expect("registrations");
         let ids: Vec<&str> = left.iter().map(|r| r.reg_id.as_str()).collect();
         assert!(
             !ids.contains(&"urn:ngsi-ld:ContextSourceRegistration:visited"),
@@ -2999,8 +3014,8 @@ mod tests {
     /// Context Source Registration will act only on data held directly by
     /// the registered Context Source itself" — the flag must survive
     /// registration compilation so every forward can carry local=true.
-    #[test]
-    fn local_only_survives_registration_compilation() {
+    #[tokio::test]
+    async fn local_only_survives_registration_compilation() {
         let st = AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -3019,6 +3034,7 @@ mod tests {
             }
             st.store
                 .create(&tenant, Kind::Registration, id, doc)
+                .await
                 .expect("seed registration");
         }
         let spec = crate::registry::CsrSpec {
@@ -3027,8 +3043,9 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let regs =
-            matching_regs(&st, &tenant, &spec, &ctx, &HeaderMap::new()).expect("registrations");
+        let regs = matching_regs(&st, &tenant, &spec, &ctx, &HeaderMap::new())
+            .await
+            .expect("registrations");
         let lo = |id: &str| {
             regs.iter()
                 .find(|r| r.reg_id == id)
@@ -3042,8 +3059,8 @@ mod tests {
     /// Table 5.2.34-1: management.localOnly — "distributed operations
     /// associated to this Context Source Registration will act only on data
     /// held directly by the registered Context Source itself".
-    #[test]
-    fn management_local_only_survives_registration_compilation() {
+    #[tokio::test]
+    async fn management_local_only_survives_registration_compilation() {
         let st = AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -3057,6 +3074,7 @@ mod tests {
         });
         st.store
             .create(&tenant, Kind::Registration, id, doc)
+            .await
             .expect("seed registration");
         let spec = crate::registry::CsrSpec {
             types: Some(vec![
@@ -3064,8 +3082,9 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let regs =
-            matching_regs(&st, &tenant, &spec, &ctx, &HeaderMap::new()).expect("registrations");
+        let regs = matching_regs(&st, &tenant, &spec, &ctx, &HeaderMap::new())
+            .await
+            .expect("registrations");
         assert!(
             regs.iter()
                 .find(|r| r.reg_id == id)
@@ -3118,7 +3137,7 @@ mod tests {
         assert_eq!(reg(&["retrieveOps"]).query_op(), Some("queryEntity"));
     }
 
-    fn seed_reg(
+    async fn seed_reg(
         st: &AppState,
         tenant: &antares_model::TenantId,
         id: &str,
@@ -3135,14 +3154,15 @@ mod tests {
         });
         st.store
             .create(tenant, Kind::Registration, id, doc)
+            .await
             .expect("seed registration");
     }
 
     /// 5.2.9 / 5.12: an `idPattern` in the registration's EntityInfo matches
     /// a write addressed by id, so the write forwards to that source; a
     /// pattern the id does not match keeps the write local.
-    #[test]
-    fn write_plan_forwards_a_write_by_id_to_an_id_pattern_registration() {
+    #[tokio::test]
+    async fn write_plan_forwards_a_write_by_id_to_an_id_pattern_registration() {
         let st = AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -3152,14 +3172,16 @@ mod tests {
             "urn:ngsi-ld:ContextSourceRegistration:cars",
             "exclusive",
             json!([{"idPattern": "urn:ngsi-ld:Vehicle:.*"}]),
-        );
+        )
+        .await;
         seed_reg(
             &st,
             &tenant,
             "urn:ngsi-ld:ContextSourceRegistration:bikes",
             "exclusive",
             json!([{"idPattern": "urn:ngsi-ld:Bike:.*"}]),
-        );
+        )
+        .await;
         let spec = crate::registry::CsrSpec {
             ids: Some(vec!["urn:ngsi-ld:Vehicle:1".into()]),
             ..Default::default()
@@ -3172,6 +3194,7 @@ mod tests {
             &HashMap::new(),
             &HeaderMap::new(),
         )
+        .await
         .expect("plan");
         let WritePlan::Forward(regs) = plan else {
             panic!("no Via chain, so nothing answers early");
@@ -3184,8 +3207,8 @@ mod tests {
     /// the chain rule before any registration is used — with a single
     /// exclusive source that is the 508 of Table 6.3.18-2 — and a chain
     /// past the hop cap is 508 regardless of what matched.
-    #[test]
-    fn write_plan_answers_a_via_loop_before_forwarding() {
+    #[tokio::test]
+    async fn write_plan_answers_a_via_loop_before_forwarding() {
         let st = AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -3195,7 +3218,8 @@ mod tests {
             "urn:ngsi-ld:ContextSourceRegistration:cars",
             "exclusive",
             json!([{"idPattern": "urn:ngsi-ld:Vehicle:.*"}]),
-        );
+        )
+        .await;
         let spec = crate::registry::CsrSpec {
             ids: Some(vec!["urn:ngsi-ld:Vehicle:1".into()]),
             ..Default::default()
@@ -3208,6 +3232,7 @@ mod tests {
             &HashMap::new(),
             &hdrs(Some("1.1 me")),
         )
+        .await
         .expect("plan");
         let WritePlan::Answered(resp) = looped else {
             panic!("a Via chain naming this broker with one exclusive source is answered, not forwarded");
@@ -3225,13 +3250,14 @@ mod tests {
             &HashMap::new(),
             &hdrs(Some(&deep)),
         )
+        .await
         .expect("plan") else {
             panic!("a chain past the hop cap is refused outright");
         };
         assert_eq!(resp.status(), 508);
         // no chain, no early answer: the same registration forwards
         assert!(matches!(
-            write_plan(&st, &tenant, &spec, &ctx, &HashMap::new(), &HeaderMap::new()).expect("plan"),
+            write_plan(&st, &tenant, &spec, &ctx, &HashMap::new(), &HeaderMap::new()).await.expect("plan"),
             WritePlan::Forward(regs) if regs.len() == 1
         ));
     }
@@ -3239,8 +3265,8 @@ mod tests {
     /// 4.3.6.2: "Auxiliary distributed operations are limited to context
     /// information consumption operations" — write_regs must drop a matching
     /// auxiliary registration while keeping an inclusive one.
-    #[test]
-    fn write_regs_exclude_auxiliary_registrations() {
+    #[tokio::test]
+    async fn write_regs_exclude_auxiliary_registrations() {
         let st = AppState::new("me".into());
         let tenant = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -3258,6 +3284,7 @@ mod tests {
             });
             st.store
                 .create(&tenant, Kind::Registration, id, doc)
+                .await
                 .expect("seed registration");
         }
         let spec = crate::registry::CsrSpec {
@@ -3274,6 +3301,7 @@ mod tests {
             &HashMap::new(),
             &HeaderMap::new(),
         )
+        .await
         .expect("registrations");
         let ids: Vec<&str> = regs.iter().map(|r| r.reg_id.as_str()).collect();
         assert_eq!(ids, vec!["urn:ngsi-ld:ContextSourceRegistration:inc"]);
@@ -3568,8 +3596,8 @@ mod tests {
     /// element is compared against every candidate registration. A chain
     /// longer than any real cascade is therefore both a loop symptom and a
     /// work amplifier, and is refused before the registrations are read.
-    #[test]
-    fn via_chain_beyond_the_hop_ceiling_is_refused() {
+    #[tokio::test]
+    async fn via_chain_beyond_the_hop_ceiling_is_refused() {
         let chain = |n: usize| {
             (0..n)
                 .map(|i| format!("1.1 hop{i}"))
@@ -3602,7 +3630,7 @@ mod tests {
                     "endpoint": "http://peer:9090",
                     "information": [{"entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"}]}],
                 }),
-            )
+            ).await
             .expect("seed registration");
         let spec = crate::registry::CsrSpec {
             types: Some(vec![
@@ -3612,6 +3640,7 @@ mod tests {
         };
         assert!(
             matching_regs(&st, &t, &spec, &ctx, &over)
+                .await
                 .expect("registrations")
                 .is_empty(),
             "no registration is matched past the hop ceiling"
@@ -3622,6 +3651,7 @@ mod tests {
         assert!(handle_via_loop(&at, "me", &t, &mut vec![reg("inclusive")]).is_none());
         assert_eq!(
             matching_regs(&st, &t, &spec, &ctx, &at)
+                .await
                 .expect("registrations")
                 .len(),
             1
@@ -3632,8 +3662,8 @@ mod tests {
     /// the local scope, so it never compiles a forwarding set — but its
     /// verdict must stay identical to the set's emptiness for every shape
     /// that gates matching (type, id, the Via chain, local scope).
-    #[test]
-    fn would_federate_agrees_with_the_compiled_forward_set() {
+    #[tokio::test]
+    async fn would_federate_agrees_with_the_compiled_forward_set() {
         let st = AppState::new("me".into());
         let t = antares_model::TenantId::new("default").expect("tenant");
         let ctx = st.loader.core();
@@ -3650,7 +3680,7 @@ mod tests {
                     "contextSourceAlias": "peer1",
                     "information": [{"entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"}]}],
                 }),
-            )
+            ).await
             .expect("seed registration");
         let params = |kv: &[(&str, &str)]| {
             kv.iter()
@@ -3677,13 +3707,16 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                would_federate(&st, &t, &ctx, &p, &headers).expect("registrations"),
+                would_federate(&st, &t, &ctx, &p, &headers)
+                    .await
+                    .expect("registrations"),
                 expected,
                 "would_federate verdict for {p:?}"
             );
             assert_eq!(
                 active(&p)
                     && !matching_regs(&st, &t, &query_spec(&ctx, &p), &ctx, &headers)
+                        .await
                         .expect("registrations")
                         .is_empty(),
                 expected,

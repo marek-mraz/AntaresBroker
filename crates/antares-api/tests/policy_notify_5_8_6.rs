@@ -82,13 +82,13 @@ impl PolicyEngine for Notifier {
     }
 }
 
-fn state(answer: NotifyDecision) -> (AppState, Asked) {
+async fn state(answer: NotifyDecision) -> (AppState, Asked) {
     // before the first request: the header list is read once per process
     subject_header();
     antares_jsonld::allow_private_egress(true);
     let (engine, seen) = Notifier::new(answer);
     let mut st = AppState::new("me".into()).with_policy(engine);
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     (st, seen)
 }
 
@@ -204,7 +204,7 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// and no `lastFailure` either, because it is not a failed delivery.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dropped_notification_is_no_attempt_at_all() {
-    let (st, _) = state(NotifyDecision::Drop);
+    let (st, _) = state(NotifyDecision::Drop).await;
     let (uri, mut rx) = capture().await;
     subscribe(&st, &uri, Some("alice")).await;
     fire(&st, "urn:ngsi-ld:Vehicle:dropped").await;
@@ -236,7 +236,7 @@ async fn a_dropped_notification_is_no_attempt_at_all() {
 /// above is about the drop and not about a broker that stopped counting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delivered_notification_still_counts() {
-    let (st, _) = state(NotifyDecision::Deliver);
+    let (st, _) = state(NotifyDecision::Deliver).await;
     let (uri, mut rx) = capture().await;
     subscribe(&st, &uri, Some("alice")).await;
     fire(&st, "urn:ngsi-ld:Vehicle:sent").await;
@@ -258,7 +258,8 @@ async fn a_filtered_notification_loses_only_what_the_engine_named() {
     let (st, _) = state(NotifyDecision::Filter(Filter {
         omit: vec!["colour".into()],
         ..Filter::default()
-    }));
+    }))
+    .await;
     let (uri, mut rx) = capture().await;
     subscribe(&st, &uri, Some("alice")).await;
     fire(&st, "urn:ngsi-ld:Vehicle:filtered").await;
@@ -282,7 +283,8 @@ async fn a_projection_named_as_an_iri_removes_the_member_it_names() {
     let (st, _) = state(NotifyDecision::Filter(Filter {
         omit: vec!["https://uri.etsi.org/ngsi-ld/default-context/colour".into()],
         ..Filter::default()
-    }));
+    }))
+    .await;
     let (uri, mut rx) = capture().await;
     subscribe(&st, &uri, Some("alice")).await;
     fire(&st, "urn:ngsi-ld:Vehicle:iri").await;
@@ -306,7 +308,8 @@ async fn a_pick_leaves_the_entity_frame_and_nothing_it_did_not_name() {
     let (st, _) = state(NotifyDecision::Filter(Filter {
         pick: vec!["speed".into()],
         ..Filter::default()
-    }));
+    }))
+    .await;
     let (uri, mut rx) = capture().await;
     subscribe(&st, &uri, Some("alice")).await;
     fire(&st, "urn:ngsi-ld:Vehicle:picked").await;
@@ -330,7 +333,8 @@ async fn a_notification_filter_that_carries_a_query_is_dropped() {
     let (st, _) = state(NotifyDecision::Filter(Filter {
         q: Some(antares_ql::parse_q("speed<50").expect("q")),
         ..Filter::default()
-    }));
+    }))
+    .await;
     let (uri, mut rx) = capture().await;
     subscribe(&st, &uri, Some("alice")).await;
     // the entity MATCHES the condition, so a broker that silently ignored
@@ -355,7 +359,7 @@ async fn a_notification_filter_that_carries_a_query_is_dropped() {
 /// and the creating request is the only place a subject can come from.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_notification_subject_is_the_subscribers() {
-    let (st, seen) = state(NotifyDecision::Deliver);
+    let (st, seen) = state(NotifyDecision::Deliver).await;
     let (uri, mut rx) = capture().await;
     subscribe(&st, &uri, Some("alice")).await;
     // the write is nobody's in particular; the notification is still alice's
@@ -378,7 +382,7 @@ async fn the_notification_subject_is_the_subscribers() {
 /// it at creation nor replace it by patch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_stored_subject_is_in_no_representation_and_no_client_can_set_it() {
-    let (st, seen) = state(NotifyDecision::Deliver);
+    let (st, seen) = state(NotifyDecision::Deliver).await;
     let (uri, mut rx) = capture().await;
     let member = "__subject";
 

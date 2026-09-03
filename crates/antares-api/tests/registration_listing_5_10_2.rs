@@ -49,7 +49,7 @@ async fn get(st: &AppState, uri: &str) -> (StatusCode, Value, Option<String>) {
 /// `n` registrations of `ty`, plus `n` of a type the query never asks for,
 /// interleaved by id so a window taken before the filter cannot accidentally
 /// land on the right rows.
-fn seed(st: &AppState, n: usize, ty: &str) {
+async fn seed(st: &AppState, n: usize, ty: &str) {
     let tenant = TenantId::new("default").expect("tenant");
     for i in 0..n {
         for (suffix, t) in [("want", ty), ("other", "Nothing")] {
@@ -66,6 +66,7 @@ fn seed(st: &AppState, n: usize, ty: &str) {
                         "information": [{"entities": [{"type": t}]}],
                     }),
                 )
+                .await
                 .expect("seed registration");
         }
     }
@@ -80,7 +81,7 @@ fn seed(st: &AppState, n: usize, ty: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tenant_over_the_document_ceiling_can_still_list_its_registrations() {
     let mut st = AppState::new("me".into());
-    seed(&st, 4, "Vehicle");
+    seed(&st, 4, "Vehicle").await;
     st.store = Arc::new(Double::flaky_list(st.store.clone(), usize::MAX));
 
     let (status, body, count) = get(
@@ -106,7 +107,7 @@ async fn a_tenant_over_the_document_ceiling_can_still_list_its_registrations() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_page_is_cut_from_the_matches_and_not_from_the_stored_rows() {
     let st = AppState::new("me".into());
-    seed(&st, 5, "Vehicle");
+    seed(&st, 5, "Vehicle").await;
 
     let (status, body, count) = get(
         &st,
@@ -175,7 +176,7 @@ async fn the_page_is_cut_from_the_matches_and_not_from_the_stored_rows() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_walk_never_reaches_another_tenants_registrations() {
     let st = AppState::new("me".into());
-    seed(&st, 3, "Vehicle");
+    seed(&st, 3, "Vehicle").await;
 
     let resp = antares_api::router(st.clone())
         .oneshot(
@@ -214,7 +215,7 @@ async fn the_walk_never_reaches_another_tenants_registrations() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_exclusive_registration_is_creatable_past_the_document_ceiling() {
     let mut st = AppState::new("me".into());
-    seed(&st, 3, "Vehicle");
+    seed(&st, 3, "Vehicle").await;
     st.store = Arc::new(Double::flaky_list(st.store.clone(), usize::MAX));
 
     let body = json!({
@@ -286,7 +287,7 @@ async fn an_exclusive_registration_is_creatable_past_the_document_ceiling() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_percent_escape_inside_q_is_not_decoded_a_second_time() {
     let st = AppState::new("antares-test".into());
-    seed(&st, 1, "Vehicle");
+    seed(&st, 1, "Vehicle").await;
     // the client asks for the literal text `%22`: on the wire the percent
     // itself is escaped, so one decode yields q = speed=="%22"
     let (status, body, _) = get(

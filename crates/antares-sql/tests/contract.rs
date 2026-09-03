@@ -15,22 +15,22 @@ fn tenants() -> (TenantId, TenantId) {
     )
 }
 
-#[test]
-fn the_memory_store_keeps_the_driver_contract() {
+#[tokio::test]
+async fn the_memory_store_keeps_the_driver_contract() {
     let (a, b) = tenants();
     let s = AnyStore::Mem(Store::default());
-    antares_store::contract::run_current_state_contract(&s, &a, &b, "memory");
-    antares_store::contract::run_temporal_contract(&s, &a, &b, "memory");
+    antares_store::contract::run_current_state_contract(&s, &a, &b, "memory").await;
+    antares_store::contract::run_temporal_contract(&s, &a, &b, "memory").await;
 }
 
-#[test]
-fn the_file_store_keeps_the_driver_contract() {
+#[tokio::test]
+async fn the_file_store_keeps_the_driver_contract() {
     let (a, b) = tenants();
     let dir = std::env::temp_dir().join(format!("antares-contract-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
     let s = AnyStore::Mem(Store::open_file(&dir).expect("open"));
-    antares_store::contract::run_current_state_contract(&s, &a, &b, "file");
-    antares_store::contract::run_temporal_contract(&s, &a, &b, "file");
+    antares_store::contract::run_current_state_contract(&s, &a, &b, "file").await;
+    antares_store::contract::run_temporal_contract(&s, &a, &b, "file").await;
     let _ = std::fs::remove_dir_all(&dir);
 }

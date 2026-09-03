@@ -162,17 +162,25 @@ pub async fn wire_nats(
         // (one choke point for every write, no handler can forget), then nudges
         // the outbox drain.
         let st_rec = state.clone();
-        state
-            .store
-            .set_change_hook(Box::new(move |tenant, before, after| {
-                antares_api::notify::record_temporal_change(
-                    &st_rec,
-                    tenant,
-                    before.as_ref(),
-                    after.as_ref(),
-                );
-                n.notify_one();
-            }));
+        state.store.set_change_hook(Arc::new(
+            move |tenant: &TenantId,
+                  before: Option<serde_json::Value>,
+                  after: Option<serde_json::Value>|
+                  -> antares_store::HookFuture<'_> {
+                let st_rec = st_rec.clone();
+                let n = n.clone();
+                Box::pin(async move {
+                    antares_api::notify::record_temporal_change(
+                        &st_rec,
+                        tenant,
+                        before.as_ref(),
+                        after.as_ref(),
+                    )
+                    .await;
+                    n.notify_one();
+                })
+            },
+        ));
     }
 
     let mut durables: Vec<&'static str> = Vec::new();
@@ -275,7 +283,9 @@ pub async fn wire_nats(
             &*state.store,
             reg_mirror.as_ref(),
             Kind::Registration,
-        ) {
+        )
+        .await
+        {
             Ok(()) => state.reg_mirror = Some(reg_mirror.clone()),
             Err(e) => tracing::error!(
                 "registration mirror hydrate failed ({e}); \
@@ -322,7 +332,9 @@ pub async fn wire_nats(
                     &*store_for_reg,
                     reg_mirror.as_ref(),
                     Kind::Registration,
-                ) {
+                )
+                .await
+                {
                     tracing::error!(
                         "registration mirror re-hydrate failed ({e}); \
                          this pod is matching against registrations from before the gap"
@@ -344,7 +356,7 @@ pub async fn wire_nats(
             let bus_for_drain = bus.clone();
             tokio::spawn(async move {
                 loop {
-                    let rows = match store.outbox_peek(64) {
+                    let rows = match store.outbox_peek(64).await {
                         Ok(r) => r,
                         Err(e) => {
                             tracing::warn!("outbox peek failed: {e}");
@@ -386,7 +398,7 @@ pub async fn wire_nats(
                         }
                     }
                     if !acked.is_empty() {
-                        if let Err(e) = store.outbox_ack(&acked) {
+                        if let Err(e) = store.outbox_ack(&acked).await {
                             tracing::warn!("outbox ack {acked:?} failed: {e}");
                         }
                     }
@@ -408,7 +420,9 @@ pub async fn wire_nats(
             &*state.store,
             sub_mirror.as_ref(),
             Kind::Subscription,
-        ) {
+        )
+        .await
+        {
             Ok(()) => state.sub_mirror = Some(sub_mirror.clone()),
             Err(e) => tracing::error!(
                 "subscription mirror hydrate failed ({e}); \
@@ -466,7 +480,7 @@ pub async fn wire_nats(
                         }
                     }
                     if let Some(ev) = nats::decode(&msg) {
-                        let (before, after) = resolve_payloads(&st, &ev);
+                        let (before, after) = resolve_payloads(&st, &ev).await;
                         antares_api::notify::process_change(&st, ev.tenant.as_str(), before, after)
                             .await;
                     }
@@ -538,24 +552,30 @@ fn apply_delta(mirror: &dyn antares_api::mirror::Mirror, delta: &serde_json::Val
 /// Resolve claim-check references: consumers fetch oversized bodies
 /// from the store. The current row may be newer than the referenced version —
 /// ordinary at-least-once reality; the matcher is ordering-tolerant.
-fn resolve_payloads(
+async fn resolve_payloads(
     st: &AppState,
     ev: &ChangeEvent,
 ) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
-    let fetch = |r: &antares_bus::PayloadRef| {
+    async fn fetch(
+        st: &AppState,
+        ev: &ChangeEvent,
+        r: Option<&antares_bus::PayloadRef>,
+    ) -> Option<serde_json::Value> {
+        let r = r?;
         st.store
             .get(&ev.tenant, Kind::Entity, r.entity_id.as_str())
+            .await
             .ok()
             .flatten()
+    }
+    let before = match ev.prev_payload.clone() {
+        Some(v) => Some(v),
+        None => fetch(st, ev, ev.prev_payload_ref.as_ref()).await,
     };
-    let before = ev
-        .prev_payload
-        .clone()
-        .or_else(|| ev.prev_payload_ref.as_ref().and_then(&fetch));
-    let after = ev
-        .payload
-        .clone()
-        .or_else(|| ev.payload_ref.as_ref().and_then(&fetch));
+    let after = match ev.payload.clone() {
+        Some(v) => Some(v),
+        None => fetch(st, ev, ev.payload_ref.as_ref()).await,
+    };
     (before, after)
 }
 
@@ -705,12 +725,13 @@ mod tests {
         );
     }
 
-    fn state_with(entity: Option<serde_json::Value>) -> AppState {
+    async fn state_with(entity: Option<serde_json::Value>) -> AppState {
         let st = AppState::new("antares".into());
         if let Some(doc) = entity {
             let id = doc["id"].as_str().expect("id").to_owned();
             st.store
                 .create(&TenantId::default(), Kind::Entity, &id, doc)
+                .await
                 .expect("seed");
         }
         st
@@ -736,18 +757,13 @@ mod tests {
     /// Claim-check resolution: inline wins, a reference is fetched, and a
     /// reference to a row that is gone resolves to None instead of panicking
     /// the matcher task.
-    #[test]
-    fn resolve_payloads_prefers_inline_and_tolerates_a_dangling_reference() {
-        // AppState builds outbound HTTP clients; give it a runtime context.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let _guard = rt.enter();
+    #[tokio::test]
+    async fn resolve_payloads_prefers_inline_and_tolerates_a_dangling_reference() {
         let doc = json!({"id": "urn:ngsi-ld:T:1", "type": "T"});
-        let st = state_with(Some(doc.clone()));
+        let st = state_with(Some(doc.clone())).await;
 
-        let (before, after) = resolve_payloads(&st, &event(Some(json!({"inline": true})), None));
+        let (before, after) =
+            resolve_payloads(&st, &event(Some(json!({"inline": true})), None)).await;
         assert_eq!(after, Some(json!({"inline": true})), "inline payload wins");
         assert_eq!(before, None);
 
@@ -755,7 +771,7 @@ mod tests {
             entity_id: EntityId::new("urn:ngsi-ld:T:1").expect("id"),
             version: 1,
         };
-        let (_, after) = resolve_payloads(&st, &event(None, Some(r.clone())));
+        let (_, after) = resolve_payloads(&st, &event(None, Some(r.clone()))).await;
         assert_eq!(
             after.as_ref().and_then(|a| a["id"].as_str()),
             Some("urn:ngsi-ld:T:1"),
@@ -763,25 +779,20 @@ mod tests {
         );
 
         // The row was deleted between publish and consumption.
-        let gone = state_with(None);
-        let (before, after) = resolve_payloads(&gone, &event(None, Some(r)));
+        let gone = state_with(None).await;
+        let (before, after) = resolve_payloads(&gone, &event(None, Some(r))).await;
         assert_eq!(after, None, "a dangling reference must resolve to None");
         assert_eq!(before, None);
 
-        let (before, after) = resolve_payloads(&st, &event(None, None));
+        let (before, after) = resolve_payloads(&st, &event(None, None)).await;
         assert!(before.is_none() && after.is_none(), "no payload, no fetch");
     }
 
     /// A claim-check fetch is scoped to the EVENT's tenant: a reference must
     /// never resolve against another tenant's row of the same id.
-    #[test]
-    fn resolve_payloads_never_crosses_a_tenant_boundary() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let _guard = rt.enter();
-        let st = state_with(Some(json!({"id": "urn:ngsi-ld:T:1", "type": "T"})));
+    #[tokio::test]
+    async fn resolve_payloads_never_crosses_a_tenant_boundary() {
+        let st = state_with(Some(json!({"id": "urn:ngsi-ld:T:1", "type": "T"}))).await;
         let mut ev = event(
             None,
             Some(PayloadRef {
@@ -790,7 +801,7 @@ mod tests {
             }),
         );
         ev.tenant = TenantId::new("other").expect("tenant");
-        let (_, after) = resolve_payloads(&st, &ev);
+        let (_, after) = resolve_payloads(&st, &ev).await;
         assert_eq!(
             after, None,
             "a reference resolved another tenant's entity: {after:?}"

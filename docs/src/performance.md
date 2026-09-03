@@ -22,7 +22,7 @@ runs in CI; `k6` is the only tool it needs.
 |---|---|---|
 | startup and idle footprint | `startup.sh` | exec to the first `200` from `/q/health`, median of five, `VmRSS` right after, per store |
 | throughput per shape | `shapes.sh` | 100 five-attribute entities; `GET /entities?type=Vehicle&limit=20` at 50 and 200 concurrent clients, `GET /entities/{id}` at 50 (`SPECS` picks other rows, the PostgreSQL dispatch runs 64, 256 and 1 024 clients); five seconds, median of three runs, p99 from the same runs. The `facade` and `facade-twin` shapes run the same pair only when the binary under test serves `/x/example/things` — a shipped build does not |
-| core scaling | `core-scale.sh` | broker pinned to 1, 2, 4, 8 physical cores with `taskset`, load generator on the remaining cores; refuses a step it cannot isolate. `cores used` is the broker's CPU time over the window against the cores it was allotted; `peak threads` is the largest thread count of the process, which is where a blocking-thread ceiling shows (a parked store call is one OS thread; the cap is the connection limit plus 1024) |
+| core scaling | `core-scale.sh` | broker pinned to 1, 2, 4, 8 physical cores with `taskset`, load generator on the remaining cores; refuses a step it cannot isolate. `cores used` is the broker's CPU time over the window against the cores it was allotted; `peak threads` is the largest thread count of the process, which is what a store driver that parks threads instead of awaiting shows up in |
 | saturation knee | `saturate.sh` | open model, +500 rps every 30 s until p99 passes 50 ms or errors pass 0.1 %; the knee is the last stage that held, the curve is a CSV; `cores used` and `peak threads` as in core scaling, over the whole sweep |
 | noise profile | `variance.py` | the same commit measured ten times; the fence for a future regression gate is `Q3 + 3·IQR` of each metric's own history |
 
@@ -88,6 +88,10 @@ Throughput per shape at 64, 256 and 1 024 concurrent clients, whole box:
 | postgres, pool 20 | retrieve | 12 432 req/s, p99 5.9 ms | 12 233 req/s, p99 22.3 ms | 11 766 req/s, p99 90.0 ms |
 | postgres, pool 100 | query | 12 426 req/s, p99 7.8 ms | 11 823 req/s, p99 28.5 ms | 10 292 req/s, p99 104.0 ms |
 | postgres, pool 100 | retrieve | 13 974 req/s, p99 6.0 ms | 14 144 req/s, p99 20.4 ms | 13 696 req/s, p99 75.7 ms |
+
+The run predates ADR-0022: the Postgres driver still parked a thread per
+in-flight store call, which is what the four-figure `peak threads` column
+records. The knees and the per-request cost are what that shape delivered.
 
 What the run says, in the order it matters:
 

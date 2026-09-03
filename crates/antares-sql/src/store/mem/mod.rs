@@ -156,7 +156,7 @@ pub struct Store {
     /// as newest. Entity writes therefore hold this from before the commit
     /// until the emit is done. Only the local single-process path needs it:
     /// across processes the transactional outbox is the ordered channel.
-    emit_order: std::sync::Mutex<()>,
+    emit_order: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -298,7 +298,7 @@ impl Store {
         Ok(Self {
             inner: RwLock::new(inner),
             hook: RwLock::new(None),
-            emit_order: std::sync::Mutex::new(()),
+            emit_order: tokio::sync::Mutex::new(()),
             shadow: Some(Shadow { db }),
             temporal_only: false,
             write_waiters: Default::default(),
@@ -368,20 +368,20 @@ impl Store {
     /// Held from before an entity commit until its emit returns (see
     /// `emit_order`). Not for other kinds: their writes emit nothing, and a
     /// hook that writes them re-enters the store.
-    fn emit_ordered(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.emit_order
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    async fn emit_ordered(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.emit_order.lock().await
     }
 
-    fn emit(&self, tenant: &TenantId, before: Option<Value>, after: Option<Value>) {
-        if let Some(h) = self
+    async fn emit(&self, tenant: &TenantId, before: Option<Value>, after: Option<Value>) {
+        // cloned out of the lock first: a read guard cannot be held across
+        // the await the hook now costs.
+        let hook = self
             .hook
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            h(tenant, before, after);
+            .clone();
+        if let Some(h) = hook {
+            h(tenant, before, after).await;
         }
     }
 
@@ -615,8 +615,11 @@ impl Store {
     }
 
     /// Insert a new resource; `false` if the id already exists.
-    pub fn create(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
-        let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
+    pub async fn create(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
+        let _order = match kind {
+            Kind::Entity => Some(self.emit_ordered().await),
+            _ => None,
+        };
         let created = on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             let expired = self.is_expired(&inner, kind, tenant.as_str(), id);
@@ -632,7 +635,7 @@ impl Store {
             }
         });
         if created && kind == Kind::Entity {
-            self.emit(tenant, None, Some(doc));
+            self.emit(tenant, None, Some(doc)).await;
         }
         created
     }
@@ -640,8 +643,11 @@ impl Store {
     /// Insert or replace; returns `true` if it existed before. An expired
     /// entity did not (4.22), so the upsert reports CREATED and the caller
     /// answers 201 with a Location header instead of a silent 204.
-    pub fn upsert(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
-        let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
+    pub async fn upsert(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
+        let _order = match kind {
+            Kind::Entity => Some(self.emit_ordered().await),
+            _ => None,
+        };
         let (prev, expired) = on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             let expired = self.is_expired(&inner, kind, tenant.as_str(), id);
@@ -655,7 +661,7 @@ impl Store {
         let existed = prev.is_some() && !expired;
         let prev = if expired { None } else { prev };
         if kind == Kind::Entity {
-            self.emit(tenant, prev, Some(doc));
+            self.emit(tenant, prev, Some(doc)).await;
         }
         existed
     }
@@ -675,8 +681,11 @@ impl Store {
     /// the same answer retrieving it gives, not a 204 for something the API
     /// stopped serving. The row itself still goes — the sweep would take it
     /// anyway, and leaving it would resurrect the 409.
-    pub fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> bool {
-        let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
+    pub async fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> bool {
+        let _order = match kind {
+            Kind::Entity => Some(self.emit_ordered().await),
+            _ => None,
+        };
         let removed = on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             // an expired doc is left in place for the sweep to reap: removing
@@ -696,7 +705,7 @@ impl Store {
         let hit = removed.is_some();
         if kind == Kind::Entity {
             if let Some(old) = removed {
-                self.emit(tenant, Some(old), None);
+                self.emit(tenant, Some(old), None).await;
             }
         }
         hit
@@ -706,13 +715,13 @@ impl Store {
     /// read and the removal happen under one hold of the write lock, so
     /// nothing can replace the document between the decision and the delete.
     /// `None` = absent, expired (4.22, as in `delete`) or refused.
-    pub fn delete_if(
+    pub async fn delete_if(
         &self,
         tenant: &TenantId,
         id: &str,
-        keep: &dyn Fn(&Value) -> bool,
+        keep: &(dyn for<'v> Fn(&'v Value) -> bool + Sync),
     ) -> Option<Value> {
-        let _order = self.emit_ordered();
+        let _order = self.emit_ordered().await;
         let removed = on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             if self.is_expired(&inner, Kind::Entity, tenant.as_str(), id) {
@@ -733,7 +742,7 @@ impl Store {
             removed
         });
         if let Some(old) = &removed {
-            self.emit(tenant, Some(old.clone()), None);
+            self.emit(tenant, Some(old.clone()), None).await;
         }
         removed
     }
@@ -820,14 +829,17 @@ impl Store {
 
     /// Read-modify-write on one document. Returns `None` when absent; the
     /// closure's error aborts without writing.
-    pub fn mutate<T, E>(
+    pub async fn mutate<T, E>(
         &self,
         tenant: &TenantId,
         kind: Kind,
         id: &str,
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Option<Result<T, E>> {
-        let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
+        let _order = match kind {
+            Kind::Entity => Some(self.emit_ordered().await),
+            _ => None,
+        };
         let (result, change) = on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             if self.is_expired(&inner, kind, tenant.as_str(), id) {
@@ -856,7 +868,7 @@ impl Store {
             })
         })?;
         if let Some((b, a)) = change {
-            self.emit(tenant, Some(b), Some(a));
+            self.emit(tenant, Some(b), Some(a)).await;
         }
         Some(result)
     }
@@ -965,35 +977,46 @@ mod tests {
     /// unwinds through that writer, and every later writer finds the store
     /// usable — locks recover from the poisoning instead of turning one bad
     /// hook into a dead store.
-    #[test]
-    fn a_panicking_hook_leaves_the_store_usable() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panicking_hook_leaves_the_store_usable() {
         use std::sync::Arc;
         let s = Arc::new(Store::default());
-        s.set_change_hook(Box::new(|_t, _b, after| {
-            if after.as_ref().and_then(|a| a.get("boom")).is_some() {
-                panic!("hook panic");
-            }
-        }));
+        s.set_change_hook(Arc::new(
+            |_t: &TenantId,
+             _b: Option<Value>,
+             after: Option<Value>|
+             -> antares_store::HookFuture<'_> {
+                Box::pin(async move {
+                    if after.as_ref().and_then(|a| a.get("boom")).is_some() {
+                        panic!("hook panic");
+                    }
+                })
+            },
+        ));
         let t = TenantId::new("hook-panic").expect("tenant");
         let s2 = s.clone();
         let t2 = t.clone();
-        let poisoned = std::thread::spawn(move || {
+        let poisoned = tokio::spawn(async move {
             s2.upsert(
                 &t2,
                 Kind::Entity,
                 "urn:x:boom",
                 json!({"id": "urn:x:boom", "type": ["T"], "boom": true}),
-            );
+            )
+            .await;
         })
-        .join();
+        .await;
         assert!(poisoned.is_err(), "the hook's panic reaches its own caller");
         // the NEXT writer and reader are untouched
-        assert!(s.create(
-            &t,
-            Kind::Entity,
-            "urn:x:after",
-            json!({"id": "urn:x:after", "type": ["T"]})
-        ));
+        assert!(
+            s.create(
+                &t,
+                Kind::Entity,
+                "urn:x:after",
+                json!({"id": "urn:x:after", "type": ["T"]})
+            )
+            .await
+        );
         assert!(
             s.get(&t, Kind::Entity, "urn:x:after").is_some(),
             "one panicking hook must not take the store down"
@@ -1009,8 +1032,8 @@ mod tests {
     /// writer has had every chance to overtake it — if the second commit may
     /// emit before the first commit's emit, the notification pipeline sees
     /// the versions reversed and records stale state as newest.
-    #[test]
-    fn change_hook_fires_in_commit_order_per_entity() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn change_hook_fires_in_commit_order_per_entity() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
         let s = Arc::new(Store::default());
@@ -1019,44 +1042,53 @@ mod tests {
         let released = Arc::new(AtomicBool::new(false));
         {
             let (seen, entered, released) = (seen.clone(), entered.clone(), released.clone());
-            s.set_change_hook(Box::new(move |_t, _b, after| {
-                let v = after
-                    .as_ref()
-                    .and_then(|a| a.get("v"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(-1);
-                if v == 1 {
-                    entered.store(true, Ordering::SeqCst);
-                    while !released.load(Ordering::SeqCst) {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                }
-                seen.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(v);
-            }));
+            s.set_change_hook(Arc::new(
+                move |_t: &TenantId,
+                      _b: Option<Value>,
+                      after: Option<Value>|
+                      -> antares_store::HookFuture<'_> {
+                    let (seen, entered, released) =
+                        (seen.clone(), entered.clone(), released.clone());
+                    Box::pin(async move {
+                        let v = after
+                            .as_ref()
+                            .and_then(|a| a.get("v"))
+                            .and_then(Value::as_i64)
+                            .unwrap_or(-1);
+                        if v == 1 {
+                            entered.store(true, Ordering::SeqCst);
+                            while !released.load(Ordering::SeqCst) {
+                                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                            }
+                        }
+                        seen.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(v);
+                    })
+                },
+            ));
         }
         let t = TenantId::new("emit-order").expect("tenant");
         let doc = |v: i64| json!({"id": "urn:x:1", "type": ["T"], "v": v});
         let s1 = s.clone();
         let t1c = t.clone();
-        let w1 = std::thread::spawn(move || {
-            s1.upsert(&t1c, Kind::Entity, "urn:x:1", doc(1));
+        let w1 = tokio::spawn(async move {
+            s1.upsert(&t1c, Kind::Entity, "urn:x:1", doc(1)).await;
         });
         while !entered.load(std::sync::atomic::Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         // writer 1 has committed and sits inside its hook. Writer 2 now has
         // every chance to commit AND emit before writer 1's emit finishes.
         let s2 = s.clone();
         let t2c = t.clone();
-        let w2 = std::thread::spawn(move || {
-            s2.upsert(&t2c, Kind::Entity, "urn:x:1", doc(2));
+        let w2 = tokio::spawn(async move {
+            s2.upsert(&t2c, Kind::Entity, "urn:x:1", doc(2)).await;
         });
-        std::thread::sleep(std::time::Duration::from_millis(60));
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
         released.store(true, std::sync::atomic::Ordering::SeqCst);
-        w1.join().expect("writer 1");
-        w2.join().expect("writer 2");
+        w1.await.expect("writer 1");
+        w2.await.expect("writer 2");
         assert_eq!(
             *seen
                 .lock()
@@ -1066,13 +1098,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn commit_queue_counts_writers() {
+    #[tokio::test]
+    async fn commit_queue_counts_writers() {
         // Every write passes through the counted critical section.
         let s = Store::default();
         assert_eq!(s.commit_queue(), (0, 0));
         let t = TenantId::new("t").unwrap();
-        s.create(&t, Kind::Entity, "urn:a", json!({"id": "urn:a"}));
+        s.create(&t, Kind::Entity, "urn:a", json!({"id": "urn:a"}))
+            .await;
         let (depth, peak) = s.commit_queue();
         assert_eq!(depth, 0, "no writer in flight after the call returns");
         assert!(peak >= 1, "the write itself must register in the peak");
@@ -1107,16 +1140,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tenant_isolation() {
+    #[tokio::test]
+    async fn tenant_isolation() {
         let s = Store::default();
         let t1 = TenantId::new("t1").unwrap();
         let t2 = TenantId::new("t2").unwrap();
-        assert!(s.create(&t1, Kind::Entity, "urn:a", json!({"id": "urn:a"})));
+        assert!(
+            s.create(&t1, Kind::Entity, "urn:a", json!({"id": "urn:a"}))
+                .await
+        );
         assert!(s.get(&t2, Kind::Entity, "urn:a").is_none());
         assert!(s.get(&t1, Kind::Entity, "urn:a").is_some());
-        assert!(!s.create(&t1, Kind::Entity, "urn:a", json!({})));
-        assert!(s.create(&t2, Kind::Entity, "urn:a", json!({})));
+        assert!(!s.create(&t1, Kind::Entity, "urn:a", json!({})).await);
+        assert!(s.create(&t2, Kind::Entity, "urn:a", json!({})).await);
     }
 
     /// 4.6.3 allows a comma as the seconds-fraction separator. Byte order
@@ -1124,8 +1160,8 @@ mod tests {
     /// has NOT expired reads as expired against the point-form `now` this
     /// store stamps — the write path would drop a live instance, and the
     /// postgres path (which parses through `try_timestamptz`) would keep it.
-    #[test]
-    fn a_comma_fraction_instance_is_not_pruned_before_it_expires() {
+    #[tokio::test]
+    async fn a_comma_fraction_instance_is_not_pruned_before_it_expires() {
         let now = "2026-09-01T12:00:00.000Z";
         let mut live = json!({
             "id": "urn:x", "type": ["T"],
@@ -1149,18 +1185,24 @@ mod tests {
         // the entity-level sweep reads the same stamp the same way
         let s = Store::default();
         let t = TenantId::new("t").expect("tenant");
-        assert!(s.create(
-            &t,
-            Kind::Entity,
-            "urn:live",
-            json!({"id": "urn:live", "type": ["T"], "expiresAt": "2026-09-01T12:00:00,500Z"})
-        ));
-        assert!(s.create(
-            &t,
-            Kind::Entity,
-            "urn:gone",
-            json!({"id": "urn:gone", "type": ["T"], "expiresAt": "2026-09-01T11:59:59,500Z"})
-        ));
+        assert!(
+            s.create(
+                &t,
+                Kind::Entity,
+                "urn:live",
+                json!({"id": "urn:live", "type": ["T"], "expiresAt": "2026-09-01T12:00:00,500Z"})
+            )
+            .await
+        );
+        assert!(
+            s.create(
+                &t,
+                Kind::Entity,
+                "urn:gone",
+                json!({"id": "urn:gone", "type": ["T"], "expiresAt": "2026-09-01T11:59:59,500Z"})
+            )
+            .await
+        );
         assert_eq!(s.sweep_expired(now), 1, "only the expired one is reaped");
         assert!(s.get(&t, Kind::Entity, "urn:live").is_some());
         assert!(s.get(&t, Kind::Entity, "urn:gone").is_none());
@@ -1169,14 +1211,17 @@ mod tests {
     /// The same assertion over EVERY kind and the whole read/write surface,
     /// with the SAME id on both sides — the shape a tenant-blind map gets
     /// wrong, because it answers the neighbour's document instead of `None`.
-    #[test]
-    fn no_kind_leaks_across_tenants() {
+    #[tokio::test]
+    async fn no_kind_leaks_across_tenants() {
         let s = Store::default();
         let a = TenantId::new("t-a").expect("tenant");
         let b = TenantId::new("t-b").expect("tenant");
         let id = "urn:ngsi-ld:shared:1";
         for kind in ALL_KINDS {
-            assert!(s.create(&a, kind, id, json!({"id": id, "owner": "a"})));
+            assert!(
+                s.create(&a, kind, id, json!({"id": id, "owner": "a"}))
+                    .await
+            );
 
             assert!(s.get(&b, kind, id).is_none(), "{kind:?}: get");
             assert!(s.list(&b, kind).is_empty(), "{kind:?}: list");
@@ -1191,30 +1236,34 @@ mod tests {
             );
 
             // no write reaches the neighbour's document either
-            assert!(!s.delete(&b, kind, id), "{kind:?}: delete");
+            assert!(!s.delete(&b, kind, id).await, "{kind:?}: delete");
             assert!(
                 s.mutate::<(), ()>(&b, kind, id, |d| {
                     d["owner"] = json!("b");
                     Ok(())
                 })
+                .await
                 .is_none(),
                 "{kind:?}: mutate"
             );
 
             // the same id under another tenant is a create, not a conflict
-            assert!(s.create(&b, kind, id, json!({"id": id, "owner": "b"})));
+            assert!(
+                s.create(&b, kind, id, json!({"id": id, "owner": "b"}))
+                    .await
+            );
             assert_eq!(s.get(&a, kind, id).expect("a keeps its own")["owner"], "a");
             assert_eq!(s.get(&b, kind, id).expect("b has its own")["owner"], "b");
 
             // and b deleting its own leaves a's untouched
-            assert!(s.delete(&b, kind, id), "{kind:?}: delete own");
+            assert!(s.delete(&b, kind, id).await, "{kind:?}: delete own");
             assert!(s.get(&b, kind, id).is_none(), "{kind:?}: deleted");
             assert_eq!(
                 s.get(&a, kind, id)
                     .expect("survives the neighbour's delete")["owner"],
                 "a"
             );
-            assert!(s.delete(&a, kind, id), "{kind:?}: cleanup");
+            assert!(s.delete(&a, kind, id).await, "{kind:?}: cleanup");
         }
     }
 
@@ -1301,14 +1350,17 @@ mod tests {
     }
 
     /// Every kind + contexts round-trip through a close/reopen.
-    #[test]
-    fn file_mode_survives_reopen() {
+    #[tokio::test]
+    async fn file_mode_survives_reopen() {
         let dir = tempdir("reopen");
         let t = TenantId::new("tenant_a-1").expect("tenant");
         {
             let s = Store::open_file(&dir).expect("open");
             for kind in ALL_KINDS {
-                assert!(s.create(&t, kind, "urn:x:1", json!({"kind": format!("{kind:?}")})));
+                assert!(
+                    s.create(&t, kind, "urn:x:1", json!({"kind": format!("{kind:?}")}))
+                        .await
+                );
             }
             // a row the writers actually produce: the kind is what decides
             // whose it is (ADR-0021), and a Cached copy belongs to no Tenant
@@ -1335,19 +1387,23 @@ mod tests {
     }
 
     /// Deletes and mutations reach redb — no phantom state after restart.
-    #[test]
-    fn file_mode_deletes_and_updates_persist() {
+    #[tokio::test]
+    async fn file_mode_deletes_and_updates_persist() {
         let dir = tempdir("delete");
         let t = TenantId::default();
         {
             let s = Store::open_file(&dir).expect("open");
-            s.create(&t, Kind::Entity, "urn:gone", json!({"n": 1}));
-            s.create(&t, Kind::Entity, "urn:kept", json!({"n": 1}));
-            assert!(s.delete(&t, Kind::Entity, "urn:gone"));
-            let r: Option<Result<(), ()>> = s.mutate(&t, Kind::Entity, "urn:kept", |d| {
-                d["n"] = json!(2);
-                Ok(())
-            });
+            s.create(&t, Kind::Entity, "urn:gone", json!({"n": 1}))
+                .await;
+            s.create(&t, Kind::Entity, "urn:kept", json!({"n": 1}))
+                .await;
+            assert!(s.delete(&t, Kind::Entity, "urn:gone").await);
+            let r: Option<Result<(), ()>> = s
+                .mutate(&t, Kind::Entity, "urn:kept", |d| {
+                    d["n"] = json!(2);
+                    Ok(())
+                })
+                .await;
             assert!(matches!(r, Some(Ok(()))));
             s.context_put(None, "ctx", json!({"localId": "ctx", "kind": "Cached"}))
                 .expect("store");
@@ -1433,26 +1489,28 @@ mod tests {
     /// write paths must agree with the read boundary the instant the stamp
     /// passes. Before this, the same id was simultaneously a 404 on retrieve,
     /// a 409 on create and a 204 on delete for a whole sweep interval.
-    #[test]
-    fn an_expired_entity_is_absent_to_writes_too() {
+    #[tokio::test]
+    async fn an_expired_entity_is_absent_to_writes_too() {
         let s = Store::default();
         let t = TenantId::default();
         let dead = json!({"id": "urn:e", "type": ["T"], "expiresAt": "2000-01-01T00:00:00Z"});
         let live = json!({"id": "urn:l", "type": ["T"], "expiresAt": "2999-01-01T00:00:00Z"});
-        assert!(s.create(&t, Kind::Entity, "urn:e", dead.clone()));
-        assert!(s.create(&t, Kind::Entity, "urn:l", live.clone()));
+        assert!(s.create(&t, Kind::Entity, "urn:e", dead.clone()).await);
+        assert!(s.create(&t, Kind::Entity, "urn:l", live.clone()).await);
 
         // patching or deleting something already invalid is a 404, not a 204
         assert!(s
             .mutate(&t, Kind::Entity, "urn:e", |_d| Ok::<(), ()>(()))
+            .await
             .is_none());
         assert!(
-            !s.delete(&t, Kind::Entity, "urn:e"),
+            !s.delete(&t, Kind::Entity, "urn:e").await,
             "expired delete is 404"
         );
         // …and creating over it succeeds instead of raising AlreadyExists
         assert!(
-            s.create(&t, Kind::Entity, "urn:e", json!({"id": "urn:e", "n": 1})),
+            s.create(&t, Kind::Entity, "urn:e", json!({"id": "urn:e", "n": 1}))
+                .await,
             "an expired id must not 409 a create"
         );
         assert_eq!(
@@ -1462,31 +1520,40 @@ mod tests {
         );
 
         // an UNEXPIRED entity keeps every one of those answers
-        assert!(!s.create(&t, Kind::Entity, "urn:l", live.clone()), "409");
+        assert!(
+            !s.create(&t, Kind::Entity, "urn:l", live.clone()).await,
+            "409"
+        );
         assert!(s
             .mutate(&t, Kind::Entity, "urn:l", |_d| Ok::<(), ()>(()))
+            .await
             .is_some());
-        assert!(s.delete(&t, Kind::Entity, "urn:l"));
+        assert!(s.delete(&t, Kind::Entity, "urn:l").await);
 
         // upsert over an expired id reports CREATED (201 + Location), not
         // updated
-        s.create(&t, Kind::Entity, "urn:x", dead.clone());
+        s.create(&t, Kind::Entity, "urn:x", dead.clone()).await;
         assert!(
-            !s.upsert(&t, Kind::Entity, "urn:x", json!({"id": "urn:x"})),
+            !s.upsert(&t, Kind::Entity, "urn:x", json!({"id": "urn:x"}))
+                .await,
             "an expired id must upsert as created"
         );
         assert!(
-            s.upsert(&t, Kind::Entity, "urn:x", json!({"id": "urn:x", "n": 2})),
+            s.upsert(&t, Kind::Entity, "urn:x", json!({"id": "urn:x", "n": 2}))
+                .await,
             "and the live one that replaced it as updated"
         );
 
         // 4.22 is an ENTITY stamp: other kinds keep their own expiry rules
-        assert!(s.create(&t, Kind::Subscription, "urn:s", dead.clone()));
         assert!(
-            !s.create(&t, Kind::Subscription, "urn:s", dead),
+            s.create(&t, Kind::Subscription, "urn:s", dead.clone())
+                .await
+        );
+        assert!(
+            !s.create(&t, Kind::Subscription, "urn:s", dead).await,
             "a subscription id still 409s"
         );
-        assert!(s.delete(&t, Kind::Subscription, "urn:s"));
+        assert!(s.delete(&t, Kind::Subscription, "urn:s").await);
     }
 
     /// The change hook drives every notification and all temporal
@@ -1496,41 +1563,58 @@ mod tests {
     /// subscription leaking into the hook would be mirrored into temporal
     /// storage; a no-op emitting would re-notify every subscriber on every
     /// idempotent PATCH.
-    #[test]
-    fn the_change_hook_fires_for_entity_changes_only() {
+    #[tokio::test]
+    async fn the_change_hook_fires_for_entity_changes_only() {
         use std::sync::{Arc, Mutex};
         type Images = (Option<Value>, Option<Value>);
         let seen: Arc<Mutex<Vec<Images>>> = Arc::default();
         let s = Store::default();
         let t = TenantId::default();
         let rec = Arc::clone(&seen);
-        s.set_change_hook(Box::new(move |_t, before, after| {
-            rec.lock().expect("record").push((before, after));
-        }));
+        s.set_change_hook(Arc::new(
+            move |_t: &TenantId,
+                  before: Option<Value>,
+                  after: Option<Value>|
+                  -> antares_store::HookFuture<'_> {
+                let rec = Arc::clone(&rec);
+                Box::pin(async move {
+                    rec.lock().expect("record").push((before, after));
+                })
+            },
+        ));
 
-        s.create(&t, Kind::Entity, "urn:e", json!({"id": "urn:e", "n": 1}));
+        s.create(&t, Kind::Entity, "urn:e", json!({"id": "urn:e", "n": 1}))
+            .await;
         // a write on another kind must not reach the hook at all
-        s.create(&t, Kind::Subscription, "urn:s", json!({"id": "urn:s"}));
+        s.create(&t, Kind::Subscription, "urn:s", json!({"id": "urn:s"}))
+            .await;
         s.upsert(
             &t,
             Kind::Subscription,
             "urn:s",
             json!({"id": "urn:s", "n": 9}),
-        );
-        s.delete(&t, Kind::Subscription, "urn:s");
+        )
+        .await;
+        s.delete(&t, Kind::Subscription, "urn:s").await;
         // a mutate that changes nothing is not a change
-        let _ = s.mutate(&t, Kind::Entity, "urn:e", |_d| Ok::<(), ()>(()));
+        let _ = s
+            .mutate(&t, Kind::Entity, "urn:e", |_d| Ok::<(), ()>(()))
+            .await;
         // a real one is
-        let _ = s.mutate(&t, Kind::Entity, "urn:e", |d| {
-            d["n"] = json!(2);
-            Ok::<(), ()>(())
-        });
+        let _ = s
+            .mutate(&t, Kind::Entity, "urn:e", |d| {
+                d["n"] = json!(2);
+                Ok::<(), ()>(())
+            })
+            .await;
         // an aborted mutate writes nothing and emits nothing
-        let _ = s.mutate(&t, Kind::Entity, "urn:e", |d| {
-            d["n"] = json!(3);
-            Err::<(), &str>("no")
-        });
-        s.delete(&t, Kind::Entity, "urn:e");
+        let _ = s
+            .mutate(&t, Kind::Entity, "urn:e", |d| {
+                d["n"] = json!(3);
+                Err::<(), &str>("no")
+            })
+            .await;
+        s.delete(&t, Kind::Entity, "urn:e").await;
 
         let seen = seen.lock().expect("read");
         assert_eq!(seen.len(), 3, "emitted: {seen:?}");
@@ -1544,14 +1628,14 @@ mod tests {
 
     /// The supported backup route is stop-copy — close the broker, copy
     /// the file, reopen the copy. This test IS that route.
-    #[test]
-    fn file_mode_stop_copy_backup_restores() {
+    #[tokio::test]
+    async fn file_mode_stop_copy_backup_restores() {
         let dir = tempdir("backup");
         let restore = tempdir("restore");
         let t = TenantId::default();
         {
             let s = Store::open_file(&dir).expect("open");
-            s.create(&t, Kind::Entity, "urn:b", json!({"v": 42}));
+            s.create(&t, Kind::Entity, "urn:b", json!({"v": 42})).await;
         } // broker stopped — file quiescent
         std::fs::copy(dir.join("antares.redb"), restore.join("antares.redb")).expect("copy");
         let s = Store::open_file(&restore).expect("open backup");
@@ -1625,8 +1709,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn sweep_prunes_expired_attribute_instances() {
+    #[tokio::test]
+    async fn sweep_prunes_expired_attribute_instances() {
         let s = Store::default();
         let t = TenantId::default();
         s.create(
@@ -1639,7 +1723,8 @@ mod tests {
                     {"type": "Property", "value": 2, "expiresAt": "2999-01-01T00:00:00Z"}],
                 "gone": [
                     {"type": "Property", "value": 3, "expiresAt": "2000-01-01T00:00:00Z"}]}),
-        );
+        )
+        .await;
         s.create(
             &t,
             Kind::Temporal,
@@ -1649,7 +1734,8 @@ mod tests {
                     {"value": 1, "expiresAt": "2000-01-01T00:00:00Z"},
                     {"value": 2, "expiresAt": "2999-01-01T00:00:00Z"},
                     {"value": 3}]}),
-        );
+        )
+        .await;
         assert_eq!(s.sweep_expired("2026-01-01T00:00:00Z"), 2);
         let e = s.get(&t, Kind::Entity, "urn:e").expect("entity survives");
         assert_eq!(e["attr"].as_array().expect("attr").len(), 1);
@@ -1799,23 +1885,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mutate_aborts_on_error() {
+    #[tokio::test]
+    async fn mutate_aborts_on_error() {
         let s = Store::default();
         let t = TenantId::default();
-        s.create(&t, Kind::Entity, "urn:a", json!({"n": 1}));
-        let r: Option<Result<(), &str>> = s.mutate(&t, Kind::Entity, "urn:a", |d| {
-            d["n"] = json!(2);
-            Err("nope")
-        });
+        s.create(&t, Kind::Entity, "urn:a", json!({"n": 1})).await;
+        let r: Option<Result<(), &str>> = s
+            .mutate(&t, Kind::Entity, "urn:a", |d| {
+                d["n"] = json!(2);
+                Err("nope")
+            })
+            .await;
         assert!(matches!(r, Some(Err("nope"))));
         assert_eq!(s.get(&t, Kind::Entity, "urn:a").unwrap()["n"], 1);
     }
 
     /// A purged tenant is gone from every kind, the neighbour tenant is
     /// untouched, and in `file` mode the removal survives a reopen.
-    #[test]
-    fn purge_tenant_empties_every_kind_and_survives_reopen() {
+    #[tokio::test]
+    async fn purge_tenant_empties_every_kind_and_survives_reopen() {
         let dir = tempdir("purge");
         let a = TenantId::new("purge_a").expect("tenant");
         let b = TenantId::new("purge_b").expect("tenant");
@@ -1823,7 +1911,7 @@ mod tests {
             let s = Store::open_file(&dir).expect("open");
             for t in [&a, &b] {
                 for kind in ALL_KINDS {
-                    assert!(s.create(t, kind, "urn:x:1", json!({"id": "urn:x:1"})));
+                    assert!(s.create(t, kind, "urn:x:1", json!({"id": "urn:x:1"})).await);
                 }
             }
             assert!(s.tenant_ids().iter().any(|t| t == "purge_a"), "listed");

@@ -53,7 +53,7 @@ async fn count(
     headers: HeaderMap,
 ) -> Result<axum::Json<Value>, ApiError> {
     let tenant = tenant_from(&headers)?;
-    let rows = st.store.list(&tenant, antares_store::Kind::Entity)?;
+    let rows = st.store.list(&tenant, antares_store::Kind::Entity).await?;
     Ok(axum::Json(
         json!({"tenant": tenant.as_str(), "entities": rows.len()}),
     ))

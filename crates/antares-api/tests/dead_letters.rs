@@ -91,17 +91,18 @@ fn letter(id: &str, sub: &str, uri: &str, last_at: &str) -> Value {
     })
 }
 
-fn seed(st: &AppState, tenant: &str, id: &str, sub: &str, uri: &str, last_at: &str) {
+async fn seed(st: &AppState, tenant: &str, id: &str, sub: &str, uri: &str, last_at: &str) {
     let t = TenantId::new(tenant).expect("tenant");
     assert!(st
         .store
         .create(&t, Kind::DeadLetter, id, letter(id, sub, uri, last_at))
+        .await
         .expect("seed"));
 }
 
-fn stored(st: &AppState, tenant: &str, id: &str) -> Option<Value> {
+async fn stored(st: &AppState, tenant: &str, id: &str) -> Option<Value> {
     let t = TenantId::new(tenant).expect("tenant");
-    st.store.get(&t, Kind::DeadLetter, id).expect("get")
+    st.store.get(&t, Kind::DeadLetter, id).await.expect("get")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -114,7 +115,8 @@ async fn list_is_per_tenant_newest_first_filtered_and_bounded() {
         "urn:s:1",
         "http://127.0.0.1:9/n",
         "2026-01-01T00:00:01Z",
-    );
+    )
+    .await;
     seed(
         &st,
         "acme",
@@ -122,7 +124,8 @@ async fn list_is_per_tenant_newest_first_filtered_and_bounded() {
         "urn:s:2",
         "http://127.0.0.1:9/n",
         "2026-01-01T00:00:03Z",
-    );
+    )
+    .await;
     seed(
         &st,
         "acme",
@@ -130,7 +133,8 @@ async fn list_is_per_tenant_newest_first_filtered_and_bounded() {
         "urn:s:1",
         "http://127.0.0.1:9/n",
         "2026-01-01T00:00:02Z",
-    );
+    )
+    .await;
     seed(
         &st,
         "other",
@@ -138,7 +142,8 @@ async fn list_is_per_tenant_newest_first_filtered_and_bounded() {
         "urn:s:1",
         "http://127.0.0.1:9/n",
         "2026-01-01T00:00:09Z",
-    );
+    )
+    .await;
 
     let (s, b) = send(&st, "GET", "/q/dead-letters?tenant=acme").await;
     assert_eq!(s, StatusCode::OK, "{b}");
@@ -214,7 +219,8 @@ async fn the_endpoint_userinfo_is_redacted_in_the_listing_only() {
         "urn:s:1",
         "http://bob:s3cret@127.0.0.1:9/n",
         "2026-01-01T00:00:01Z",
-    );
+    )
+    .await;
     let (_, b) = send(&st, "GET", "/q/dead-letters?tenant=acme").await;
     assert!(!b.to_string().contains("s3cret"), "{b}");
     assert!(
@@ -225,7 +231,9 @@ async fn the_endpoint_userinfo_is_redacted_in_the_listing_only() {
     );
     // the stored letter keeps the URI a replay needs
     assert_eq!(
-        stored(&st, "acme", "urn:ngsi-ld:DeadLetter:1").expect("kept")["uri"],
+        stored(&st, "acme", "urn:ngsi-ld:DeadLetter:1")
+            .await
+            .expect("kept")["uri"],
         "http://bob:s3cret@127.0.0.1:9/n"
     );
 }
@@ -241,7 +249,8 @@ async fn replay_delivers_the_same_request_and_deletes_the_letter() {
         "urn:s:1",
         &uri,
         "2026-01-01T00:00:01Z",
-    );
+    )
+    .await;
     let (s, b) = send(
         &st,
         "POST",
@@ -262,7 +271,9 @@ async fn replay_delivers_the_same_request_and_deletes_the_letter() {
     assert_eq!(body["type"], "Notification");
     assert_eq!(body["data"][0]["id"], "urn:ngsi-ld:Room:1");
     assert!(
-        stored(&st, "acme", "urn:ngsi-ld:DeadLetter:1").is_none(),
+        stored(&st, "acme", "urn:ngsi-ld:DeadLetter:1")
+            .await
+            .is_none(),
         "delivered letter is gone"
     );
     let (s, _) = send(
@@ -285,7 +296,8 @@ async fn a_failed_replay_keeps_the_letter_and_extends_its_history() {
         "urn:s:1",
         &uri,
         "2026-01-01T00:00:01Z",
-    );
+    )
+    .await;
     let (s, b) = send(
         &st,
         "POST",
@@ -299,7 +311,9 @@ async fn a_failed_replay_keeps_the_letter_and_extends_its_history() {
         1,
         "replay is ONE attempt, never a retry loop"
     );
-    let l = stored(&st, "acme", "urn:ngsi-ld:DeadLetter:1").expect("kept");
+    let l = stored(&st, "acme", "urn:ngsi-ld:DeadLetter:1")
+        .await
+        .expect("kept");
     assert_eq!(l["attempts"], 3);
     assert_eq!(l["lastError"], "HTTP 503");
     assert_ne!(l["lastAt"], "2026-01-01T00:00:01Z", "lastAt moved");
@@ -317,7 +331,8 @@ async fn a_replay_from_another_tenant_cannot_reach_the_letter() {
         "urn:s:1",
         &uri,
         "2026-01-01T00:00:01Z",
-    );
+    )
+    .await;
     for path in [
         "/q/dead-letters/urn:ngsi-ld:DeadLetter:1/replay?tenant=other",
         "/q/dead-letters/urn:ngsi-ld:DeadLetter:1/replay",
@@ -337,7 +352,9 @@ async fn a_replay_from_another_tenant_cannot_reach_the_letter() {
         "nothing was sent on behalf of the wrong tenant"
     );
     assert!(
-        stored(&st, "acme", "urn:ngsi-ld:DeadLetter:1").is_some(),
+        stored(&st, "acme", "urn:ngsi-ld:DeadLetter:1")
+            .await
+            .is_some(),
         "letter untouched"
     );
 }
@@ -352,7 +369,8 @@ async fn delete_removes_one_letter_once() {
         "urn:s:1",
         "http://127.0.0.1:9/n",
         "2026-01-01T00:00:01Z",
-    );
+    )
+    .await;
     seed(
         &st,
         "acme",
@@ -360,7 +378,8 @@ async fn delete_removes_one_letter_once() {
         "urn:s:1",
         "http://127.0.0.1:9/n",
         "2026-01-01T00:00:02Z",
-    );
+    )
+    .await;
     let (s, _) = send(
         &st,
         "DELETE",
@@ -376,7 +395,9 @@ async fn delete_removes_one_letter_once() {
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert!(
-        stored(&st, "acme", "urn:ngsi-ld:DeadLetter:2").is_some(),
+        stored(&st, "acme", "urn:ngsi-ld:DeadLetter:2")
+            .await
+            .is_some(),
         "the sibling stays"
     );
 }
@@ -398,6 +419,7 @@ async fn an_unknown_binding_or_unreadable_letter_is_a_502_not_a_send() {
     l["binding"] = json!("smtp");
     st.store
         .create(&t, Kind::DeadLetter, "urn:ngsi-ld:DeadLetter:1", l)
+        .await
         .expect("seed");
     let mut l = letter(
         "urn:ngsi-ld:DeadLetter:2",
@@ -408,6 +430,7 @@ async fn an_unknown_binding_or_unreadable_letter_is_a_502_not_a_send() {
     l["headers"] = json!("not a list");
     st.store
         .create(&t, Kind::DeadLetter, "urn:ngsi-ld:DeadLetter:2", l)
+        .await
         .expect("seed");
     for id in ["urn:ngsi-ld:DeadLetter:1", "urn:ngsi-ld:DeadLetter:2"] {
         let (s, b) = send(
@@ -417,7 +440,7 @@ async fn an_unknown_binding_or_unreadable_letter_is_a_502_not_a_send() {
         )
         .await;
         assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
-        assert!(stored(&st, "acme", id).is_some());
+        assert!(stored(&st, "acme", id).await.is_some());
     }
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 }
@@ -440,7 +463,8 @@ async fn replay_respects_the_egress_policy_of_the_moment() {
         "urn:s:1",
         &uri,
         "2026-01-01T00:00:01Z",
-    );
+    )
+    .await;
     let (s, b) = send(
         &st,
         "POST",
@@ -494,7 +518,11 @@ async fn the_listing_blanks_every_credential_a_letter_carries() {
         ["Content-Type", "application/json"],
         ["Authorization", "Bearer legacy-token"]
     ]);
-    assert!(st.store.create(&t, Kind::DeadLetter, id, l).expect("seed"));
+    assert!(st
+        .store
+        .create(&t, Kind::DeadLetter, id, l)
+        .await
+        .expect("seed"));
 
     let (_, b) = send(&st, "GET", "/q/dead-letters?tenant=acme").await;
     let shown = b.to_string();
@@ -506,7 +534,7 @@ async fn the_listing_blanks_every_credential_a_letter_carries() {
         assert!(shown.contains(key), "{key} lost: {shown}");
     }
     // the stored letter keeps what a replay has to send
-    let kept = stored(&st, "acme", id).expect("kept");
+    let kept = stored(&st, "acme", id).await.expect("kept");
     assert_eq!(kept["receiverInfo"][0][1], "Bearer s3cret-token");
     assert_eq!(kept["notifierInfo"][1][1], "hunter2");
     assert_eq!(kept["headers"][1][1], "Bearer legacy-token");
@@ -531,6 +559,7 @@ async fn a_stored_letter_of_the_wrong_shape_does_not_take_the_listing_down() {
         assert!(st
             .store
             .create(&t, Kind::DeadLetter, id, doc)
+            .await
             .expect("seed"));
     }
     seed(
@@ -540,7 +569,8 @@ async fn a_stored_letter_of_the_wrong_shape_does_not_take_the_listing_down() {
         "urn:s:1",
         "http://user:secret@127.0.0.1:9/n",
         "2026-01-01T00:00:01Z",
-    );
+    )
+    .await;
 
     let (s, b) = send(&st, "GET", "/q/dead-letters?tenant=acme").await;
     assert_eq!(s, StatusCode::OK, "{b}");

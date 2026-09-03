@@ -90,9 +90,10 @@ async fn query(st: &AppState, q: &str) {
 
 /// A broker whose registration reads go through the mirror, hydrated from
 /// the store the way `bus=nats` wiring hydrates it.
-fn with_mirror(st: &AppState) -> AppState {
+async fn with_mirror(st: &AppState) -> AppState {
     let m = Arc::new(antares_api::mirror::DocMirror::default());
     antares_api::notify::seed_mirror(&*st.store, m.as_ref(), antares_store::Kind::Registration)
+        .await
         .expect("hydrate");
     let mut out = st.clone();
     out.reg_mirror = Some(m);
@@ -147,7 +148,7 @@ async fn the_mirror_and_the_store_reach_the_same_sources() {
                 mocks.push((*name, m));
             }
             let st = if through_mirror {
-                with_mirror(&base)
+                with_mirror(&base).await
             } else {
                 base
             };
@@ -191,7 +192,7 @@ async fn an_id_list_beside_an_id_pattern_never_hides_a_source() {
         )
         .await;
         let st = if through_mirror {
-            with_mirror(&base)
+            with_mirror(&base).await
         } else {
             base
         };
@@ -224,7 +225,7 @@ async fn an_unrelated_type_is_never_contacted() {
         )
         .await;
         let st = if through_mirror {
-            with_mirror(&base)
+            with_mirror(&base).await
         } else {
             base
         };
@@ -252,7 +253,7 @@ async fn a_term_in_the_query_meets_the_iri_in_the_registration() {
         json!([{"entities": [{"type": VEHICLE}]}]),
     )
     .await;
-    let st = with_mirror(&base);
+    let st = with_mirror(&base).await;
     query(&st, "type=Vehicle").await;
     assert!(
         *m.hits.lock().expect("lock") > 0,

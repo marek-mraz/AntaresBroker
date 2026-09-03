@@ -55,7 +55,7 @@ async fn counting_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicU
 async fn clause_5_2_12_throttling_suppresses_consecutive_notifications() {
     antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("antares-throttle".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (uri, count) = counting_server().await;
 
     let sub = json!({

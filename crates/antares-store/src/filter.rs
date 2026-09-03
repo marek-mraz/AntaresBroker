@@ -42,7 +42,7 @@ pub struct EntityFilter<'a> {
     /// the extracted `location` column
     pub geo: Option<&'a GeoSpec<'a>>,
     /// term → IRI, the request context's expander (the AST holds terms)
-    pub expand: &'a dyn Fn(&str) -> String,
+    pub expand: &'a (dyn Fn(&str) -> String + Sync),
     /// Pagination pushdown: applied ONLY when every present predicate
     /// compiled exactly (`decided`) — otherwise the caller's evaluator still
     /// has rows to drop and a SQL LIMIT would page over the wrong set. The

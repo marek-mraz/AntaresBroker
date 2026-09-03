@@ -10,7 +10,7 @@ One file per irreversible decision, numbered, never rewritten.
 | [ADR-0002](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0002-nats-jetstream-bus.md) | NATS JetStream as the change bus (with a local mode) | accepted |
 | [ADR-0003](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0003-websocket-deferred.md) | WebSocket binding deferred out of v1 | accepted |
 | [ADR-0004](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0004-store-ladder-redb-file-mode.md) | Store ladder, redb as the `file`-mode durability shadow | accepted |
-| [ADR-0005](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0005-anystore-sync-facade.md) | AnyStore enum + synchronous Pg facade | accepted · enum seam superseded by ADR-0013 |
+| [ADR-0005](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0005-anystore-sync-facade.md) | AnyStore enum + synchronous Pg facade | accepted · enum seam superseded by ADR-0013, sync facade by ADR-0022 |
 | [ADR-0006](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0006-rls-vs-timescale-compression.md) | RLS and Timescale compression collide on attr_instances | accepted |
 | [ADR-0007](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0007-synchronous-temporal-recording.md) | temporal auto-recording stays in the write path | accepted (reverses the earlier bus-consumer design) |
 | [ADR-0008](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0008-browser-wasm-build.md) | The browser build: one crate, the same router, no fourth backend | accepted |
@@ -27,6 +27,7 @@ One file per irreversible decision, numbered, never rewritten.
 | [ADR-0019](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0019-remote-notification-endpoint.md) | The distributed-subscription notification receiver lives outside the ETSI namespace | accepted, implemented |
 | [ADR-0020](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0020-policy-seam.md) | The policy seam: one trait, one built-in engine, every engine an addon | accepted, amended (the narrowing marker header) |
 | [ADR-0021](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0021-jsonld-context-tenancy.md) | A stored `@context` belongs to the Tenant that stored it, a Cached copy to none | accepted, implemented |
+| [ADR-0022](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0022-async-storage-drivers.md) | The storage drivers are async; nothing blocks on a store call | accepted, implemented; supersedes the sync-facade half of ADR-0005 |
 
 ## Format
 

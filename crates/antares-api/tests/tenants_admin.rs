@@ -61,9 +61,9 @@ fn entity(id: &str) -> Value {
     })
 }
 
-fn state() -> AppState {
+async fn state() -> AppState {
     let mut st = AppState::new("antares-test".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     st
 }
 
@@ -99,7 +99,7 @@ fn listed(list: &Value, tenant: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn inventory_lists_the_tenant_names_and_nothing_else() {
-    let st = state();
+    let st = state().await;
     seed(&st, "inva", "urn:ngsi-ld:Room:1").await;
     seed(&st, "invb", "urn:ngsi-ld:Room:2").await;
     let (s, list) = send(&st, "GET", "/q/tenants", None, None).await;
@@ -136,7 +136,7 @@ async fn inventory_lists_the_tenant_names_and_nothing_else() {
 /// Neither half may drift into the other.
 #[tokio::test(flavor = "multi_thread")]
 async fn broker_tenants_are_visible_in_the_inventory_and_not_addressable() {
-    let st = state();
+    let st = state().await;
     seed(&st, "invreal", "urn:ngsi-ld:Room:9").await;
     let internal = ["snap-index", "snap-0000", "distsub-index"];
     for name in internal {
@@ -148,6 +148,7 @@ async fn broker_tenants_are_visible_in_the_inventory_and_not_addressable() {
                 "urn:ngsi-ld:Room:x",
                 entity("urn:ngsi-ld:Room:x"),
             )
+            .await
             .expect("seed the broker's own tenant");
     }
     let (s, list) = send(&st, "GET", "/q/tenants", None, None).await;
@@ -175,7 +176,7 @@ async fn broker_tenants_are_visible_in_the_inventory_and_not_addressable() {
 /// One tenant is addressable directly, and that is where its counts live.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_tenant_is_addressable_and_matches_its_inventory_row() {
-    let st = state();
+    let st = state().await;
     seed(&st, "geta", "urn:ngsi-ld:Room:1").await;
     seed(&st, "getb", "urn:ngsi-ld:Room:2").await;
     let (s, one) = send(&st, "GET", "/q/tenants/geta", None, None).await;
@@ -200,7 +201,7 @@ async fn one_tenant_is_addressable_and_matches_its_inventory_row() {
 /// are not addressable at all.
 #[tokio::test(flavor = "multi_thread")]
 async fn reading_one_tenant_rejects_unknown_and_malformed_names() {
-    let st = state();
+    let st = state().await;
     seed(&st, "getguard", "urn:ngsi-ld:Room:1").await;
     let (s, _) = send(&st, "GET", "/q/tenants/never-seen", None, None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
@@ -214,7 +215,7 @@ async fn reading_one_tenant_rejects_unknown_and_malformed_names() {
 /// read to another one.
 #[tokio::test(flavor = "multi_thread")]
 async fn reading_one_tenant_is_addressed_by_the_path_never_by_the_header() {
-    let st = state();
+    let st = state().await;
     seed(&st, "getpath", "urn:ngsi-ld:Room:1").await;
     seed(&st, "getother", "urn:ngsi-ld:Room:2").await;
     let (s, one) = send(&st, "GET", "/q/tenants/getpath", None, Some("getother")).await;
@@ -225,7 +226,7 @@ async fn reading_one_tenant_is_addressed_by_the_path_never_by_the_header() {
 /// Not under the API root: the tenant admin is the operator's, not a client's.
 #[tokio::test(flavor = "multi_thread")]
 async fn reading_one_tenant_is_not_reachable_under_the_api_root() {
-    let st = state();
+    let st = state().await;
     seed(&st, "getroot", "urn:ngsi-ld:Room:1").await;
     let (s, _) = send(&st, "GET", "/ngsi-ld/v1/q/tenants/getroot", None, None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
@@ -233,7 +234,7 @@ async fn reading_one_tenant_is_not_reachable_under_the_api_root() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn purge_removes_one_tenant_and_leaves_the_other() {
-    let st = state();
+    let st = state().await;
     seed(&st, "purgea", "urn:ngsi-ld:Room:1").await;
     seed(&st, "purgeb", "urn:ngsi-ld:Room:2").await;
 
@@ -313,7 +314,7 @@ async fn synth_tenants(st: &AppState) -> Vec<String> {
 /// so the tenant-keyed purge above cannot see it".
 #[tokio::test(flavor = "multi_thread")]
 async fn purge_frees_the_snapshot_copies_the_tenant_left_behind() {
-    let st = state();
+    let st = state().await;
     assert!(
         synth_tenants(&st).await.is_empty(),
         "a fresh state holds no snapshot copies"
@@ -374,7 +375,7 @@ async fn purge_frees_the_snapshot_copies_the_tenant_left_behind() {
 /// exercises.
 #[tokio::test(flavor = "multi_thread")]
 async fn removing_a_snapshot_leaves_no_tenant_behind() {
-    let st = state();
+    let st = state().await;
     seed(&st, "snapghost", "urn:ngsi-ld:Room:8").await;
 
     let snap = json!({"type": "Snapshot",
@@ -431,7 +432,7 @@ async fn removing_a_snapshot_leaves_no_tenant_behind() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn purge_rejects_unknown_and_malformed_tenants() {
-    let st = state();
+    let st = state().await;
     let (s, _) = send(&st, "DELETE", "/q/tenants/never-seen", None, None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = send(&st, "DELETE", "/q/tenants/bad%20name", None, None).await;
@@ -443,7 +444,7 @@ async fn purge_rejects_unknown_and_malformed_tenants() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn purge_is_refused_while_distributed_subscriptions_are_active() {
-    let st = state();
+    let st = state().await;
     seed(&st, "purgedist", "urn:ngsi-ld:Room:1").await;
     let t = TenantId::new("purgedist").expect("tenant");
     // the 5.8.1.4 mapping of one Subscription that reached a Context
@@ -459,6 +460,7 @@ async fn purge_is_refused_while_distributed_subscriptions_are_active() {
                    "remotes": {"urn:ngsi-ld:ContextSourceRegistration:r1":
                        ["http://source.example.org", "urn:ngsi-ld:Subscription:remote1"]}}),
         )
+        .await
         .expect("dist sub"));
     let (s, body) = send(&st, "DELETE", "/q/tenants/purgedist", None, None).await;
     assert_eq!(s, StatusCode::CONFLICT, "{body}");
@@ -479,7 +481,7 @@ async fn purge_is_refused_while_distributed_subscriptions_are_active() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_routes_are_not_reachable_under_the_api_root() {
-    let st = state();
+    let st = state().await;
     let (s, _) = send(&st, "GET", "/ngsi-ld/v1/q/tenants", None, None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = send(&st, "DELETE", "/ngsi-ld/v1/tenants/x", None, None).await;
@@ -488,7 +490,7 @@ async fn tenant_routes_are_not_reachable_under_the_api_root() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn purge_is_addressed_by_the_path_never_by_the_tenant_header() {
-    let st = state();
+    let st = state().await;
     seed(&st, "hdra", "urn:ngsi-ld:Room:1").await;
     seed(&st, "hdrb", "urn:ngsi-ld:Room:2").await;
     // a stray NGSILD-Tenant header on the admin call must not redirect the purge
@@ -503,7 +505,7 @@ async fn purge_is_addressed_by_the_path_never_by_the_tenant_header() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn purging_the_default_tenant_empties_it_but_it_keeps_existing() {
-    let st = state();
+    let st = state().await;
     let (s, _) = send(
         &st,
         "POST",
@@ -553,7 +555,7 @@ async fn purging_the_default_tenant_empties_it_but_it_keeps_existing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_names_outside_the_grammar_are_refused_before_any_lookup() {
-    let st = state();
+    let st = state().await;
     for raw in [
         "a".repeat(65),
         "..%2F..".into(),
@@ -567,7 +569,7 @@ async fn tenant_names_outside_the_grammar_are_refused_before_any_lookup() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn purge_of_one_tenant_does_not_touch_a_same_prefixed_tenant() {
-    let st = state();
+    let st = state().await;
     seed(&st, "pre", "urn:ngsi-ld:Room:1").await;
     seed(&st, "prefix", "urn:ngsi-ld:Room:1").await;
     let (s, _) = send(&st, "DELETE", "/q/tenants/pre", None, None).await;
@@ -605,7 +607,7 @@ async fn purge_of_one_tenant_does_not_touch_a_same_prefixed_tenant() {
 /// previous holder's mappings, silently.
 #[tokio::test(flavor = "multi_thread")]
 async fn purging_a_tenant_takes_its_hosted_contexts_with_it() {
-    let st = state();
+    let st = state().await;
     seed(&st, "ctxowner", "urn:ngsi-ld:Room:ctx1").await;
     seed(&st, "ctxother", "urn:ngsi-ld:Room:ctx2").await;
 
@@ -672,7 +674,7 @@ async fn purging_a_tenant_takes_its_hosted_contexts_with_it() {
 /// every tenant that ever held a Subscription unpurgeable.
 #[tokio::test]
 async fn purge_goes_ahead_when_no_copy_lives_at_a_context_source() {
-    let st = state();
+    let st = state().await;
     let t = TenantId::new("distsubpurge").expect("tenant");
     let (status, _) = send(
         &st,
@@ -694,6 +696,7 @@ async fn purge_goes_ahead_when_no_copy_lives_at_a_context_source() {
     assert!(
         st.store
             .get(&t, Kind::DistSub, "urn:ngsi-ld:Subscription:purge-me")
+            .await
             .expect("mapping read")
             .is_some(),
         "the distributed half stores a mapping for an ordinary Subscription"
@@ -703,6 +706,7 @@ async fn purge_goes_ahead_when_no_copy_lives_at_a_context_source() {
     assert!(
         st.store
             .get(&t, Kind::Subscription, "urn:ngsi-ld:Subscription:purge-me")
+            .await
             .expect("read")
             .is_none(),
         "the purge took the Subscription with it"

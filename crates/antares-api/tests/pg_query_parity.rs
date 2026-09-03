@@ -160,10 +160,11 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
         v
     };
     for (id, doc) in &docs {
-        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id);
+        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id).await;
         assert!(
             store
                 .create(&t, antares_sql::store::Kind::Entity, id, doc.clone())
+                .await
                 .expect("seed"),
             "seed {id}"
         );
@@ -244,6 +245,7 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
                     ..Default::default()
                 },
             )
+            .await
             .expect("sql query");
         // Geo carries a metric residual (near geography vs haversine) —
         // it narrows, it never decides. When the spec declined to compile the
@@ -301,6 +303,7 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
                     ..Default::default()
                 },
             )
+            .await
             .expect("sql query");
         assert!(!outcome.decided, "scopeQ is loose-or-equal, never decided");
         let got = ids(&outcome.rows);
@@ -339,6 +342,7 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
                 ..Default::default()
             },
         )
+        .await
         .expect("sql query")
         .rows);
     // only the row CARRYING an unextractable geoproperty survives (via the
@@ -392,9 +396,10 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
         }),
     ));
     for (id, doc) in &docs {
-        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id);
+        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id).await;
         assert!(store
             .create(&t, antares_sql::store::Kind::Entity, id, doc.clone())
+            .await
             .expect("seed"));
     }
 
@@ -414,6 +419,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
                 ..Default::default()
             },
         )
+        .await
         .expect("paged query");
     assert!(outcome.decided && outcome.paged);
     assert_eq!(outcome.total, Some(10), "pre-LIMIT match count");
@@ -437,6 +443,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
                 ..Default::default()
             },
         )
+        .await
         .expect("off-the-end page");
     assert!(outcome.paged && outcome.rows.is_empty());
     assert_eq!(outcome.total, Some(10));
@@ -454,6 +461,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
                 ..Default::default()
             },
         )
+        .await
         .expect("q query");
     assert!(outcome.decided, "compiled q= is exact by contract");
     assert_eq!(
@@ -475,6 +483,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
                 ..Default::default()
             },
         )
+        .await
         .expect("projected query");
     assert!(outcome.decided);
     for row in &outcome.rows {
@@ -498,6 +507,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
                 ..Default::default()
             },
         )
+        .await
         .expect("inexact query");
     assert!(!outcome.decided && !outcome.paged && outcome.total.is_none());
 }
@@ -621,10 +631,11 @@ async fn current_state_q_prefilter_narrows_but_never_drops() {
         ("urn:cq:none", base("urn:cq:none")),
     ];
     for (id, doc) in &docs {
-        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id);
+        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id).await;
         assert!(
             store
                 .create(&t, antares_sql::store::Kind::Entity, id, doc.clone())
+                .await
                 .expect("seed"),
             "seed {id}"
         );
@@ -676,6 +687,7 @@ async fn current_state_q_prefilter_narrows_but_never_drops() {
                     ..Default::default()
                 },
             )
+            .await
             .expect("sql query")
             .rows);
         for want in &expected {
@@ -699,6 +711,7 @@ async fn current_state_q_prefilter_narrows_but_never_drops() {
                 ..Default::default()
             },
         )
+        .await
         .expect("sql query")
         .rows);
     for out in ["urn:cq:zero", "urn:cq:none"] {
@@ -722,12 +735,13 @@ async fn current_state_q_prefilter_narrows_but_never_drops() {
                 ..Default::default()
             },
         )
+        .await
         .expect("sql query")
         .rows);
     assert_eq!(got, all, "a declined leaf must widen, never narrow");
 
     for (id, _) in &docs {
-        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id);
+        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id).await;
     }
 }
 
@@ -828,9 +842,12 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
         ),
     ];
     for (id, doc) in &docs {
-        let _ = store.delete(&t, antares_sql::store::Kind::Temporal, id);
+        let _ = store
+            .delete(&t, antares_sql::store::Kind::Temporal, id)
+            .await;
         assert!(store
             .create(&t, antares_sql::store::Kind::Temporal, id, doc.clone())
+            .await
             .expect("seed temporal"));
     }
 
@@ -934,7 +951,7 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
             expand: &expand,
             ..Default::default()
         };
-        let got = ids(&store.query_temporal(&t, &tf).expect("query").rows);
+        let got = ids(&store.query_temporal(&t, &tf).await.expect("query").rows);
         for want in &expected {
             assert!(
                 got.contains(&(*want).to_string()),
@@ -965,9 +982,12 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
         "createdAt": OUT, "modifiedAt": IN,
         a("speed"): [inst(prop(json!(50)), off, "o1")],
     });
-    let _ = store.delete(&t, antares_sql::store::Kind::Temporal, "urn:tq:offset");
+    let _ = store
+        .delete(&t, antares_sql::store::Kind::Temporal, "urn:tq:offset")
+        .await;
     assert!(store
         .create(&t, antares_sql::store::Kind::Temporal, "urn:tq:offset", doc)
+        .await
         .expect("seed"));
     let ast = antares_ql::parse_q("speed>25").expect("parse");
     let tf = antares_sql::store::filter::TemporalFilter {
@@ -981,7 +1001,7 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
         expand: &expand,
         ..Default::default()
     };
-    let rows = store.query_temporal(&t, &tf).expect("query").rows;
+    let rows = store.query_temporal(&t, &tf).await.expect("query").rows;
     let offset_doc = rows
         .iter()
         .find(|r| r["id"] == "urn:tq:offset")
@@ -1026,9 +1046,12 @@ async fn temporal_pruning_matches_the_window_and_keeps_ties() {
             inst(4, "2026-03-01T00:00:00Z", "d"),
         ]
     });
-    let _ = store.delete(&t, antares_sql::store::Kind::Temporal, "urn:troom:1");
+    let _ = store
+        .delete(&t, antares_sql::store::Kind::Temporal, "urn:troom:1")
+        .await;
     assert!(store
         .create(&t, antares_sql::store::Kind::Temporal, "urn:troom:1", doc)
+        .await
         .expect("seed temporal"));
 
     // range: between [Feb, Mar) keeps exactly the February instance
@@ -1043,6 +1066,7 @@ async fn temporal_pruning_matches_the_window_and_keeps_ties() {
     };
     let got = store
         .get_temporal(&t, "urn:troom:1", &tf)
+        .await
         .expect("get")
         .expect("present");
     let arr = got[&temp].as_array().expect("array");
@@ -1061,6 +1085,7 @@ async fn temporal_pruning_matches_the_window_and_keeps_ties() {
     };
     let got = store
         .get_temporal(&t, "urn:troom:1", &tf)
+        .await
         .expect("get")
         .expect("present");
     let arr = got[&temp].as_array().expect("array");
@@ -1153,9 +1178,12 @@ async fn temporal_geo_prefilter_narrows_but_never_drops() {
         ),
     ];
     for (id, doc) in &docs {
-        let _ = store.delete(&t, antares_sql::store::Kind::Temporal, id);
+        let _ = store
+            .delete(&t, antares_sql::store::Kind::Temporal, id)
+            .await;
         assert!(store
             .create(&t, antares_sql::store::Kind::Temporal, id, doc.clone())
+            .await
             .expect("seed temporal"));
     }
     // simulate a pre-fill row: extraction never happened for this entity
@@ -1234,7 +1262,7 @@ async fn temporal_geo_prefilter_narrows_but_never_drops() {
             expand: &expand,
             ..Default::default()
         };
-        let got = ids(&store.query_temporal(&t, &tf).expect("query").rows);
+        let got = ids(&store.query_temporal(&t, &tf).await.expect("query").rows);
         for want in keep {
             assert!(
                 got.contains(&(*want).to_string()),
@@ -1299,9 +1327,12 @@ async fn temporal_exact_prefilter_pages_correctly() {
         ),
     ];
     for (id, doc) in &docs {
-        let _ = store.delete(&t, antares_sql::store::Kind::Temporal, id);
+        let _ = store
+            .delete(&t, antares_sql::store::Kind::Temporal, id)
+            .await;
         assert!(store
             .create(&t, antares_sql::store::Kind::Temporal, id, doc.clone())
+            .await
             .expect("seed temporal"));
     }
 
@@ -1323,7 +1354,7 @@ async fn temporal_exact_prefilter_pages_correctly() {
         }),
         ..Default::default()
     };
-    let out = store.query_temporal(&t, &tf).expect("query");
+    let out = store.query_temporal(&t, &tf).await.expect("query");
     assert!(out.paged, "page must be honoured");
     let got = ids(&out.rows);
     assert_eq!(

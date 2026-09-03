@@ -40,6 +40,12 @@ antares-notifier = { path = "crates/antares-notifier", default-features = false 
 antares-plugin-example = { path = "examples/plugin-example" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+# The storage driver seams are object-safe AND asynchronous, which no
+# stable language feature gives at once: `async fn` in a trait is not
+# dyn-compatible, so every method returns a boxed future. The macro writes
+# that boxing; the alternative is `Box::pin(async move { … })` by hand
+# around two hundred method bodies.
+async-trait = "0.1"
 # One HTTP client major in the build: `opentelemetry-otlp` takes 0.13, so the
 # broker does too. `rustls-no-provider` rather than `rustls`, which would
 # pull aws-lc-rs beside ring — the provider is installed once in

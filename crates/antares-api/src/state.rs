@@ -264,44 +264,51 @@ impl AppState {
         let loader = Arc::new(Loader::new());
         {
             let store = store.clone();
-            loader.set_cache_writer(Box::new(move |tenant, url, ctx_value| {
-                if hosted_row_id(&*store, tenant, url).is_some() {
-                    return; // broker-local (Hosted/Implicit) URLs are not Cached entries
-                }
-                let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes());
-                // A refetch (staleness, delete+reload) must keep the row's
-                // identity and hit counters — only the body is new.
-                // The row this writes is `Cached` and belongs to no Tenant
-                // (ADR-0021), but the call still acts for the Tenant whose
-                // resolution triggered the fetch: that is what lets the guard
-                // above see this Tenant's own Hosted rows.
-                let prior = store.context_get(tenant, &id.to_string()).ok().flatten();
-                let field = |k: &str| {
-                    prior
-                        .as_ref()
-                        .and_then(|p| p[k].as_str())
-                        .map(str::to_owned)
-                };
-                let created = field("createdAt").unwrap_or_else(now_iso);
-                let doc = serde_json::json!({
-                    "url": url,
-                    "localId": id.to_string(),
-                    "kind": "Cached",
-                    "createdAt": created,
-                    "numberOfHits": prior
-                        .as_ref()
-                        .and_then(|p| p["numberOfHits"].as_u64())
-                        .unwrap_or(0),
-                    "lastUsage": field("lastUsage"),
-                    "body": {"@context": ctx_value},
-                });
-                if let Err(e) = store.context_put(tenant, &id.to_string(), doc) {
-                    // a client-named @context URL may carry userinfo
-                    tracing::warn!(
-                        "@context write-through failed for {}: {e}",
-                        antares_notifier::redact_userinfo(url)
-                    );
-                }
+            loader.set_cache_writer(Arc::new(move |tenant, url, ctx_value| {
+                let store = store.clone();
+                Box::pin(async move {
+                    if hosted_row_id(&*store, tenant, url).await.is_some() {
+                        return; // broker-local (Hosted/Implicit) URLs are not Cached entries
+                    }
+                    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes());
+                    // A refetch (staleness, delete+reload) must keep the row's
+                    // identity and hit counters — only the body is new.
+                    // The row this writes is `Cached` and belongs to no Tenant
+                    // (ADR-0021), but the call still acts for the Tenant whose
+                    // resolution triggered the fetch: that is what lets the guard
+                    // above see this Tenant's own Hosted rows.
+                    let prior = store
+                        .context_get(tenant, &id.to_string())
+                        .await
+                        .ok()
+                        .flatten();
+                    let field = |k: &str| {
+                        prior
+                            .as_ref()
+                            .and_then(|p| p[k].as_str())
+                            .map(str::to_owned)
+                    };
+                    let created = field("createdAt").unwrap_or_else(now_iso);
+                    let doc = serde_json::json!({
+                        "url": url,
+                        "localId": id.to_string(),
+                        "kind": "Cached",
+                        "createdAt": created,
+                        "numberOfHits": prior
+                            .as_ref()
+                            .and_then(|p| p["numberOfHits"].as_u64())
+                            .unwrap_or(0),
+                        "lastUsage": field("lastUsage"),
+                        "body": {"@context": ctx_value},
+                    });
+                    if let Err(e) = store.context_put(tenant, &id.to_string(), doc).await {
+                        // a client-named @context URL may carry userinfo
+                        tracing::warn!(
+                            "@context write-through failed for {}: {e}",
+                            antares_notifier::redact_userinfo(url)
+                        );
+                    }
+                })
             }));
         }
         // 5.13.3.5: hit counters live in the SHARED row, not per instance
@@ -312,46 +319,49 @@ impl AppState {
         // have no row and are never evicted.
         {
             let store = store.clone();
-            loader.set_usage_bump(Box::new(move |tenant, url| {
-                if Loader::is_pinned_core(url) {
-                    return true;
-                }
-                // One read, not two: a bump runs on every counted use of a
-                // non-pinned @context, and the hosted probe already carries
-                // the row it found.
-                let held = hosted_row(&*store, tenant, url);
-                let (id, row) = match held {
-                    Some((id, row)) => (id, Ok(Some(row))),
-                    None => {
-                        let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes())
-                            .to_string();
-                        let row = store.context_get(tenant, &id);
-                        (id, row)
+            loader.set_usage_bump(Arc::new(move |tenant, url| {
+                let store = store.clone();
+                Box::pin(async move {
+                    if Loader::is_pinned_core(url) {
+                        return true;
                     }
-                };
-                match row {
-                    // the row is what the store handed back, and `Value`'s
-                    // index panics on anything that is not an object; a row
-                    // that cannot carry the counters is left uncounted
-                    Ok(Some(mut doc)) if doc.is_object() => {
-                        let hits = doc["numberOfHits"].as_u64().unwrap_or(0) + 1;
-                        doc["numberOfHits"] = serde_json::json!(hits);
-                        doc["lastUsage"] = serde_json::json!(now_iso());
-                        if let Err(e) = store.context_put(tenant, &id, doc) {
-                            tracing::warn!(
-                                "@context hit bump failed for {}: {e}",
-                                antares_notifier::redact_userinfo(url)
-                            );
+                    // One read, not two: a bump runs on every counted use of a
+                    // non-pinned @context, and the hosted probe already carries
+                    // the row it found.
+                    let held = hosted_row(&*store, tenant, url).await;
+                    let (id, row) = match held {
+                        Some((id, row)) => (id, Ok(Some(row))),
+                        None => {
+                            let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes())
+                                .to_string();
+                            let row = store.context_get(tenant, &id).await;
+                            (id, row)
                         }
-                        true
+                    };
+                    match row {
+                        // the row is what the store handed back, and `Value`'s
+                        // index panics on anything that is not an object; a row
+                        // that cannot carry the counters is left uncounted
+                        Ok(Some(mut doc)) if doc.is_object() => {
+                            let hits = doc["numberOfHits"].as_u64().unwrap_or(0) + 1;
+                            doc["numberOfHits"] = serde_json::json!(hits);
+                            doc["lastUsage"] = serde_json::json!(now_iso());
+                            if let Err(e) = store.context_put(tenant, &id, doc).await {
+                                tracing::warn!(
+                                    "@context hit bump failed for {}: {e}",
+                                    antares_notifier::redact_userinfo(url)
+                                );
+                            }
+                            true
+                        }
+                        // a row that cannot carry the counters is left
+                        // uncounted, and still exists: it must not be evicted
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        // a store hiccup must never evict a healthy cache entry
+                        Err(_) => true,
                     }
-                    // a row that cannot carry the counters is left
-                    // uncounted, and still exists: it must not be evicted
-                    Ok(Some(_)) => true,
-                    Ok(None) => false,
-                    // a store hiccup must never evict a healthy cache entry
-                    Err(_) => true,
-                }
+                })
             }));
         }
         // 5.13.1: an @context this broker HOSTS is served from its row, not
@@ -364,17 +374,20 @@ impl AppState {
         // decides who may resolve it.
         {
             let store = store.clone();
-            loader.set_local_lookup(Box::new(move |tenant, url| {
-                let (_, row) = hosted_row(&*store, tenant, url)?;
-                // Ownership is one rule for the whole broker (ADR-0021): a
-                // Cached row is a copy of a public document and belongs to no
-                // Tenant, everything else belongs to its `owner` — with the
-                // DEFAULT Tenant for a row written before that member
-                // existed, which is the Tenant that lists, serves and deletes
-                // it.
-                let owner = antares_store::context_row_owner(&row)
-                    .and_then(|o| antares_model::TenantId::new(o).ok());
-                Some((owner, row["body"]["@context"].clone()))
+            loader.set_local_lookup(Arc::new(move |tenant, url| {
+                let store = store.clone();
+                Box::pin(async move {
+                    let (_, row) = hosted_row(&*store, tenant, url).await?;
+                    // Ownership is one rule for the whole broker (ADR-0021): a
+                    // Cached row is a copy of a public document and belongs to no
+                    // Tenant, everything else belongs to its `owner` — with the
+                    // DEFAULT Tenant for a row written before that member
+                    // existed, which is the Tenant that lists, serves and deletes
+                    // it.
+                    let owner = antares_store::context_row_owner(&row)
+                        .and_then(|o| antares_model::TenantId::new(o).ok());
+                    Some((owner, row["body"]["@context"].clone()))
+                })
             }));
         }
         // 5.8.1.4: this URL is handed to peer brokers as the notification
@@ -718,7 +731,7 @@ fn outbound_client(
 /// broker does not host, and the stored row — another Tenant's, as often as
 /// not — must not be read, counted or rewritten for it. Returns the local
 /// row id when the URL is the one the row was minted under.
-fn hosted_row(
+async fn hosted_row(
     store: &dyn CurrentStateDriver,
     tenant: Option<&antares_model::TenantId>,
     url: &str,
@@ -730,18 +743,19 @@ fn hosted_row(
     }
     let row = store
         .context_get(tenant, seg)
+        .await
         .ok()
         .flatten()
         .filter(|row| row["url"].as_str() == Some(url))?;
     Some((seg.to_owned(), row))
 }
 
-fn hosted_row_id(
+async fn hosted_row_id(
     store: &dyn CurrentStateDriver,
     tenant: Option<&antares_model::TenantId>,
     url: &str,
 ) -> Option<String> {
-    hosted_row(store, tenant, url).map(|(id, _)| id)
+    hosted_row(store, tenant, url).await.map(|(id, _)| id)
 }
 
 /// Server-managed timestamp, ISO 8601 UTC with milliseconds.
@@ -798,6 +812,7 @@ mod jsonld_context_locality_5_13 {
         let row = st
             .store
             .context_get(None, &id)
+            .await
             .expect("store")
             .expect("the fetched @context is persisted as a Cached row");
         assert_eq!(row["kind"], "Cached");
@@ -811,6 +826,7 @@ mod jsonld_context_locality_5_13 {
         assert_eq!(
             st.store
                 .context_get(None, &id)
+                .await
                 .expect("store")
                 .expect("row")["numberOfHits"],
             serde_json::json!(2),
@@ -840,6 +856,7 @@ mod jsonld_context_locality_5_13 {
                     "body": {"@context": {"peerTemp": "http://example.org/peerTemp"}},
                 }),
             )
+            .await
             .expect("seed hosted row");
         let user = serde_json::json!(url);
         st.loader.resolve_for(&owner, &user).await.expect("resolve");
@@ -851,6 +868,7 @@ mod jsonld_context_locality_5_13 {
         assert!(
             st.store
                 .context_get(None, &cached)
+                .await
                 .expect("store")
                 .is_none(),
             "a hosted @context must not be duplicated as a Cached row"
@@ -858,6 +876,7 @@ mod jsonld_context_locality_5_13 {
         assert_eq!(
             st.store
                 .context_get(Some(&owner), "local-1")
+                .await
                 .expect("store")
                 .expect("row")["numberOfHits"],
             serde_json::json!(2)
@@ -898,6 +917,7 @@ mod jsonld_context_locality_5_13 {
                     "body": {"@context": {"secret": "https://alpha.example/secret"}},
                 }),
             )
+            .await
             .expect("seed hosted row");
         let user = serde_json::json!(url);
         let ctx = st
@@ -941,6 +961,7 @@ mod jsonld_context_locality_5_13 {
                     "body": {"@context": {"legacy": "https://legacy.example/term"}},
                 }),
             )
+            .await
             .expect("seed a row from before the owner member");
         let user = serde_json::json!(url);
         let ctx = st
@@ -981,6 +1002,7 @@ mod jsonld_context_locality_5_13 {
         let alpha = antares_model::TenantId::new("alpha").expect("tenant");
         st.store
             .context_put(Some(&alpha), "alpha-1", row.clone())
+            .await
             .expect("seed hosted row");
         st.loader
             .resolve_for(&antares_model::TenantId::default(), &serde_json::json!(url))
@@ -989,6 +1011,7 @@ mod jsonld_context_locality_5_13 {
         assert_eq!(
             st.store
                 .context_get(Some(&alpha), "alpha-1")
+                .await
                 .expect("store")
                 .expect("row"),
             row,
@@ -998,6 +1021,7 @@ mod jsonld_context_locality_5_13 {
         assert_eq!(
             st.store
                 .context_get(None, &cached)
+                .await
                 .expect("store")
                 .expect("row")["kind"],
             serde_json::json!("Cached"),

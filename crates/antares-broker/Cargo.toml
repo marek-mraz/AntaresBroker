@@ -71,6 +71,9 @@ tikv-jemallocator = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }
 
 [dev-dependencies]
+# the storage seams are object-safe AND asynchronous: a test double
+# implements them through the same boxing macro the drivers use.
+async-trait = { workspace = true }
 # the wiring tests build a state over the built-in store
 antares-api = { workspace = true, features = ["test-kit"] }
 # mqtt e2e: sync rumqttc client against a live mosquitto

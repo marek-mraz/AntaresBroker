@@ -50,7 +50,7 @@ async fn delete(st: &AppState, uri: &str) -> (StatusCode, Value) {
 /// 5.6.11 endpoint so the instance carries the instanceId the writes address.
 async fn seeded() -> AppState {
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let body = json!({
         "id": ID, "type": "Vehicle",
         "speed": [{"type": "Property", "value": 10, "observedAt": "2026-01-01T09:00:00Z"}]
@@ -260,7 +260,7 @@ const REPLACED: &str = "urn:ngsi-ld:Vehicle:tw-replace";
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_6_14_modify_instance_replaces_the_instance_rather_than_merging_into_it() {
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let body = json!({
         "id": REPLACED, "type": "Vehicle",
         "speed": [{

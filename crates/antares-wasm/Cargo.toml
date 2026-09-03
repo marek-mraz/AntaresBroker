@@ -17,6 +17,10 @@ antares-api = { workspace = true }
 antares-sql = { workspace = true }
 antares-jsonld = { workspace = true }
 tower = { workspace = true }
+tracing = { workspace = true }
+# `now_or_never`: the JS constructors cannot await the wiring's memory-arm
+# futures, which complete on their first poll.
+futures-util = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 serde_json = { workspace = true }

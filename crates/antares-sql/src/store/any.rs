@@ -130,14 +130,16 @@ impl PgBackend {
     /// memory arm records: the hook runs real code over attacker-shaped JSON,
     /// and a panic inside it must unwind one request, not poison this lock
     /// and panic every later entity write until the process restarts.
-    fn emit(&self, tenant: &TenantId, before: Option<Value>, after: Option<Value>) {
-        if let Some(h) = self
+    async fn emit(&self, tenant: &TenantId, before: Option<Value>, after: Option<Value>) {
+        // cloned out of the lock first: a read guard cannot be held across
+        // the await the hook now costs.
+        let hook = self
             .hook
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            h(tenant, before, after);
+            .clone();
+        if let Some(h) = hook {
+            h(tenant, before, after).await;
         }
     }
 }
@@ -165,16 +167,17 @@ impl AnyStore {
     /// RIGHT NOW? Memory/file are in-process (always ready); the Pg arm runs
     /// `SELECT 1` so a lost database (failover, network partition) flips
     /// /q/ready to 503 and the Service stops routing to this pod.
-    pub fn ping(&self) -> Result<(), NgsiError> {
+    pub async fn ping(&self) -> Result<(), NgsiError> {
         match self {
             AnyStore::Mem(_) => Ok(()),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg::entity::wait(async {
+            AnyStore::Pg(p) => async {
                 sqlx::query("SELECT 1")
                     .execute(p.docs.pool())
                     .await
                     .map(|_| ())
-            })
+            }
+            .await
             .map_err(db),
         }
     }
@@ -243,32 +246,36 @@ impl AnyStore {
     }
 
     /// Outbox drain: oldest-first page of pending rows `(seq, tenant, event)`.
-    pub fn outbox_peek(
+    pub async fn outbox_peek(
         &self,
         #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] limit: i64,
     ) -> Result<Vec<(i64, String, Value)>, NgsiError> {
         match self {
             AnyStore::Mem(_) => Ok(Vec::new()),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg::outbox::peek(p.docs.pool(), limit).map_err(db),
+            AnyStore::Pg(p) => super::pg::outbox::peek(p.docs.pool(), limit)
+                .await
+                .map_err(db),
         }
     }
 
     /// Outbox drain: delete EXACTLY the published rows (never a blanket
     /// `seq <= max`, which loses a row committing between peek and ack).
-    pub fn outbox_ack(
+    pub async fn outbox_ack(
         &self,
         #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] seqs: &[i64],
     ) -> Result<u64, NgsiError> {
         match self {
             AnyStore::Mem(_) => Ok(0),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg::outbox::ack(p.docs.pool(), seqs).map_err(db),
+            AnyStore::Pg(p) => super::pg::outbox::ack(p.docs.pool(), seqs)
+                .await
+                .map_err(db),
         }
     }
 
     /// Create one document of `kind`; `false` when that id is already taken.
-    pub fn create(
+    pub async fn create(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -276,19 +283,19 @@ impl AnyStore {
         doc: Value,
     ) -> Result<bool, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.create(tenant, kind, id, doc)),
+            AnyStore::Mem(s) => Ok(s.create(tenant, kind, id, doc).await),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
                 let created = match kind {
-                    Kind::Entity => p.entities.create(tenant, id, &doc).map_err(db)?,
-                    Kind::Temporal => p.temporal.create(tenant, id, &doc).map_err(db)?,
+                    Kind::Entity => p.entities.create(tenant, id, &doc).await.map_err(db)?,
+                    Kind::Temporal => p.temporal.create(tenant, id, &doc).await.map_err(db)?,
                     _ => {
                         let dk = doc_kind(kind)?;
-                        p.docs.create(tenant, dk, id, &doc).map_err(db)?
+                        p.docs.create(tenant, dk, id, &doc).await.map_err(db)?
                     }
                 };
                 if created && kind == Kind::Entity {
-                    p.emit(tenant, None, Some(doc));
+                    p.emit(tenant, None, Some(doc)).await;
                 }
                 Ok(created)
             }
@@ -297,22 +304,25 @@ impl AnyStore {
 
     /// Batch create (entities only): one multi-row statement on the Pg
     /// arm, per-item loop on the memory arm. Created-flags in input order.
-    pub fn batch_create(
+    pub async fn batch_create(
         &self,
         tenant: &TenantId,
         items: Vec<(String, Value)>,
     ) -> Result<Vec<bool>, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(items
-                .into_iter()
-                .map(|(id, doc)| s.create(tenant, Kind::Entity, &id, doc))
-                .collect()),
+            AnyStore::Mem(s) => {
+                let mut out = Vec::with_capacity(items.len());
+                for (id, doc) in items {
+                    out.push(s.create(tenant, Kind::Entity, &id, doc).await);
+                }
+                Ok(out)
+            }
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
-                let flags = p.entities.batch_create(tenant, &items).map_err(db)?;
+                let flags = p.entities.batch_create(tenant, &items).await.map_err(db)?;
                 for ((_, doc), created) in items.into_iter().zip(&flags) {
                     if *created {
-                        p.emit(tenant, None, Some(doc));
+                        p.emit(tenant, None, Some(doc)).await;
                     }
                 }
                 Ok(flags)
@@ -323,32 +333,40 @@ impl AnyStore {
     /// Batch delete (entities only): deleted-flags in input order; a
     /// duplicate id in the input deletes once and 404s the second time,
     /// matching the per-item loop's semantics (5.5.11.4).
-    pub fn batch_delete(&self, tenant: &TenantId, ids: &[String]) -> Result<Vec<bool>, NgsiError> {
+    pub async fn batch_delete(
+        &self,
+        tenant: &TenantId,
+        ids: &[String],
+    ) -> Result<Vec<bool>, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(ids
-                .iter()
-                .map(|id| s.delete(tenant, Kind::Entity, id))
-                .collect()),
+            AnyStore::Mem(s) => {
+                let mut out = Vec::with_capacity(ids.len());
+                for id in ids {
+                    out.push(s.delete(tenant, Kind::Entity, id).await);
+                }
+                Ok(out)
+            }
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
-                let deleted = p.entities.batch_delete(tenant, ids).map_err(db)?;
+                let deleted = p.entities.batch_delete(tenant, ids).await.map_err(db)?;
                 let mut prev: std::collections::HashMap<String, Value> =
                     deleted.into_iter().collect();
-                Ok(ids
-                    .iter()
-                    .map(|id| match prev.remove(id) {
+                let mut out = Vec::with_capacity(ids.len());
+                for id in ids {
+                    match prev.remove(id) {
                         Some(before) => {
-                            p.emit(tenant, Some(before), None);
-                            true
+                            p.emit(tenant, Some(before), None).await;
+                            out.push(true);
                         }
-                        None => false,
-                    })
-                    .collect())
+                        None => out.push(false),
+                    }
+                }
+                Ok(out)
             }
         }
     }
 
-    pub fn upsert(
+    pub async fn upsert(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -356,7 +374,7 @@ impl AnyStore {
         doc: Value,
     ) -> Result<bool, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.upsert(tenant, kind, id, doc)),
+            AnyStore::Mem(s) => Ok(s.upsert(tenant, kind, id, doc).await),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => {
@@ -365,27 +383,36 @@ impl AnyStore {
                     // lock), fall back to create, and on a lost create race
                     // replace after all.
                     let mut prev: Option<Value> = None;
-                    let replace = |prev: &mut Option<Value>| {
-                        p.entities.mutate(tenant, id, |d| {
-                            *prev = Some(d.clone());
-                            *d = doc.clone();
-                            Ok::<(), std::convert::Infallible>(())
-                        })
-                    };
-                    let mut existed = replace(&mut prev).map_err(db)?.is_some();
+                    // one shape, two places: a closure cannot hold the await
+                    // and an async closure is not a stable language feature,
+                    // so the replace is written once and expanded twice
+                    macro_rules! replace {
+                        () => {
+                            p.entities
+                                .mutate(tenant, id, |d| {
+                                    prev = Some(d.clone());
+                                    *d = doc.clone();
+                                    Ok::<(), std::convert::Infallible>(())
+                                })
+                                .await
+                                .map_err(db)?
+                                .is_some()
+                        };
+                    }
+                    let mut existed = replace!();
                     if !existed {
-                        if p.entities.create(tenant, id, &doc).map_err(db)? {
+                        if p.entities.create(tenant, id, &doc).await.map_err(db)? {
                             existed = false;
                         } else {
                             // lost the create race — replace instead
-                            existed = replace(&mut prev).map_err(db)?.is_some();
+                            existed = replace!();
                         }
                     }
-                    p.emit(tenant, prev, Some(doc));
+                    p.emit(tenant, prev, Some(doc)).await;
                     Ok(existed)
                 }
                 Kind::Temporal => {
-                    if p.temporal.create(tenant, id, &doc).map_err(db)? {
+                    if p.temporal.create(tenant, id, &doc).await.map_err(db)? {
                         Ok(false)
                     } else {
                         p.temporal
@@ -393,26 +420,32 @@ impl AnyStore {
                                 *d = doc.clone();
                                 Ok::<(), std::convert::Infallible>(())
                             })
+                            .await
                             .map_err(db)?;
                         Ok(true)
                     }
                 }
                 _ => {
                     let dk = doc_kind(kind)?;
-                    p.docs.upsert(tenant, dk, id, &doc).map_err(db)
+                    p.docs.upsert(tenant, dk, id, &doc).await.map_err(db)
                 }
             },
         }
     }
 
-    pub fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
+    pub async fn get(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+    ) -> Result<Option<Value>, NgsiError> {
         let doc = match self {
             AnyStore::Mem(s) => s.get(tenant, kind, id),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
-                Kind::Entity => p.entities.get(tenant, id).map_err(db)?,
-                Kind::Temporal => p.temporal.get(tenant, id).map_err(db)?,
-                _ => p.docs.get(tenant, doc_kind(kind)?, id).map_err(db)?,
+                Kind::Entity => p.entities.get(tenant, id).await.map_err(db)?,
+                Kind::Temporal => p.temporal.get(tenant, id).await.map_err(db)?,
+                _ => p.docs.get(tenant, doc_kind(kind)?, id).await.map_err(db)?,
             },
         };
         // 4.22: an expired entity is invalid context — a read serves it to
@@ -430,34 +463,34 @@ impl AnyStore {
         Ok(doc)
     }
 
-    pub fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
+    pub async fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.delete(tenant, kind, id)),
+            AnyStore::Mem(s) => Ok(s.delete(tenant, kind, id).await),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => {
                     // the before-image comes from the DELETE's own RETURNING —
                     // same transaction, never a separate racy read
-                    let prev = p.entities.delete(tenant, id).map_err(db)?;
+                    let prev = p.entities.delete(tenant, id).await.map_err(db)?;
                     let hit = prev.is_some();
                     if hit {
-                        p.emit(tenant, prev, None);
+                        p.emit(tenant, prev, None).await;
                     }
                     Ok(hit)
                 }
-                Kind::Temporal => p.temporal.delete(tenant, id).map_err(db),
-                _ => p.docs.delete(tenant, doc_kind(kind)?, id).map_err(db),
+                Kind::Temporal => p.temporal.delete(tenant, id).await.map_err(db),
+                _ => p.docs.delete(tenant, doc_kind(kind)?, id).await.map_err(db),
             },
         }
     }
 
     /// Delete one entity only if `keep` accepts the stored document, read
     /// and removed under one lock (see the driver trait).
-    pub fn delete_entity_if(
+    pub async fn delete_entity_if(
         &self,
         tenant: &TenantId,
         id: &str,
-        keep: &dyn Fn(&Value) -> bool,
+        keep: &(dyn for<'v> Fn(&'v Value) -> bool + Sync),
     ) -> Result<bool, NgsiError> {
         // 4.22 is applied to the document `keep` judges, exactly as `get`
         // applies it: an expired instance is not there to be matched on.
@@ -467,29 +500,29 @@ impl AnyStore {
             !crate::store::filter::strip_expired(&mut d, &now) && keep(&d)
         };
         match self {
-            AnyStore::Mem(s) => Ok(s.delete_if(tenant, id, &judge).is_some()),
+            AnyStore::Mem(s) => Ok(s.delete_if(tenant, id, &judge).await.is_some()),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
                 // the before-image comes from the DELETE's own RETURNING —
                 // same transaction, never a separate racy read
-                let prev = p.entities.delete_if(tenant, id, &judge).map_err(db)?;
+                let prev = p.entities.delete_if(tenant, id, &judge).await.map_err(db)?;
                 let hit = prev.is_some();
                 if hit {
-                    p.emit(tenant, prev, None);
+                    p.emit(tenant, prev, None).await;
                 }
                 Ok(hit)
             }
         }
     }
 
-    pub fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
+    pub async fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
         let mut rows = match self {
             AnyStore::Mem(s) => s.list(tenant, kind),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
-                Kind::Entity => p.entities.list(tenant).map_err(db)?,
-                Kind::Temporal => p.temporal.list(tenant).map_err(db)?,
-                _ => p.docs.list(tenant, doc_kind(kind)?).map_err(db)?,
+                Kind::Entity => p.entities.list(tenant).await.map_err(db)?,
+                Kind::Temporal => p.temporal.list(tenant).await.map_err(db)?,
+                _ => p.docs.list(tenant, doc_kind(kind)?).await.map_err(db)?,
             },
         };
         if kind == Kind::Entity {
@@ -500,7 +533,7 @@ impl AnyStore {
     }
 
     /// One id-ordered page of documents (see `CurrentStateDriver::list_page`).
-    pub fn list_page(
+    pub async fn list_page(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -517,6 +550,7 @@ impl AnyStore {
                     let mut rows = p
                         .entities
                         .list_page(tenant, after, i64::try_from(limit).unwrap_or(i64::MAX))
+                        .await
                         .map_err(db)?;
                     // 4.22: the statement excluded expired ENTITIES, so no
                     // document leaves this page and its length still means
@@ -535,7 +569,7 @@ impl AnyStore {
                 // that does not yet honour `list_page`'s contract, and the
                 // reason nothing internal walks temporal state.
                 Kind::Temporal => {
-                    let mut rows = AnyStore::list(self, tenant, kind)?;
+                    let mut rows = AnyStore::list(self, tenant, kind).await?;
                     rows.sort_by(|a, b| row_id(a).cmp(row_id(b)));
                     Ok(rows
                         .into_iter()
@@ -551,6 +585,7 @@ impl AnyStore {
                         after,
                         i64::try_from(limit).unwrap_or(i64::MAX),
                     )
+                    .await
                     .map_err(db),
             },
         }
@@ -558,7 +593,7 @@ impl AnyStore {
 
     /// One id-ordered window of documents and the total (see
     /// `CurrentStateDriver::list_slice`).
-    pub fn list_slice(
+    pub async fn list_slice(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -571,7 +606,7 @@ impl AnyStore {
             AnyStore::Pg(p) => match kind {
                 // Not doc kinds; sliced from the whole list, like `list_page`.
                 Kind::Entity | Kind::Temporal => {
-                    let mut rows = AnyStore::list(self, tenant, kind)?;
+                    let mut rows = AnyStore::list(self, tenant, kind).await?;
                     rows.sort_by(|a, b| row_id(a).cmp(row_id(b)));
                     let total = rows.len();
                     Ok((rows.into_iter().skip(offset).take(limit).collect(), total))
@@ -585,6 +620,7 @@ impl AnyStore {
                             i64::try_from(offset).unwrap_or(i64::MAX),
                             i64::try_from(limit).unwrap_or(i64::MAX),
                         )
+                        .await
                         .map_err(db)?;
                     Ok((page, usize::try_from(total).unwrap_or(usize::MAX)))
                 }
@@ -600,7 +636,7 @@ impl AnyStore {
     /// cannot match on id or type. `types` must be expanded plain type IRIs
     /// (what the registration write stored); a caller holding terms or a 4.17
     /// selection expression passes `None` and narrows on ids alone.
-    pub fn matching_registrations(
+    pub async fn matching_registrations(
         &self,
         tenant: &TenantId,
         #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] ids: Option<&[String]>,
@@ -612,6 +648,7 @@ impl AnyStore {
             AnyStore::Pg(p) => p
                 .docs
                 .matching_registrations(tenant, ids, types)
+                .await
                 .map_err(db),
         }
     }
@@ -621,7 +658,7 @@ impl AnyStore {
     /// entities are already in RAM — so they return the same snapshot `list`
     /// does (never `decided`, never `paged`). Either way the caller applies
     /// the exact filter afterwards unless the outcome says SQL already did.
-    pub fn query_entities(
+    pub async fn query_entities(
         &self,
         tenant: &TenantId,
         #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
@@ -635,7 +672,7 @@ impl AnyStore {
                 total: None,
             },
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.entities.query(tenant, f).map_err(db)?,
+            AnyStore::Pg(p) => p.entities.query(tenant, f).await.map_err(db)?,
         };
         // 4.22: the Pg arm already excludes expired ENTITIES in SQL (so
         // paging/totals stay exact); instance stripping — and the whole job
@@ -651,7 +688,7 @@ impl AnyStore {
     /// pruning AND entity paging pushed down. Same
     /// contract: the API's window() is the arbiter; the memory arm returns
     /// the full snapshot, never paged.
-    pub fn query_temporal(
+    pub async fn query_temporal(
         &self,
         tenant: &TenantId,
         #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
@@ -665,7 +702,7 @@ impl AnyStore {
                 aggregated: false,
             },
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.temporal.query(tenant, f).map_err(db)?,
+            AnyStore::Pg(p) => p.temporal.query(tenant, f).await.map_err(db)?,
         };
         // 4.22 on temporal reads: the Pg arm already dropped expired ENTITIES in
         // SQL (paging exact); this strips expired attribute INSTANCES, and does
@@ -690,7 +727,7 @@ impl AnyStore {
     /// ever clean again. An instance marked `temporal_only` never holds the
     /// entities (they live in another backend) and records unconditionally;
     /// there the delete overlap stays a window the temporal delete closes.
-    pub fn temporal_append(
+    pub async fn temporal_append(
         &self,
         tenant: &TenantId,
         id: &str,
@@ -704,7 +741,7 @@ impl AnyStore {
                 }
                 if s.get(tenant, Kind::Temporal, id).is_none() {
                     // loser of a concurrent create race just extends below
-                    let _ = s.create(tenant, Kind::Temporal, id, shell.clone());
+                    let _ = s.create(tenant, Kind::Temporal, id, shell.clone()).await;
                 }
                 s.mutate(tenant, Kind::Temporal, id, |doc| {
                     let target = doc.as_object_mut().ok_or(())?;
@@ -730,11 +767,16 @@ impl AnyStore {
                         }
                     }
                     Ok::<(), ()>(())
-                });
+                })
+                .await;
                 Ok(())
             }
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.temporal.append(tenant, id, shell, additions).map_err(db),
+            AnyStore::Pg(p) => p
+                .temporal
+                .append(tenant, id, shell, additions)
+                .await
+                .map_err(db),
         }
     }
 
@@ -750,7 +792,7 @@ impl AnyStore {
     }
 
     /// Retrieve Temporal Evolution with the same instance pruning.
-    pub fn get_temporal(
+    pub async fn get_temporal(
         &self,
         tenant: &TenantId,
         id: &str,
@@ -760,7 +802,7 @@ impl AnyStore {
         let mut doc = match self {
             AnyStore::Mem(s) => s.get(tenant, Kind::Temporal, id),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.temporal.get_range(tenant, id, f).map_err(db)?,
+            AnyStore::Pg(p) => p.temporal.get_range(tenant, id, f).await.map_err(db)?,
         };
         // 4.22: expired entity → None (Pg already did this in SQL); otherwise
         // strip expired instances.
@@ -773,7 +815,7 @@ impl AnyStore {
         Ok(doc)
     }
 
-    pub fn mutate<T, E>(
+    pub async fn mutate<T, E>(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -781,7 +823,7 @@ impl AnyStore {
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Result<Option<Result<T, E>>, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.mutate(tenant, kind, id, f)),
+            AnyStore::Mem(s) => Ok(s.mutate(tenant, kind, id, f).await),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => {
@@ -801,20 +843,21 @@ impl AnyStore {
                             }
                             r
                         })
+                        .await
                         .map_err(db)?;
                     if let (Some(Ok(_)), Some(a)) = (&r, after) {
                         if before.as_ref() != Some(&a) {
-                            p.emit(tenant, before, Some(a));
+                            p.emit(tenant, before, Some(a)).await;
                         }
                     }
                     Ok(r)
                 }
-                Kind::Temporal => p.temporal.mutate(tenant, id, f).map_err(db),
+                Kind::Temporal => p.temporal.mutate(tenant, id, f).await.map_err(db),
                 _ => {
                     // FOR UPDATE + UPDATE in one tx: a bookkeeping writeback
                     // racing a DELETE must never resurrect the row (047_06).
                     let dk = doc_kind(kind)?;
-                    match p.docs.mutate(tenant, dk, id, f).map_err(db)? {
+                    match p.docs.mutate(tenant, dk, id, f).await.map_err(db)? {
                         Some(r) => Ok(Some(r)),
                         None => Ok(None),
                     }
@@ -826,24 +869,28 @@ impl AnyStore {
     /// Batch upsert with REPLACE semantics for entities:
     /// one statement + one transaction on the Pg arm, per-item loop on the
     /// memory arm. Created-flags in input order.
-    pub fn batch_upsert(
+    pub async fn batch_upsert(
         &self,
         tenant: &TenantId,
         items: Vec<(String, Value)>,
     ) -> Result<Vec<bool>, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(items
-                .into_iter()
-                .map(|(id, doc)| !s.upsert(tenant, Kind::Entity, &id, doc))
-                .collect()),
+            AnyStore::Mem(s) => {
+                let mut out = Vec::with_capacity(items.len());
+                for (id, doc) in items {
+                    out.push(!s.upsert(tenant, Kind::Entity, &id, doc).await);
+                }
+                Ok(out)
+            }
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
                 let out = p
                     .entities
                     .batch_upsert_replace(tenant, &items)
+                    .await
                     .map_err(db)?;
                 for ((_, doc), (_, prev)) in items.iter().zip(&out) {
-                    p.emit(tenant, prev.clone(), Some(doc.clone()));
+                    p.emit(tenant, prev.clone(), Some(doc.clone())).await;
                 }
                 Ok(out.into_iter().map(|(created, _)| created).collect())
             }
@@ -853,17 +900,20 @@ impl AnyStore {
     /// Batch read-modify-write for entities: one transaction + one ordered
     /// lock set + one multi-row writeback on the Pg arm; per-item mutate on
     /// the memory arm. Results align with `ids` (`None` = absent).
-    pub fn batch_mutate<E>(
+    pub async fn batch_mutate<E>(
         &self,
         tenant: &TenantId,
         ids: &[String],
         mut f: impl FnMut(&str, &mut Value) -> Result<(), E>,
     ) -> Result<Vec<Option<Result<(), E>>>, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(ids
-                .iter()
-                .map(|id| s.mutate(tenant, Kind::Entity, id, |d| f(id, d)))
-                .collect()),
+            AnyStore::Mem(s) => {
+                let mut out = Vec::with_capacity(ids.len());
+                for id in ids {
+                    out.push(s.mutate(tenant, Kind::Entity, id, |d| f(id, d)).await);
+                }
+                Ok(out)
+            }
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
                 // hook images captured inside the lock, same as single mutate
@@ -878,9 +928,10 @@ impl AnyStore {
                         }
                         r
                     })
+                    .await
                     .map_err(db)?;
                 for (before, after) in images {
-                    p.emit(tenant, Some(before), Some(after));
+                    p.emit(tenant, Some(before), Some(after)).await;
                 }
                 Ok(r)
             }
@@ -903,22 +954,25 @@ impl AnyStore {
 
     /// 5.5.10: does the Tenant exist? The default Tenant "implicitly exists";
     /// others exist once implicitly created by a create operation.
-    pub fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+    pub async fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
         if tenant.as_str() == TenantId::DEFAULT {
             return Ok(true);
         }
         match self {
             AnyStore::Mem(s) => Ok(s.tenant_exists(tenant)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg::entity::wait(async {
-                let row =
-                    sqlx::query_scalar::<_, i32>("SELECT 1 FROM tenants WHERE tenant_id = $1")
-                        .bind(tenant.as_str())
-                        .fetch_optional(p.docs.pool())
-                        .await
-                        .map_err(db)?;
-                Ok(row.is_some())
-            }),
+            AnyStore::Pg(p) => {
+                async {
+                    let row =
+                        sqlx::query_scalar::<_, i32>("SELECT 1 FROM tenants WHERE tenant_id = $1")
+                            .bind(tenant.as_str())
+                            .fetch_optional(p.docs.pool())
+                            .await
+                            .map_err(db)?;
+                    Ok(row.is_some())
+                }
+                .await
+            }
         }
     }
 
@@ -926,140 +980,150 @@ impl AnyStore {
     /// 10 000-tenant target (ADR-0001) an inventory that counted every kind
     /// of every tenant would be 7 counts per tenant on one transaction, so
     /// the counts live in `tenant_stats_one` and are paid per lookup.
-    pub fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
+    pub async fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.tenant_ids()),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg::entity::wait(async {
-                let mut rows: Vec<String> =
-                    sqlx::query_scalar("SELECT tenant_id FROM tenants ORDER BY 1")
-                        .fetch_all(p.docs.pool())
-                        .await
-                        .map_err(db)?;
-                // 5.5.10: the default Tenant implicitly exists, whether or
-                // not a row was ever written for it.
-                if !rows.iter().any(|t| t == TenantId::DEFAULT) {
-                    rows.push(TenantId::DEFAULT.to_owned());
-                    rows.sort();
+            AnyStore::Pg(p) => {
+                async {
+                    let mut rows: Vec<String> =
+                        sqlx::query_scalar("SELECT tenant_id FROM tenants ORDER BY 1")
+                            .fetch_all(p.docs.pool())
+                            .await
+                            .map_err(db)?;
+                    // 5.5.10: the default Tenant implicitly exists, whether or
+                    // not a row was ever written for it.
+                    if !rows.iter().any(|t| t == TenantId::DEFAULT) {
+                        rows.push(TenantId::DEFAULT.to_owned());
+                        rows.sort();
+                    }
+                    Ok(rows)
                 }
-                Ok(rows)
-            }),
+                .await
+            }
         }
     }
 
     /// What one tenant holds; `None` when it does not exist (5.5.10 keeps
     /// the default Tenant existing even when empty).
-    pub fn tenant_stats_one(
+    pub async fn tenant_stats_one(
         &self,
         tenant: &TenantId,
     ) -> Result<Option<antares_store::TenantStats>, NgsiError> {
-        if !self.tenant_exists(tenant)? {
+        if !self.tenant_exists(tenant).await? {
             return Ok(None);
         }
         match self {
             AnyStore::Mem(s) => Ok(Some(s.tenant_stats_one(tenant))),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg::entity::wait(async {
-                let mut tx = p.docs.pool().begin().await.map_err(db)?;
-                // the tenant setting is what the RLS-guarded counts see
-                crate::store::pg::set_tenant(&mut tx, tenant)
-                    .await
-                    .map_err(db)?;
-                let created_at: Option<String> =
-                    sqlx::query_scalar("SELECT created_at::text FROM tenants WHERE tenant_id = $1")
-                        .bind(tenant.as_str())
-                        .fetch_optional(&mut *tx)
+            AnyStore::Pg(p) => {
+                async {
+                    let mut tx = p.docs.pool().begin().await.map_err(db)?;
+                    // the tenant setting is what the RLS-guarded counts see
+                    crate::store::pg::set_tenant(&mut tx, tenant)
                         .await
                         .map_err(db)?;
-                let c: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
-                    "SELECT (SELECT count(*) FROM entities WHERE tenant_id = $1),
+                    let created_at: Option<String> = sqlx::query_scalar(
+                        "SELECT created_at::text FROM tenants WHERE tenant_id = $1",
+                    )
+                    .bind(tenant.as_str())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(db)?;
+                    let c: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+                        "SELECT (SELECT count(*) FROM entities WHERE tenant_id = $1),
                             (SELECT count(*) FROM subscriptions WHERE tenant_id = $1),
                             (SELECT count(*) FROM csource_registrations WHERE tenant_id = $1),
                             (SELECT count(*) FROM csource_subscriptions WHERE tenant_id = $1),
                             (SELECT count(*) FROM snapshots WHERE tenant_id = $1),
                             (SELECT count(*) FROM entity_map_docs WHERE tenant_id = $1),
                             (SELECT count(*) FROM dist_subs WHERE tenant_id = $1)",
-                )
-                .bind(tenant.as_str())
-                .fetch_one(&mut *tx)
+                    )
+                    .bind(tenant.as_str())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(db)?;
+                    tx.commit().await.map_err(db)?;
+                    Ok(Some(antares_store::TenantStats {
+                        tenant: tenant.as_str().to_owned(),
+                        created_at,
+                        entities: c.0 as u64,
+                        subscriptions: c.1 as u64,
+                        registrations: c.2 as u64,
+                        csource_subscriptions: c.3 as u64,
+                        snapshots: c.4 as u64,
+                        entity_maps: c.5 as u64,
+                        dist_subs: c.6 as u64,
+                    }))
+                }
                 .await
-                .map_err(db)?;
-                tx.commit().await.map_err(db)?;
-                Ok(Some(antares_store::TenantStats {
-                    tenant: tenant.as_str().to_owned(),
-                    created_at,
-                    entities: c.0 as u64,
-                    subscriptions: c.1 as u64,
-                    registrations: c.2 as u64,
-                    csource_subscriptions: c.3 as u64,
-                    snapshots: c.4 as u64,
-                    entity_maps: c.5 as u64,
-                    dist_subs: c.6 as u64,
-                }))
-            }),
+            }
         }
     }
 
     /// Purge the current-state half of one tenant in one transaction;
     /// `false` when the tenant did not exist. The default tenant's row stays.
-    pub fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+    pub async fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.purge_tenant(tenant)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg::entity::wait(async {
-                let mut tx = p.docs.pool().begin().await.map_err(db)?;
-                crate::store::pg::set_tenant(&mut tx, tenant)
-                    .await
-                    .map_err(db)?;
-                let known = sqlx::query_scalar::<_, i32>(
-                    "SELECT 1 FROM tenants WHERE tenant_id = $1 FOR UPDATE",
-                )
-                .bind(tenant.as_str())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db)?
-                .is_some();
-                if !known {
-                    return Ok(false);
-                }
-                for table in [
-                    "entities",
-                    "subscriptions",
-                    "csource_subscriptions",
-                    "csource_registrations",
-                    "csource_index",
-                    "outbox",
-                    "snapshots",
-                    "entity_map_docs",
-                    "dist_subs",
-                    "dead_letters",
-                    // ADR-0021: `tenant_id` is GENERATED from the row's kind
-                    // and owner, so a Cached row's is NULL and this DELETE
-                    // takes only what the Tenant stored itself.
-                    "jsonld_contexts",
-                ] {
-                    sqlx::query(sqlx::AssertSqlSafe(format!(
-                        "DELETE FROM {table} WHERE tenant_id = $1"
-                    )))
+            AnyStore::Pg(p) => {
+                async {
+                    let mut tx = p.docs.pool().begin().await.map_err(db)?;
+                    crate::store::pg::set_tenant(&mut tx, tenant)
+                        .await
+                        .map_err(db)?;
+                    let known = sqlx::query_scalar::<_, i32>(
+                        "SELECT 1 FROM tenants WHERE tenant_id = $1 FOR UPDATE",
+                    )
                     .bind(tenant.as_str())
-                    .execute(&mut *tx)
+                    .fetch_optional(&mut *tx)
                     .await
-                    .map_err(db)?;
-                }
-                if tenant.as_str() != TenantId::DEFAULT {
-                    sqlx::query("DELETE FROM tenants WHERE tenant_id = $1")
+                    .map_err(db)?
+                    .is_some();
+                    if !known {
+                        return Ok(false);
+                    }
+                    for table in [
+                        "entities",
+                        "subscriptions",
+                        "csource_subscriptions",
+                        "csource_registrations",
+                        "csource_index",
+                        "outbox",
+                        "snapshots",
+                        "entity_map_docs",
+                        "dist_subs",
+                        "dead_letters",
+                        // ADR-0021: `tenant_id` is GENERATED from the row's kind
+                        // and owner, so a Cached row's is NULL and this DELETE
+                        // takes only what the Tenant stored itself.
+                        "jsonld_contexts",
+                    ] {
+                        sqlx::query(sqlx::AssertSqlSafe(format!(
+                            "DELETE FROM {table} WHERE tenant_id = $1"
+                        )))
                         .bind(tenant.as_str())
                         .execute(&mut *tx)
                         .await
                         .map_err(db)?;
+                    }
+                    if tenant.as_str() != TenantId::DEFAULT {
+                        sqlx::query("DELETE FROM tenants WHERE tenant_id = $1")
+                            .bind(tenant.as_str())
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(db)?;
+                    }
+                    tx.commit().await.map_err(db)?;
+                    Ok(true)
                 }
-                tx.commit().await.map_err(db)?;
-                Ok(true)
-            }),
+                .await
+            }
         }
     }
 
-    pub fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
+    pub async fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.subscription_tenants()),
             // Pg answers the superset the contract allows: every known
@@ -1070,18 +1134,21 @@ impl AnyStore {
             // is sent with. The callers list per tenant under set_tenant
             // afterwards, so the extra names cost one empty list each.
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg::entity::wait(async {
-                let rows =
-                    sqlx::query_scalar::<_, String>("SELECT tenant_id FROM tenants ORDER BY 1")
-                        .fetch_all(p.docs.pool())
-                        .await
-                        .map_err(db)?;
-                Ok(rows)
-            }),
+            AnyStore::Pg(p) => {
+                async {
+                    let rows =
+                        sqlx::query_scalar::<_, String>("SELECT tenant_id FROM tenants ORDER BY 1")
+                            .fetch_all(p.docs.pool())
+                            .await
+                            .map_err(db)?;
+                    Ok(rows)
+                }
+                .await
+            }
         }
     }
 
-    pub fn context_put(
+    pub async fn context_put(
         &self,
         tenant: Option<&TenantId>,
         id: &str,
@@ -1107,12 +1174,15 @@ impl AnyStore {
                     .and_then(Value::as_str)
                     .unwrap_or("Cached")
                     .to_owned();
-                p.docs.context_put(tenant, id, &doc, &kind).map_err(db)
+                p.docs
+                    .context_put(tenant, id, &doc, &kind)
+                    .await
+                    .map_err(db)
             }
         }
     }
 
-    pub fn context_get(
+    pub async fn context_get(
         &self,
         tenant: Option<&TenantId>,
         id: &str,
@@ -1120,23 +1190,30 @@ impl AnyStore {
         match self {
             AnyStore::Mem(s) => Ok(s.context_get(tenant, id)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.docs.context_get(tenant, id).map_err(db),
+            AnyStore::Pg(p) => p.docs.context_get(tenant, id).await.map_err(db),
         }
     }
 
-    pub fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
+    pub async fn context_delete(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+    ) -> Result<bool, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.context_delete(tenant, id)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.docs.context_delete(tenant, id).map_err(db),
+            AnyStore::Pg(p) => p.docs.context_delete(tenant, id).await.map_err(db),
         }
     }
 
-    pub fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
+    pub async fn context_list_meta(
+        &self,
+        tenant: Option<&TenantId>,
+    ) -> Result<Vec<Value>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.context_list_meta(tenant)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.docs.context_list_meta(tenant).map_err(db),
+            AnyStore::Pg(p) => p.docs.context_list_meta(tenant).await.map_err(db),
         }
     }
 }
@@ -1205,9 +1282,10 @@ mod db_error_tests {
 // the inherent methods above. New backends implement the traits directly —
 // this enum stays an implementation detail of the built-in backends, no
 // longer the API surface.
+#[async_trait::async_trait]
 impl antares_store::CurrentStateDriver for AnyStore {
-    fn ping(&self) -> Result<(), NgsiError> {
-        AnyStore::ping(self)
+    async fn ping(&self) -> Result<(), NgsiError> {
+        AnyStore::ping(self).await
     }
     fn commit_queue(&self) -> Option<(usize, usize)> {
         AnyStore::commit_queue(self)
@@ -1215,8 +1293,8 @@ impl antares_store::CurrentStateDriver for AnyStore {
     fn version_info(&self) -> Value {
         AnyStore::version_info(self)
     }
-    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(AnyStore::close(self))
+    async fn close(&self) {
+        AnyStore::close(self).await;
     }
     fn set_change_hook(&self, h: super::ChangeHook) {
         AnyStore::set_change_hook(self, h);
@@ -1224,118 +1302,127 @@ impl antares_store::CurrentStateDriver for AnyStore {
     fn set_outbox(&self, on: bool) {
         AnyStore::set_outbox(self, on);
     }
-    fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, Value)>, NgsiError> {
-        AnyStore::outbox_peek(self, limit)
+    async fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, Value)>, NgsiError> {
+        AnyStore::outbox_peek(self, limit).await
     }
-    fn outbox_ack(&self, seqs: &[i64]) -> Result<u64, NgsiError> {
-        AnyStore::outbox_ack(self, seqs)
+    async fn outbox_ack(&self, seqs: &[i64]) -> Result<u64, NgsiError> {
+        AnyStore::outbox_ack(self, seqs).await
     }
-    fn create(
+    async fn create(
         &self,
         tenant: &TenantId,
         kind: Kind,
         id: &str,
         doc: Value,
     ) -> Result<bool, NgsiError> {
-        AnyStore::create(self, tenant, kind, id, doc)
+        AnyStore::create(self, tenant, kind, id, doc).await
     }
-    fn batch_create(
+    async fn batch_create(
         &self,
         tenant: &TenantId,
         items: Vec<(String, Value)>,
     ) -> Result<Vec<bool>, NgsiError> {
-        AnyStore::batch_create(self, tenant, items)
+        AnyStore::batch_create(self, tenant, items).await
     }
-    fn batch_delete(&self, tenant: &TenantId, ids: &[String]) -> Result<Vec<bool>, NgsiError> {
-        AnyStore::batch_delete(self, tenant, ids)
+    async fn batch_delete(
+        &self,
+        tenant: &TenantId,
+        ids: &[String],
+    ) -> Result<Vec<bool>, NgsiError> {
+        AnyStore::batch_delete(self, tenant, ids).await
     }
-    fn batch_upsert(
+    async fn batch_upsert(
         &self,
         tenant: &TenantId,
         items: Vec<(String, Value)>,
     ) -> Result<Vec<bool>, NgsiError> {
-        AnyStore::batch_upsert(self, tenant, items)
+        AnyStore::batch_upsert(self, tenant, items).await
     }
-    fn upsert(
+    async fn upsert(
         &self,
         tenant: &TenantId,
         kind: Kind,
         id: &str,
         doc: Value,
     ) -> Result<bool, NgsiError> {
-        AnyStore::upsert(self, tenant, kind, id, doc)
+        AnyStore::upsert(self, tenant, kind, id, doc).await
     }
-    fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
-        AnyStore::get(self, tenant, kind, id)
+    async fn get(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+    ) -> Result<Option<Value>, NgsiError> {
+        AnyStore::get(self, tenant, kind, id).await
     }
-    fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
-        AnyStore::delete(self, tenant, kind, id)
+    async fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
+        AnyStore::delete(self, tenant, kind, id).await
     }
-    fn delete_entity_if(
+    async fn delete_entity_if(
         &self,
         tenant: &TenantId,
         id: &str,
-        keep: &dyn Fn(&Value) -> bool,
+        keep: &(dyn for<'v> Fn(&'v Value) -> bool + Sync),
     ) -> Result<bool, NgsiError> {
-        AnyStore::delete_entity_if(self, tenant, id, keep)
+        AnyStore::delete_entity_if(self, tenant, id, keep).await
     }
-    fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
-        AnyStore::list(self, tenant, kind)
+    async fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
+        AnyStore::list(self, tenant, kind).await
     }
-    fn list_page(
+    async fn list_page(
         &self,
         tenant: &TenantId,
         kind: Kind,
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Value>, NgsiError> {
-        AnyStore::list_page(self, tenant, kind, after, limit)
+        AnyStore::list_page(self, tenant, kind, after, limit).await
     }
-    fn list_slice(
+    async fn list_slice(
         &self,
         tenant: &TenantId,
         kind: Kind,
         offset: usize,
         limit: usize,
     ) -> Result<(Vec<Value>, usize), NgsiError> {
-        AnyStore::list_slice(self, tenant, kind, offset, limit)
+        AnyStore::list_slice(self, tenant, kind, offset, limit).await
     }
-    fn matching_registrations(
+    async fn matching_registrations(
         &self,
         tenant: &TenantId,
         ids: Option<&[String]>,
         types: Option<&[String]>,
     ) -> Result<Vec<Value>, NgsiError> {
-        AnyStore::matching_registrations(self, tenant, ids, types)
+        AnyStore::matching_registrations(self, tenant, ids, types).await
     }
-    fn query_entities(
+    async fn query_entities(
         &self,
         tenant: &TenantId,
         f: &crate::store::filter::EntityFilter<'_>,
     ) -> Result<crate::store::filter::QueryOutcome, NgsiError> {
-        AnyStore::query_entities(self, tenant, f)
+        AnyStore::query_entities(self, tenant, f).await
     }
-    fn mutate_boxed<'a>(
+    async fn mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         kind: Kind,
         id: &str,
         f: antares_store::MutateFn<'a>,
     ) -> Result<Option<Result<(), ()>>, NgsiError> {
-        AnyStore::mutate(self, tenant, kind, id, f)
+        AnyStore::mutate(self, tenant, kind, id, f).await
     }
-    fn batch_mutate_boxed<'a>(
+    async fn batch_mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         ids: &[String],
         mut f: antares_store::BatchMutateFn<'a>,
     ) -> Result<Vec<Option<Result<(), ()>>>, NgsiError> {
-        AnyStore::batch_mutate(self, tenant, ids, |id, v| f(id, v))
+        AnyStore::batch_mutate(self, tenant, ids, |id, v| f(id, v)).await
     }
     /// The Postgres arm answers this in ONE statement (see
     /// `pg::doc::record_delivery`); every other arm runs the shared rule as a
     /// `mutate`, which is what the one statement is a translation of.
-    fn record_delivery(
+    async fn record_delivery(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -1348,113 +1435,129 @@ impl antares_store::CurrentStateDriver for AnyStore {
         #[cfg(feature = "postgres")]
         {
             if let (AnyStore::Pg(p), Ok(dk)) = (self, doc_kind(kind)) {
-                let found = p.docs.record_delivery(tenant, dk, id, now).map_err(db)?;
+                let found = p
+                    .docs
+                    .record_delivery(tenant, dk, id, now)
+                    .await
+                    .map_err(db)?;
                 return Ok(
                     found.map(|(doc, prev_success)| antares_store::Delivery { doc, prev_success })
                 );
             }
         }
-        antares_store::record_delivery_via_mutate(self, tenant, kind, id, now)
+        antares_store::record_delivery_via_mutate(self, tenant, kind, id, now).await
     }
-    fn sweep_expired(&self) -> usize {
+    async fn sweep_expired(&self) -> usize {
         AnyStore::sweep_expired(self)
     }
-    fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
-        AnyStore::tenant_exists(self, tenant)
+    async fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        AnyStore::tenant_exists(self, tenant).await
     }
-    fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
-        AnyStore::subscription_tenants(self)
+    async fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
+        AnyStore::subscription_tenants(self).await
     }
-    fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
-        AnyStore::tenant_ids(self)
+    async fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
+        AnyStore::tenant_ids(self).await
     }
-    fn tenant_stats_one(
+    async fn tenant_stats_one(
         &self,
         tenant: &TenantId,
     ) -> Result<Option<antares_store::TenantStats>, NgsiError> {
-        AnyStore::tenant_stats_one(self, tenant)
+        AnyStore::tenant_stats_one(self, tenant).await
     }
-    fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
-        AnyStore::purge_tenant(self, tenant)
+    async fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        AnyStore::purge_tenant(self, tenant).await
     }
-    fn context_put(
+    async fn context_put(
         &self,
         tenant: Option<&TenantId>,
         id: &str,
         doc: Value,
     ) -> Result<(), NgsiError> {
-        AnyStore::context_put(self, tenant, id, doc)
+        AnyStore::context_put(self, tenant, id, doc).await
     }
-    fn context_get(&self, tenant: Option<&TenantId>, id: &str) -> Result<Option<Value>, NgsiError> {
-        AnyStore::context_get(self, tenant, id)
+    async fn context_get(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+    ) -> Result<Option<Value>, NgsiError> {
+        AnyStore::context_get(self, tenant, id).await
     }
-    fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
-        AnyStore::context_delete(self, tenant, id)
+    async fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
+        AnyStore::context_delete(self, tenant, id).await
     }
-    fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
-        AnyStore::context_list_meta(self, tenant)
+    async fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
+        AnyStore::context_list_meta(self, tenant).await
     }
 }
 
+#[async_trait::async_trait]
 impl antares_store::TemporalDriver for AnyStore {
-    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(AnyStore::close(self))
+    async fn close(&self) {
+        AnyStore::close(self).await;
     }
     fn version_info(&self) -> Value {
         AnyStore::version_info(self)
     }
-    fn attr_instance_count(&self, tenant: &TenantId) -> Result<u64, NgsiError> {
+    async fn attr_instance_count(&self, tenant: &TenantId) -> Result<u64, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.attr_instance_count(tenant)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg::entity::wait(async {
-                let mut tx = p.docs.pool().begin().await.map_err(db)?;
-                crate::store::pg::set_tenant(&mut tx, tenant)
-                    .await
-                    .map_err(db)?;
-                let n: i64 =
-                    sqlx::query_scalar("SELECT count(*) FROM attr_instances WHERE tenant_id = $1")
-                        .bind(tenant.as_str())
-                        .fetch_one(&mut *tx)
+            AnyStore::Pg(p) => {
+                async {
+                    let mut tx = p.docs.pool().begin().await.map_err(db)?;
+                    crate::store::pg::set_tenant(&mut tx, tenant)
                         .await
                         .map_err(db)?;
-                Ok(n as u64)
-            }),
+                    let n: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM attr_instances WHERE tenant_id = $1",
+                    )
+                    .bind(tenant.as_str())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(db)?;
+                    Ok(n as u64)
+                }
+                .await
+            }
         }
     }
-    fn purge_tenant(&self, tenant: &TenantId) -> Result<(), NgsiError> {
+    async fn purge_tenant(&self, tenant: &TenantId) -> Result<(), NgsiError> {
         match self {
             AnyStore::Mem(s) => {
                 s.purge_kinds(tenant, &[Kind::Temporal]);
                 Ok(())
             }
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg::entity::wait(async {
-                let mut tx = p.docs.pool().begin().await.map_err(db)?;
-                crate::store::pg::set_tenant(&mut tx, tenant)
-                    .await
-                    .map_err(db)?;
-                for table in ["attr_instances", "temporal_entities"] {
-                    sqlx::query(sqlx::AssertSqlSafe(format!(
-                        "DELETE FROM {table} WHERE tenant_id = $1"
-                    )))
-                    .bind(tenant.as_str())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(db)?;
+            AnyStore::Pg(p) => {
+                async {
+                    let mut tx = p.docs.pool().begin().await.map_err(db)?;
+                    crate::store::pg::set_tenant(&mut tx, tenant)
+                        .await
+                        .map_err(db)?;
+                    for table in ["attr_instances", "temporal_entities"] {
+                        sqlx::query(sqlx::AssertSqlSafe(format!(
+                            "DELETE FROM {table} WHERE tenant_id = $1"
+                        )))
+                        .bind(tenant.as_str())
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db)?;
+                    }
+                    tx.commit().await.map_err(db)
                 }
-                tx.commit().await.map_err(db)
-            }),
+                .await
+            }
         }
     }
-    fn temporal_append(
+    async fn temporal_append(
         &self,
         tenant: &TenantId,
         id: &str,
         shell: &Value,
         additions: &Value,
     ) -> Result<(), NgsiError> {
-        AnyStore::temporal_append(self, tenant, id, shell, additions)
+        AnyStore::temporal_append(self, tenant, id, shell, additions).await
     }
     /// Only the Postgres arm pages in SQL, and only an exact prefilter
     /// makes that page the evaluator's page; the memory arm answers
@@ -1475,43 +1578,43 @@ impl antares_store::TemporalDriver for AnyStore {
             AnyStore::Pg(_) => crate::compile::qprefilter::prefilter_exact(q, range, expand),
         }
     }
-    fn query_temporal(
+    async fn query_temporal(
         &self,
         tenant: &TenantId,
         f: &crate::store::filter::TemporalFilter<'_>,
     ) -> Result<crate::store::filter::TemporalOutcome, NgsiError> {
-        AnyStore::query_temporal(self, tenant, f)
+        AnyStore::query_temporal(self, tenant, f).await
     }
-    fn get_temporal(
+    async fn get_temporal(
         &self,
         tenant: &TenantId,
         id: &str,
         f: &crate::store::filter::TemporalFilter<'_>,
     ) -> Result<Option<Value>, NgsiError> {
-        AnyStore::get_temporal(self, tenant, id, f)
+        AnyStore::get_temporal(self, tenant, id, f).await
     }
-    fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, NgsiError> {
-        AnyStore::get(self, tenant, Kind::Temporal, id)
+    async fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, NgsiError> {
+        AnyStore::get(self, tenant, Kind::Temporal, id).await
     }
-    fn create(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
-        AnyStore::create(self, tenant, Kind::Temporal, id, doc)
+    async fn create(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
+        AnyStore::create(self, tenant, Kind::Temporal, id, doc).await
     }
-    fn upsert(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
-        AnyStore::upsert(self, tenant, Kind::Temporal, id, doc)
+    async fn upsert(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
+        AnyStore::upsert(self, tenant, Kind::Temporal, id, doc).await
     }
-    fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, NgsiError> {
-        AnyStore::delete(self, tenant, Kind::Temporal, id)
+    async fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, NgsiError> {
+        AnyStore::delete(self, tenant, Kind::Temporal, id).await
     }
-    fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, NgsiError> {
-        AnyStore::list(self, tenant, Kind::Temporal)
+    async fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, NgsiError> {
+        AnyStore::list(self, tenant, Kind::Temporal).await
     }
-    fn mutate_boxed<'a>(
+    async fn mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         id: &str,
         f: antares_store::MutateFn<'a>,
     ) -> Result<Option<Result<(), ()>>, NgsiError> {
-        AnyStore::mutate(self, tenant, Kind::Temporal, id, f)
+        AnyStore::mutate(self, tenant, Kind::Temporal, id, f).await
     }
 }
 
@@ -1520,23 +1623,26 @@ mod temporal_only_tests {
     use super::*;
     use antares_model::TenantId;
 
-    fn append(store: &AnyStore) -> Option<Value> {
+    async fn append(store: &AnyStore) -> Option<Value> {
         let t = TenantId::new("combo").expect("tenant");
         let shell = serde_json::json!({"id": "urn:a", "type": ["T"]});
         let adds = serde_json::json!({"speed": [{"instanceId": "urn:i:1", "value": 1}]});
         store
             .temporal_append(&t, "urn:a", &shell, &adds)
+            .await
             .expect("append");
-        store.get(&t, Kind::Temporal, "urn:a").expect("get")
+        store.get(&t, Kind::Temporal, "urn:a").await.expect("get")
     }
 
     /// A shared instance records only for an entity it holds (5.6.6 delete
     /// overlap); the temporal half of a mixed deployment records
     /// unconditionally, since the entities live elsewhere.
-    #[test]
-    fn a_temporal_only_instance_records_without_the_entity() {
-        assert!(append(&AnyStore::Mem(Store::default())).is_none());
-        let doc = append(&AnyStore::Mem(Store::default()).temporal_only()).expect("recorded");
+    #[tokio::test]
+    async fn a_temporal_only_instance_records_without_the_entity() {
+        assert!(append(&AnyStore::Mem(Store::default())).await.is_none());
+        let doc = append(&AnyStore::Mem(Store::default()).temporal_only())
+            .await
+            .expect("recorded");
         assert_eq!(doc["speed"][0]["value"], 1);
     }
 }

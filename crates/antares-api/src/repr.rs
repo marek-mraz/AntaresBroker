@@ -747,7 +747,7 @@ impl JoinWalk {
 /// target under an "entity" member (normalized) or replace the object URI by
 /// the linked entity representation (simplified). Operates on COMPACTED docs.
 /// Returns false when 4.5.23.1 truncated the walk (loop, duplicate, budget).
-pub fn inline_join(
+pub async fn inline_join(
     st: &AppState,
     tenant: &TenantId,
     ctx: &antares_jsonld::Context,
@@ -758,12 +758,13 @@ pub fn inline_join(
     inline_join_beyond(st, tenant, ctx, repr, compacted, level, &[], &mut {
         MAX_JOIN_LOOKUPS
     })
+    .await
 }
 
 /// Same, continuing an Entity Graph the client is already holding: the
 /// `containedBy` ids count as encountered (Table 6.4.3.2-1).
 #[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
-pub fn inline_join_beyond(
+pub async fn inline_join_beyond(
     st: &AppState,
     tenant: &TenantId,
     ctx: &antares_jsonld::Context,
@@ -778,12 +779,12 @@ pub fn inline_join_beyond(
         contained_by,
         *budget,
     );
-    inline_join_walk(st, tenant, ctx, repr, compacted, level, &mut walk);
+    inline_join_walk(st, tenant, ctx, repr, compacted, level, &mut walk).await;
     *budget = walk.budget;
     walk.complete
 }
 
-fn inline_join_walk(
+async fn inline_join_walk(
     st: &AppState,
     tenant: &TenantId,
     ctx: &antares_jsonld::Context,
@@ -801,11 +802,15 @@ fn inline_join_walk(
             continue;
         }
         let child = joined_repr(repr, k, &ctx.expand_key(k));
-        inline_join_value(st, tenant, ctx, repr, &child, v, level, walk);
+        // boxed: an async fn cannot recurse inline
+        Box::pin(inline_join_value(
+            st, tenant, ctx, repr, &child, v, level, walk,
+        ))
+        .await;
     }
 }
 
-fn lookup_joined(
+async fn lookup_joined(
     st: &AppState,
     tenant: &TenantId,
     ctx: &antares_jsonld::Context,
@@ -819,12 +824,17 @@ fn lookup_joined(
         return None;
     }
     walk.budget -= 1;
-    let target = st.store.get(tenant, Kind::Entity, id).ok().flatten()?;
+    let target = st
+        .store
+        .get(tenant, Kind::Entity, id)
+        .await
+        .ok()
+        .flatten()?;
     let shaped = apply(&target, child);
     let mut c = compact_for(child, &shaped, ctx);
     if level > 1 {
         if walk.seen.insert(id.to_owned()) {
-            inline_join_walk(st, tenant, ctx, child, &mut c, level - 1, walk);
+            inline_join_walk(st, tenant, ctx, child, &mut c, level - 1, walk).await;
         } else {
             // 4.5.23.1: an already-resolved target is a loop or a duplicate —
             // it is still embedded, but its own links are not walked again.
@@ -835,7 +845,7 @@ fn lookup_joined(
 }
 
 #[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
-fn inline_join_value(
+async fn inline_join_value(
     st: &AppState,
     tenant: &TenantId,
     ctx: &antares_jsonld::Context,
@@ -848,7 +858,11 @@ fn inline_join_value(
     match v {
         Value::Array(items) => {
             for i in items {
-                inline_join_value(st, tenant, ctx, repr, child, i, level, walk);
+                // boxed: an async fn cannot recurse inline
+                Box::pin(inline_join_value(
+                    st, tenant, ctx, repr, child, i, level, walk,
+                ))
+                .await;
             }
         }
         Value::Object(inst) => {
@@ -871,7 +885,7 @@ fn inline_join_value(
                     .collect();
                 let mut joined: Vec<Value> = Vec::new();
                 for id in &targets {
-                    if let Some(j) = lookup_joined(st, tenant, ctx, child, id, level, walk) {
+                    if let Some(j) = lookup_joined(st, tenant, ctx, child, id, level, walk).await {
                         joined.push(j);
                     }
                 }
@@ -891,7 +905,7 @@ fn inline_join_value(
             };
             let mut joined: Vec<Value> = Vec::new();
             for id in &targets {
-                if let Some(j) = lookup_joined(st, tenant, ctx, child, id, level, walk) {
+                if let Some(j) = lookup_joined(st, tenant, ctx, child, id, level, walk).await {
                     joined.push(j);
                 }
             }
@@ -907,7 +921,7 @@ fn inline_join_value(
         }
         // simplified: relationship value is the object URI string
         Value::String(id) if repr.key_values => {
-            if let Some(joined) = lookup_joined(st, tenant, ctx, child, id, level, walk) {
+            if let Some(joined) = lookup_joined(st, tenant, ctx, child, id, level, walk).await {
                 *v = joined;
             }
         }
@@ -920,7 +934,7 @@ fn inline_join_value(
 /// already in the flattened array, so 4.5.23.1 ("avoid ... duplicates or
 /// loops") keeps it out of `out` even when a Relationship points back at it.
 /// Returns false when the walk was truncated by the lookup budget.
-pub fn collect_flat(
+pub async fn collect_flat(
     st: &AppState,
     tenant: &TenantId,
     repr: &crate::repr::Repr,
@@ -931,12 +945,13 @@ pub fn collect_flat(
     collect_flat_beyond(st, tenant, repr, internal_doc, level, out, &[], &mut {
         MAX_JOIN_LOOKUPS
     })
+    .await
 }
 
 /// Same, continuing an Entity Graph the client is already holding: the
 /// `containedBy` ids count as encountered (Table 6.4.3.2-1).
 #[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
-pub fn collect_flat_beyond(
+pub async fn collect_flat_beyond(
     st: &AppState,
     tenant: &TenantId,
     repr: &crate::repr::Repr,
@@ -952,13 +967,13 @@ pub fn collect_flat_beyond(
         *budget,
     );
     walk.seen.extend(out.keys().cloned());
-    collect_flat_walk(st, tenant, repr, internal_doc, level, out, &mut walk);
+    collect_flat_walk(st, tenant, repr, internal_doc, level, out, &mut walk).await;
     *budget = walk.budget;
     walk.complete
 }
 
 #[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
-fn collect_flat_walk(
+async fn collect_flat_walk(
     st: &AppState,
     tenant: &TenantId,
     repr: &crate::repr::Repr,
@@ -1015,11 +1030,21 @@ fn collect_flat_walk(
                     return;
                 }
                 walk.budget -= 1;
-                if let Some(target) = st.store.get(tenant, Kind::Entity, id).ok().flatten() {
+                if let Some(target) = st.store.get(tenant, Kind::Entity, id).await.ok().flatten() {
                     walk.seen.insert(id.to_owned());
                     out.insert(id.to_owned(), (target.clone(), child.clone()));
                     if level > 1 {
-                        collect_flat_walk(st, tenant, &child, &target, level - 1, out, walk);
+                        // boxed: an async fn cannot recurse inline
+                        Box::pin(collect_flat_walk(
+                            st,
+                            tenant,
+                            &child,
+                            &target,
+                            level - 1,
+                            out,
+                            walk,
+                        ))
+                        .await;
                     }
                 }
             }

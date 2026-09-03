@@ -93,7 +93,9 @@ pub async fn upsert_temporal(
             &parsed.ctx,
             &params,
             &headers,
-        )? {
+        )
+        .await?
+        {
             crate::federation::WritePlan::Answered(r) => return Ok(*r),
             crate::federation::WritePlan::Forward(regs) => regs,
         };
@@ -116,7 +118,7 @@ pub async fn upsert_temporal(
             let (rest, has_attrs) = crate::federation::strip_proxied(obj, &proxies, &parsed.ctx);
             if has_attrs || proxies.is_empty() {
                 let local = expand_entity(&rest, &parsed.ctx, TEMPORAL_OPTS)?;
-                let status = upsert_temporal_local(&st, &tenant, &id, local)?;
+                let status = upsert_temporal_local(&st, &tenant, &id, local).await?;
                 parts.push(crate::federation::Part {
                     status: status.as_u16(),
                     detail: "local temporal upsert".into(),
@@ -151,7 +153,7 @@ pub async fn upsert_temporal(
                 &tenant,
             ));
         }
-        let status = upsert_temporal_local(&st, &tenant, &id, expanded)?;
+        let status = upsert_temporal_local(&st, &tenant, &id, expanded).await?;
         Ok::<_, ApiError>(if status == StatusCode::CREATED {
             created(
                 format!(
@@ -170,7 +172,7 @@ pub async fn upsert_temporal(
 /// 5.6.11.4 local half: create the Temporal Evolution, or add the provided
 /// instances to the existing one per 5.6.12 (merge key = datasetId +
 /// observedAt) with Entity Type names unioned. Returns 201 vs 204.
-fn upsert_temporal_local(
+async fn upsert_temporal_local(
     st: &AppState,
     tenant: &antares_model::TenantId,
     id: &str,
@@ -188,86 +190,89 @@ fn upsert_temporal_local(
         if attempts > 16 {
             return Err(NgsiError::InternalError("upsert retry storm".into()).into());
         }
-        let existed = st.temporal.get(tenant, id)?.is_some();
+        let existed = st.temporal.get(tenant, id).await?.is_some();
         if existed {
-            let res = st.temporal.mutate(tenant, id, |doc| {
-                let target = antares_store::stored_object(doc)?;
-                // 5.6.11.4: new Entity Type names are added to the target
-                if let Some(new_types) = expanded.get("type").and_then(Value::as_array) {
-                    let mut cur: Vec<Value> = target
-                        .get("type")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    for t in new_types {
-                        if !cur.contains(t) {
-                            cur.push(t.clone());
-                        }
-                    }
-                    target.insert("type".into(), Value::Array(cur));
-                }
-                for (k, v) in antares_jsonld::expanded_object(&expanded)? {
-                    if is_meta(k) {
-                        continue;
-                    }
-                    let incoming = v.as_array().cloned().unwrap_or_default();
-                    match target.get_mut(k).and_then(Value::as_array_mut) {
-                        Some(cur) => {
-                            // 5.6.11: instances merge by (datasetId, observedAt)
-                            for ni in incoming {
-                                let key = (
-                                    ni.get("datasetId")
-                                        .and_then(Value::as_str)
-                                        .map(String::from),
-                                    ni.get("observedAt")
-                                        .and_then(Value::as_str)
-                                        .map(String::from),
-                                );
-                                let pos = cur.iter().position(|ci| {
-                                    (
-                                        ci.get("datasetId")
-                                            .and_then(Value::as_str)
-                                            .map(String::from),
-                                        ci.get("observedAt")
-                                            .and_then(Value::as_str)
-                                            .map(String::from),
-                                    ) == key
-                                        && key.1.is_some()
-                                });
-                                match pos {
-                                    // A correction, not a new instance: it
-                                    // keeps the instanceId its client was
-                                    // handed and the createdAt it was created
-                                    // at, which is 5.6.14.4's rule for the
-                                    // same kind of in-place change ("The
-                                    // createdAt property of the concerned
-                                    // instance shall remain unchanged").
-                                    // `stamp_temporal_instances` has already put a
-                                    // fresh pair on the incoming instance.
-                                    Some(p) => {
-                                        let mut ni = ni;
-                                        for keep in ["instanceId", "createdAt"] {
-                                            let Some(had) = cur[p].get(keep).cloned() else {
-                                                continue;
-                                            };
-                                            if let Some(o) = ni.as_object_mut() {
-                                                o.insert(keep.to_owned(), had);
-                                            }
-                                        }
-                                        cur[p] = ni;
-                                    }
-                                    None => cur.push(ni),
-                                }
+            let res = st
+                .temporal
+                .mutate(tenant, id, |doc| {
+                    let target = antares_store::stored_object(doc)?;
+                    // 5.6.11.4: new Entity Type names are added to the target
+                    if let Some(new_types) = expanded.get("type").and_then(Value::as_array) {
+                        let mut cur: Vec<Value> = target
+                            .get("type")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        for t in new_types {
+                            if !cur.contains(t) {
+                                cur.push(t.clone());
                             }
                         }
-                        None => {
-                            target.insert(k.clone(), Value::Array(incoming));
+                        target.insert("type".into(), Value::Array(cur));
+                    }
+                    for (k, v) in antares_jsonld::expanded_object(&expanded)? {
+                        if is_meta(k) {
+                            continue;
+                        }
+                        let incoming = v.as_array().cloned().unwrap_or_default();
+                        match target.get_mut(k).and_then(Value::as_array_mut) {
+                            Some(cur) => {
+                                // 5.6.11: instances merge by (datasetId, observedAt)
+                                for ni in incoming {
+                                    let key = (
+                                        ni.get("datasetId")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
+                                        ni.get("observedAt")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
+                                    );
+                                    let pos = cur.iter().position(|ci| {
+                                        (
+                                            ci.get("datasetId")
+                                                .and_then(Value::as_str)
+                                                .map(String::from),
+                                            ci.get("observedAt")
+                                                .and_then(Value::as_str)
+                                                .map(String::from),
+                                        ) == key
+                                            && key.1.is_some()
+                                    });
+                                    match pos {
+                                        // A correction, not a new instance: it
+                                        // keeps the instanceId its client was
+                                        // handed and the createdAt it was created
+                                        // at, which is 5.6.14.4's rule for the
+                                        // same kind of in-place change ("The
+                                        // createdAt property of the concerned
+                                        // instance shall remain unchanged").
+                                        // `stamp_temporal_instances` has already put a
+                                        // fresh pair on the incoming instance.
+                                        Some(p) => {
+                                            let mut ni = ni;
+                                            for keep in ["instanceId", "createdAt"] {
+                                                let Some(had) = cur[p].get(keep).cloned() else {
+                                                    continue;
+                                                };
+                                                if let Some(o) = ni.as_object_mut() {
+                                                    o.insert(keep.to_owned(), had);
+                                                }
+                                            }
+                                            cur[p] = ni;
+                                        }
+                                        None => cur.push(ni),
+                                    }
+                                }
+                            }
+                            None => {
+                                target.insert(k.clone(), Value::Array(incoming));
+                            }
                         }
                     }
-                }
-                target.insert("modifiedAt".into(), Value::String(ts.clone()));
-                Ok::<(), NgsiError>(())
-            })?;
+                    target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                    Ok::<(), NgsiError>(())
+                })
+                .await?;
             match res {
                 Some(Err(e)) => return Err(ApiError::from(e)),
                 Some(Ok(())) => return Ok(StatusCode::NO_CONTENT),
@@ -279,7 +284,7 @@ fn upsert_temporal_local(
                 o.insert("createdAt".into(), Value::String(ts.clone()));
                 o.insert("modifiedAt".into(), Value::String(ts.clone()));
             }
-            if st.temporal.create(tenant, id, doc)? {
+            if st.temporal.create(tenant, id, doc).await? {
                 return Ok(StatusCode::CREATED);
             }
             // lost the create race - the doc exists now; retry as a merge
@@ -1391,7 +1396,8 @@ async fn query_temporal_outer(
         return query_temporal_inner(st, &params, headers, &filter).await;
     };
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
-    let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, headers, &map_id) else {
+    let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, headers, &map_id).await
+    else {
         params.insert("entityMap".into(), "true".into());
         return query_temporal_inner(st, &params, headers, &filter).await;
     };
@@ -1446,7 +1452,7 @@ async fn query_temporal_outer(
             emap.remove(&k);
         }
     }
-    crate::entity_map::map_put(st, &tenant, map.clone())?;
+    crate::entity_map::map_put(st, &tenant, map.clone()).await?;
     // fix the query to the candidates that survived the recheck (5.5.14)
     let ids: Vec<&str> = candidates
         .iter()
@@ -1472,7 +1478,7 @@ async fn query_temporal_outer(
 /// touched: the filter must qualify, Linked Entity conditions are not
 /// defined for it, a context source filter must parse, and ordering may
 /// name only `id` and only where the execution stays local (4.23.1).
-fn check_temporal_query(
+async fn check_temporal_query(
     st: &AppState,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
@@ -1520,7 +1526,7 @@ fn check_temporal_query(
     // applied to distributed operations." The subject is the EXECUTION, so a
     // query nothing would federate to orders without `local=true`.
     if let Some(spec) = params.get("orderBy") {
-        if crate::federation::would_federate(st, tenant, ctx, params, headers)? {
+        if crate::federation::would_federate(st, tenant, ctx, params, headers).await? {
             return Err(NgsiError::BadRequestData(
                 "orderBy requires local scope — ordering is never applied to \
                  distributed operations (5.7.4.4, 4.23.1)"
@@ -1773,7 +1779,7 @@ pub(crate) async fn query_temporal_inner(
             &ctx,
         )
     });
-    check_temporal_query(st, params, headers, &tenant, &ctx, q_ast.as_ref())?;
+    check_temporal_query(st, params, headers, &tenant, &ctx, q_ast.as_ref()).await?;
     // ADR-0020: the engine's narrowing joins the request's own filters after
     // 5.7.4.4's "too wide" judgement, which is about what the client asked
     // for. Everything below reads the narrowed query, the forward included.
@@ -1861,7 +1867,7 @@ pub(crate) async fn query_temporal_inner(
         && params.get("datasetId").is_none()
         && params.get("pick").is_none()
         && p_limit > 0
-        && !crate::federation::would_federate(st, &tenant, &ctx, params, headers)?;
+        && !crate::federation::would_federate(st, &tenant, &ctx, params, headers).await?;
     // 4.5.19 computed by the store: the numeric bucket matrix per attribute
     // comes back aggregated when nothing after the store call could change
     // the answer — every filter exact in SQL, the page pushed, no
@@ -1918,7 +1924,7 @@ pub(crate) async fn query_temporal_inner(
                 anchor: tq.as_ref().map(|t| t.time_at.as_str()),
             }),
         };
-        st.temporal.query_temporal(&tenant, &tf)?
+        st.temporal.query_temporal(&tenant, &tf).await?
     };
     if outcome.aggregated {
         return respond_aggregated(
@@ -2212,7 +2218,7 @@ async fn retrieve_temporal_inner(
             .as_ref()
             .map_or("observedAt", |t| t.timeproperty.as_str())
             .to_owned();
-        let local = st.temporal.get_temporal(&tenant, id, &tf)?;
+        let local = st.temporal.get_temporal(&tenant, id, &tf).await?;
         // 5.7.3.4: forward to matching retrieveTemporal registrations and
         // merge the remote instance data (4.5.5; auxiliary instances only
         // fill timestamps absent elsewhere)
@@ -2429,11 +2435,11 @@ pub async fn delete_temporal(
         // unsupported proxy modes are Conflict.
         let ctx = st.loader.core();
         gate!(st, &tenant, &headers, "5.6.16", ids: &[&id]).await?;
-        let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
+        let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id).await {
             Ok(regs) => regs,
             Err(refused) => return Ok(*refused),
         };
-        let deleted = st.temporal.delete(&tenant, &id)?;
+        let deleted = st.temporal.delete(&tenant, &id).await?;
         answer_temporal_attr_write(
             &st,
             &tenant,
@@ -2502,7 +2508,9 @@ pub async fn add_temporal_attrs(
             &parsed.ctx,
             &params,
             &headers,
-        )? {
+        )
+        .await?
+        {
             crate::federation::WritePlan::Answered(r) => return Ok(*r),
             crate::federation::WritePlan::Forward(regs) => regs,
         };
@@ -2536,10 +2544,13 @@ pub async fn add_temporal_attrs(
                 )?;
                 let ts = now_iso();
                 stamp_temporal_instances(&mut local, &ts);
-                let res = st.temporal.mutate(&tenant, &id, |doc| {
-                    add_temporal_instances(doc, &local, &ts);
-                    Ok::<(), NgsiError>(())
-                })?;
+                let res = st
+                    .temporal
+                    .mutate(&tenant, &id, |doc| {
+                        add_temporal_instances(doc, &local, &ts);
+                        Ok::<(), NgsiError>(())
+                    })
+                    .await?;
                 parts.push(match res {
                     Some(Ok(())) => crate::federation::Part {
                         status: 204,
@@ -2580,10 +2591,13 @@ pub async fn add_temporal_attrs(
         }
         let ts = now_iso();
         stamp_temporal_instances(&mut expanded, &ts);
-        let res = st.temporal.mutate(&tenant, &id, |doc| {
-            add_temporal_instances(doc, &expanded, &ts);
-            Ok::<(), NgsiError>(())
-        })?;
+        let res = st
+            .temporal
+            .mutate(&tenant, &id, |doc| {
+                add_temporal_instances(doc, &expanded, &ts);
+                Ok::<(), NgsiError>(())
+            })
+            .await?;
         match res {
             None => {
                 Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
@@ -2639,39 +2653,44 @@ pub async fn delete_temporal_attr(
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
         let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
         let want_ds = params.get("datasetId").cloned();
-        let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
+        let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id).await {
             Ok(regs) => regs,
             Err(refused) => return Ok(*refused),
         };
         let mut found = false;
         let ts = now_iso();
-        let res = st.temporal.mutate(&tenant, &id, |doc| {
-            let target = antares_store::stored_object(doc)?;
-            if delete_all
-                || (want_ds.is_none()
-                    && !target
-                        .get(&attr_iri)
-                        .and_then(Value::as_array)
-                        .is_some_and(|a| a.iter().any(|i| i.get("datasetId").is_some())))
-            {
-                // deleteAll, or single-instance-set attribute: drop it whole
-                if target.remove(&attr_iri).is_some() {
-                    found = true;
+        let res = st
+            .temporal
+            .mutate(&tenant, &id, |doc| {
+                let target = antares_store::stored_object(doc)?;
+                if delete_all
+                    || (want_ds.is_none()
+                        && !target
+                            .get(&attr_iri)
+                            .and_then(Value::as_array)
+                            .is_some_and(|a| a.iter().any(|i| i.get("datasetId").is_some())))
+                {
+                    // deleteAll, or single-instance-set attribute: drop it whole
+                    if target.remove(&attr_iri).is_some() {
+                        found = true;
+                    }
+                } else if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
+                    // 5.6.13: only the matching datasetId instance set is deleted
+                    let before = arr.len();
+                    arr.retain(|i| {
+                        i.get("datasetId").and_then(Value::as_str) != want_ds.as_deref()
+                    });
+                    found = arr.len() != before;
+                    if arr.is_empty() {
+                        target.remove(&attr_iri);
+                    }
                 }
-            } else if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
-                // 5.6.13: only the matching datasetId instance set is deleted
-                let before = arr.len();
-                arr.retain(|i| i.get("datasetId").and_then(Value::as_str) != want_ds.as_deref());
-                found = arr.len() != before;
-                if arr.is_empty() {
-                    target.remove(&attr_iri);
+                if found {
+                    target.insert("modifiedAt".into(), Value::String(ts.clone()));
                 }
-            }
-            if found {
-                target.insert("modifiedAt".into(), Value::String(ts.clone()));
-            }
-            Ok::<(), NgsiError>(())
-        })?;
+                Ok::<(), NgsiError>(())
+            })
+            .await?;
         answer_temporal_attr_write(
             &st,
             &tenant,
@@ -2729,7 +2748,7 @@ struct LocalWrite {
 /// request it answers has to leave the Temporal Evolution as it found it.
 /// The refusal travels boxed — a whole `Response` in an `Err` makes every
 /// `Ok` of this function carry its width.
-fn temporal_write_regs(
+async fn temporal_write_regs(
     st: &AppState,
     tenant: &antares_model::TenantId,
     headers: &HeaderMap,
@@ -2742,6 +2761,7 @@ fn temporal_write_regs(
         ..Default::default()
     };
     match crate::federation::write_plan(st, tenant, &spec, ctx, params, headers)
+        .await
         .map_err(|e| Box::new(crate::negotiate::ApiError::from(e).into_response()))?
     {
         crate::federation::WritePlan::Answered(refused) => Err(refused),
@@ -2871,45 +2891,49 @@ pub async fn modify_temporal_instance(
             .and_then(|a| a.first())
             .cloned()
             .ok_or_else(|| NgsiError::BadRequestData("invalid instance fragment".into()))?;
-        let regs = match temporal_write_regs(&st, &tenant, &headers, &parsed.ctx, &params, &id) {
-            Ok(regs) => regs,
-            Err(refused) => return Ok(*refused),
-        };
+        let regs =
+            match temporal_write_regs(&st, &tenant, &headers, &parsed.ctx, &params, &id).await {
+                Ok(regs) => regs,
+                Err(refused) => return Ok(*refused),
+            };
         let ts = now_iso();
         let mut found = false;
-        let res = st.temporal.mutate(&tenant, &id, |doc| {
-            let target = antares_store::stored_object(doc)?;
-            if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
-                if let Some(inst) = arr.iter_mut().find(|i| {
-                    i.get("instanceId").and_then(Value::as_str) == Some(instance_id.as_str())
-                }) {
-                    found = true;
-                    // 5.6.14.4: "Replace the target Attribute instance
-                    // identified by the instanceId with the Attribute instance
-                    // in the EntityTemporal Fragment. The createdAt property
-                    // of the concerned instance shall remain unchanged, but
-                    // the modifiedAt property shall be set to the timestamp
-                    // corresponding to this modification." A replace, so a
-                    // member only the stored instance carries does not survive
-                    // it; the instance keeps the identity it is addressed by.
-                    let t = antares_store::stored_object(inst)?;
-                    let kept: Vec<(String, Value)> = ["createdAt", "instanceId"]
-                        .iter()
-                        .filter_map(|k| t.get(*k).map(|v| ((*k).to_owned(), v.clone())))
-                        .collect();
-                    t.clear();
-                    t.extend(kept);
-                    for (k, v) in antares_jsonld::expanded_object(&frag_inst)? {
-                        if matches!(k.as_str(), "createdAt" | "instanceId") {
-                            continue;
+        let res = st
+            .temporal
+            .mutate(&tenant, &id, |doc| {
+                let target = antares_store::stored_object(doc)?;
+                if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
+                    if let Some(inst) = arr.iter_mut().find(|i| {
+                        i.get("instanceId").and_then(Value::as_str) == Some(instance_id.as_str())
+                    }) {
+                        found = true;
+                        // 5.6.14.4: "Replace the target Attribute instance
+                        // identified by the instanceId with the Attribute instance
+                        // in the EntityTemporal Fragment. The createdAt property
+                        // of the concerned instance shall remain unchanged, but
+                        // the modifiedAt property shall be set to the timestamp
+                        // corresponding to this modification." A replace, so a
+                        // member only the stored instance carries does not survive
+                        // it; the instance keeps the identity it is addressed by.
+                        let t = antares_store::stored_object(inst)?;
+                        let kept: Vec<(String, Value)> = ["createdAt", "instanceId"]
+                            .iter()
+                            .filter_map(|k| t.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+                            .collect();
+                        t.clear();
+                        t.extend(kept);
+                        for (k, v) in antares_jsonld::expanded_object(&frag_inst)? {
+                            if matches!(k.as_str(), "createdAt" | "instanceId") {
+                                continue;
+                            }
+                            t.insert(k.clone(), v.clone());
                         }
-                        t.insert(k.clone(), v.clone());
+                        t.insert("modifiedAt".into(), Value::String(ts.clone()));
                     }
-                    t.insert("modifiedAt".into(), Value::String(ts.clone()));
                 }
-            }
-            Ok::<(), NgsiError>(())
-        })?;
+                Ok::<(), NgsiError>(())
+            })
+            .await?;
         answer_temporal_attr_write(
             &st,
             &tenant,
@@ -2953,29 +2977,32 @@ pub async fn delete_temporal_instance(
         let ctx = request_context(&st.loader, &headers).await?;
         gate!(st, &tenant, &headers, "5.6.15", ids: &[&id]).await?;
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
-        let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
+        let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id).await {
             Ok(regs) => regs,
             Err(refused) => return Ok(*refused),
         };
         let mut found = false;
         let ts = now_iso();
-        let res = st.temporal.mutate(&tenant, &id, |doc| {
-            let target = antares_store::stored_object(doc)?;
-            if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
-                let before = arr.len();
-                arr.retain(|i| {
-                    i.get("instanceId").and_then(Value::as_str) != Some(instance_id.as_str())
-                });
-                found = arr.len() != before;
-                if arr.is_empty() {
-                    target.remove(&attr_iri);
+        let res = st
+            .temporal
+            .mutate(&tenant, &id, |doc| {
+                let target = antares_store::stored_object(doc)?;
+                if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
+                    let before = arr.len();
+                    arr.retain(|i| {
+                        i.get("instanceId").and_then(Value::as_str) != Some(instance_id.as_str())
+                    });
+                    found = arr.len() != before;
+                    if arr.is_empty() {
+                        target.remove(&attr_iri);
+                    }
                 }
-            }
-            if found {
-                target.insert("modifiedAt".into(), Value::String(ts.clone()));
-            }
-            Ok::<(), NgsiError>(())
-        })?;
+                if found {
+                    target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                }
+                Ok::<(), NgsiError>(())
+            })
+            .await?;
         answer_temporal_attr_write(
             &st,
             &tenant,
@@ -3125,8 +3152,8 @@ mod clause_4_11 {
     /// — the merge resolves them to one (most recent modifiedAt wins), never
     /// serves both. Regression: the same instance held by two federated
     /// brokers came back twice (IOP_EXT_TMP_02_05).
-    #[test]
-    fn merge_resolves_same_slot_instances_to_one() {
+    #[tokio::test]
+    async fn merge_resolves_same_slot_instances_to_one() {
         let mut base = json!({"id": "urn:e", "type": "T", "speed": [
             {"type": "Property", "value": 10, "observedAt": "2026-05-01T00:00:00Z",
              "modifiedAt": "2026-05-01T00:00:00Z"},
@@ -3158,8 +3185,8 @@ mod clause_4_11 {
     /// the context data otherwise available to the Context Broker." On a
     /// Temporal Evolution the unit is the instance, so an auxiliary instance
     /// enters only where no other source supplied that timeproperty value.
-    #[test]
-    fn an_auxiliary_instance_supplements_but_never_overrides() {
+    #[tokio::test]
+    async fn an_auxiliary_instance_supplements_but_never_overrides() {
         let mut base = json!({"id": "urn:e", "type": "T", "speed": [
             {"type": "Property", "value": 10, "observedAt": "2026-05-01T00:00:00Z",
              "modifiedAt": "2026-05-01T00:00:00Z"},
@@ -3187,8 +3214,8 @@ mod clause_4_11 {
     /// of 4.5.5.3 is the INSTANT, not the spelling: a byte comparison treats
     /// the two as separate slots and serves the same instance twice — the
     /// IOP_EXT_TMP_02_05 duplicate, reached through a different door.
-    #[test]
-    fn one_instant_spelled_two_ways_is_still_one_slot() {
+    #[tokio::test]
+    async fn one_instant_spelled_two_ways_is_still_one_slot() {
         let mut base = json!({"id": "urn:e", "type": "T", "speed": [
             {"type": "Property", "value": 10, "observedAt": "2026-05-01T00:00:00Z",
              "modifiedAt": "2026-05-01T00:00:00Z"},
@@ -3208,8 +3235,8 @@ mod clause_4_11 {
     /// instants for the same reason. A remote instance stamped
     /// `…:00.500Z` is LATER than a local one stamped `…:00Z`, though its
     /// bytes sort earlier.
-    #[test]
-    fn the_more_recent_modified_at_wins_across_fraction_spellings() {
+    #[tokio::test]
+    async fn the_more_recent_modified_at_wins_across_fraction_spellings() {
         let mut base = json!({"id": "urn:e", "type": "T", "speed": [
             {"type": "Property", "value": 10, "observedAt": "2026-05-01T00:00:00Z",
              "modifiedAt": "2026-05-01T09:00:00Z"},
@@ -3226,8 +3253,8 @@ mod clause_4_11 {
 
     /// 4.3.6.2 auxiliary supplementation is decided on the same slot, so an
     /// auxiliary instance that respells an occupied instant is still refused.
-    #[test]
-    fn an_auxiliary_respelling_of_an_occupied_slot_is_refused() {
+    #[tokio::test]
+    async fn an_auxiliary_respelling_of_an_occupied_slot_is_refused() {
         let mut base = json!({"id": "urn:e", "type": "T", "speed": [
             {"type": "Property", "value": 10, "observedAt": "2026-05-01T00:00:00Z"},
         ]});
@@ -3265,7 +3292,7 @@ mod clause_6_3_10 {
         TemporalQ::from_params(&p, true).unwrap().unwrap()
     }
 
-    fn windowed(doc: &Value, tq: Option<&TemporalQ>, last_n: Option<usize>) -> Windowed {
+    async fn windowed(doc: &Value, tq: Option<&TemporalQ>, last_n: Option<usize>) -> Windowed {
         let mut w = window(doc, tq, last_n, None, None, None, "observedAt");
         truncate(&mut w, "observedAt", last_n.is_some());
         w
@@ -3284,11 +3311,11 @@ mod clause_6_3_10 {
     /// select more instances than the broker serves at once is cut to the
     /// ceiling, oldest first, and the advertised range ends at the last
     /// instance returned.
-    #[test]
-    fn wide_window_is_cut_to_the_ceiling_and_the_range_matches_the_body() {
+    #[tokio::test]
+    async fn wide_window_is_cut_to_the_ceiling_and_the_range_matches_the_body() {
         let doc = evolution(20);
         let q = tq("after", "2019-01-01T00:00:00Z");
-        let w = windowed(&doc, Some(&q), None);
+        let w = windowed(&doc, Some(&q), None).await;
         assert_eq!(w.attrs["speed"].len(), TEMPORAL_INSTANCE_LIMIT);
         assert!(w.truncated);
         let got = observed(&w);
@@ -3339,9 +3366,9 @@ mod clause_6_3_10 {
     /// With `speed` over-full first, `heading` is trimmed to the same last
     /// instant, and nothing of either attribute lies past the advertised
     /// range-end (a client continuing from it misses no instance).
-    #[test]
-    fn the_cut_is_one_time_boundary_across_attributes() {
-        let w = windowed(&evolution2(21, 31), None, None);
+    #[tokio::test]
+    async fn the_cut_is_one_time_boundary_across_attributes() {
+        let w = windowed(&evolution2(21, 31), None, None).await;
         assert!(w.truncated);
         let end = at(TEMPORAL_INSTANCE_LIMIT - 1);
         assert_eq!(w.attrs["speed"].len(), TEMPORAL_INSTANCE_LIMIT);
@@ -3362,7 +3389,7 @@ mod clause_6_3_10 {
         // backwards (lastN): the boundary is the LATEST ninth instant, so the
         // page covers [heading's ninth-newest, newest] and `speed`, which ends
         // before that, is empty on this page rather than incoherently present
-        let w = windowed(&evolution2(21, 31), None, Some(20));
+        let w = windowed(&evolution2(21, 31), None, Some(20)).await;
         assert!(w.truncated);
         assert_eq!(w.attrs["heading"].len(), TEMPORAL_INSTANCE_LIMIT);
         assert_eq!(w.attrs["heading"][0]["observedAt"], json!(at(30)));
@@ -3382,10 +3409,10 @@ mod clause_6_3_10 {
     /// broker ceiling is served up to the ceiling (newest first) and the
     /// answer is the partial one. The Content-Range size stays the requested
     /// lastN, its start-end pair the instants actually returned.
-    #[test]
-    fn last_n_above_the_ceiling_is_clamped_to_it() {
+    #[tokio::test]
+    async fn last_n_above_the_ceiling_is_clamped_to_it() {
         let doc = evolution(20);
-        let w = windowed(&doc, None, Some(20));
+        let w = windowed(&doc, None, Some(20)).await;
         assert_eq!(w.attrs["speed"].len(), TEMPORAL_INSTANCE_LIMIT);
         assert!(w.truncated);
         let got = observed(&w);
@@ -3413,10 +3440,10 @@ mod clause_6_3_10 {
     /// 5.7.3.4: temporalQ is optional on retrieval, so a request naming no
     /// window at all asks for the whole Temporal Evolution. It is still
     /// bounded by the same ceiling, and still answered as partial.
-    #[test]
-    fn a_request_with_no_window_is_capped_by_default() {
+    #[tokio::test]
+    async fn a_request_with_no_window_is_capped_by_default() {
         let doc = evolution(20);
-        let w = windowed(&doc, None, None);
+        let w = windowed(&doc, None, None).await;
         assert_eq!(w.attrs["speed"].len(), TEMPORAL_INSTANCE_LIMIT);
         assert!(w.truncated);
         assert_eq!(
@@ -3441,10 +3468,10 @@ mod clause_6_3_10 {
 
     /// 6.3.10: partial content is conditional on truncation — a result the
     /// broker serves in full is a plain 200 with no Content-Range.
-    #[test]
-    fn a_complete_result_is_not_partial_content() {
+    #[tokio::test]
+    async fn a_complete_result_is_not_partial_content() {
         let doc = evolution(TEMPORAL_INSTANCE_LIMIT);
-        let w = windowed(&doc, None, None);
+        let w = windowed(&doc, None, None).await;
         assert_eq!(w.attrs["speed"].len(), TEMPORAL_INSTANCE_LIMIT);
         assert!(!w.truncated);
         assert_eq!(
@@ -3467,8 +3494,8 @@ mod clause_6_3_10 {
     /// contradicts. The instances are sorted on the canonical key already
     /// (`dt_key`); the bounds are on the same key or they disagree with the
     /// order they summarize.
-    #[test]
-    fn the_window_bounds_are_the_true_extremes_across_fraction_spellings() {
+    #[tokio::test]
+    async fn the_window_bounds_are_the_true_extremes_across_fraction_spellings() {
         let doc = json!({
             "id": "urn:ngsi-ld:Vehicle:1",
             "type": "Vehicle",
@@ -3477,7 +3504,7 @@ mod clause_6_3_10 {
                 {"type": "Property", "value": 2, "observedAt": "2020-01-01T00:09:00.500Z"},
             ],
         });
-        let w = windowed(&doc, None, None);
+        let w = windowed(&doc, None, None).await;
         assert_eq!(w.attrs["speed"].len(), 2);
         assert_eq!(
             observed(&w),
@@ -3735,8 +3762,8 @@ mod clause_4_5_19 {
     /// range of the query" (4.5.19.0), so with `timerel=before` they run
     /// backwards from `timeAt` and every returned period contains the
     /// instances aggregated into it.
-    #[test]
-    fn month_periods_before_the_anchor_contain_their_instances() {
+    #[tokio::test]
+    async fn month_periods_before_the_anchor_contain_their_instances() {
         let w = windowed(&[
             "2020-01-15T00:00:00Z",
             "2020-02-15T00:00:00Z",
@@ -3780,8 +3807,8 @@ mod clause_4_5_19 {
     /// time range specified by the temporal query." The query names one
     /// edge of that range and 4.11 leaves the other open, so the period
     /// runs from `timeAt` only when `timeAt` is where the range starts.
-    #[test]
-    fn the_zero_duration_period_spans_the_time_range_the_query_asked_for() {
+    #[tokio::test]
+    async fn the_zero_duration_period_spans_the_time_range_the_query_asked_for() {
         let w = windowed(&["2020-09-01T12:03:00Z", "2020-09-01T12:05:00Z"]);
         let one = |tq: &TemporalQ| {
             let out = render_aggregated(
@@ -3833,8 +3860,8 @@ mod clause_4_5_19 {
 
     /// A mixed period steps by its months AND its seconds: "P1MT12H" from
     /// the anchor ends one month and twelve hours later (4.5.19.1).
-    #[test]
-    fn a_mixed_period_steps_by_both_components() {
+    #[tokio::test]
+    async fn a_mixed_period_steps_by_both_components() {
         let w = windowed(&["2020-01-01T06:00:00Z", "2020-02-02T06:00:00Z"]);
         let tq = TemporalQ {
             timerel: "after".to_owned(),

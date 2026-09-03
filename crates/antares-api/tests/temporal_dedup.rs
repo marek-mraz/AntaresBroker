@@ -16,10 +16,10 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
 
-fn state() -> AppState {
+async fn state() -> AppState {
     let store = Arc::new(AnyStore::Mem(Store::default()));
     let mut st = AppState::with_drivers("me".into(), store.clone(), store, "memory");
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     st
 }
 
@@ -61,7 +61,7 @@ const T2: &str = "2026-01-01T00:01:00Z";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_resend_with_the_same_observed_at_corrects_the_instance() {
-    let st = state();
+    let st = state().await;
     let (s, b) = req(
         &st,
         "POST",
@@ -151,7 +151,7 @@ async fn a_resend_with_the_same_observed_at_corrects_the_instance() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dataset_ids_keep_their_own_instances_at_one_observed_at() {
-    let st = state();
+    let st = state().await;
     let (s, b) = req(
         &st,
         "POST",
@@ -191,7 +191,7 @@ const UP: &str = "urn:ngsi-ld:D:up";
 /// modifiedAt move.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_upsert_correction_keeps_the_instance_it_corrects() {
-    let st = state();
+    let st = state().await;
     let post = |speed: Value| {
         json!({"id": UP, "type": "D", "speed": [{"type": "Property", "value": speed,
                "observedAt": T1}]})
@@ -262,7 +262,7 @@ const AR: &str = "urn:ngsi-ld:D:ar";
 /// still the moment it was first recorded.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_auto_recorded_correction_keeps_the_instance_it_corrects() {
-    let st = state();
+    let st = state().await;
     let (s, b) = req(
         &st,
         "POST",

@@ -51,14 +51,14 @@ async fn send_h(
     (status, headers, body)
 }
 
-fn file_state(dir: &std::path::Path) -> AppState {
+async fn file_state(dir: &std::path::Path) -> AppState {
     let store = Store::open_file(dir).expect("open file store");
     let mut st = AppState::with_store(
         "antares-durable".into(),
         Arc::new(AnyStore::Mem(store)),
         "file",
     );
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     st
 }
 
@@ -67,7 +67,12 @@ fn file_state(dir: &std::path::Path) -> AppState {
 /// the process; the test simulates the restart by breaking the cycle and
 /// waiting for the lock to free.
 fn shutdown(st: AppState) {
-    st.store.set_change_hook(Box::new(|_, _, _| {}));
+    st.store.set_change_hook(std::sync::Arc::new(
+        |_: &antares_model::TenantId,
+         _: Option<serde_json::Value>,
+         _: Option<serde_json::Value>|
+         -> antares_store::HookFuture<'_> { Box::pin(async {}) },
+    ));
     let store = st.store.clone();
     drop(st);
     for _ in 0..100 {
@@ -113,7 +118,7 @@ fn snapshot_and_entity_map_survive_restart() {
     let dir = scratch_dir("snap");
     let first = rt();
     let (sid, loc, map_id) = first.block_on(async {
-        let st = file_state(&dir);
+        let st = file_state(&dir).await;
         let body = json!({"id": "urn:ngsi-ld:Vehicle:d1", "type": "Vehicle",
             "speed": {"type": "Property", "value": 80}})
         .to_string();
@@ -149,7 +154,7 @@ fn snapshot_and_entity_map_survive_restart() {
     // "restart": a fresh AppState over the same directory
     let second = rt();
     second.block_on(async {
-        let st2 = file_state(&dir);
+        let st2 = file_state(&dir).await;
         let (status, _, meta) = send_h(&st2, "GET", &loc, None, &[]).await;
         assert_eq!(status, StatusCode::OK, "snapshot metadata survives: {meta}");
         assert_eq!(meta["snapshotStatus"], "success", "{meta}");
@@ -215,7 +220,7 @@ fn dist_sub_mapping_survives_restart() {
         });
 
         {
-            let st = file_state(&dir);
+            let st = file_state(&dir).await;
             let reg = json!({
                 "id": "urn:ngsi-ld:ContextSourceRegistration:durable",
                 "type": "ContextSourceRegistration",
@@ -263,7 +268,7 @@ fn dist_sub_mapping_survives_restart() {
 
     let second = rt();
     second.block_on(async {
-        let st2 = file_state(&dir);
+        let st2 = file_state(&dir).await;
         let inbound = json!({
             "type": "Notification",
             "subscriptionId": remote_id,
@@ -307,7 +312,7 @@ fn dead_letter_survives_restart() {
     let dir = scratch_dir("deadletter");
     let first = rt();
     first.block_on(async {
-        let st = file_state(&dir);
+        let st = file_state(&dir).await;
         let t = antares_model::TenantId::new("acme").expect("tenant");
         assert!(st
             .store
@@ -320,13 +325,14 @@ fn dead_letter_survives_restart() {
                        "binding": "http", "headers": [], "payload": {}, "attempts": 3,
                        "lastAt": "2026-01-01T00:00:00Z"}),
             )
+            .await
             .expect("create"));
         shutdown(st);
     });
     drop(first);
     let second = rt();
     second.block_on(async {
-        let st2 = file_state(&dir);
+        let st2 = file_state(&dir).await;
         let (status, _, b) = send_h(&st2, "GET", "/q/dead-letters?tenant=acme", None, &[]).await;
         assert_eq!(status, StatusCode::OK, "{b}");
         assert_eq!(b[0]["id"], "urn:ngsi-ld:DeadLetter:1", "{b}");

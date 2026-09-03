@@ -122,7 +122,7 @@ async fn clause_4_5_23_3_flat_join_appends_the_linked_entity_to_data() {
     let mut st = AppState::new("me".into());
     // the notification pipeline is wired, not implied: without this the
     // Subscription is stored and nothing ever delivers
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     seed_device(&st, "urn:ngsi-ld:Device:flat1").await;
     let rx = subscribe_flat(&st).await;
     let n = fire(
@@ -162,7 +162,7 @@ async fn clause_4_5_23_3_a_target_already_in_the_array_is_not_repeated() {
     let mut st = AppState::new("me".into());
     // the notification pipeline is wired, not implied: without this the
     // Subscription is stored and nothing ever delivers
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     seed_device(&st, "urn:ngsi-ld:Device:flat2").await;
     let rx = subscribe_flat(&st).await;
     let n = fire(
@@ -191,7 +191,7 @@ async fn clause_5_2_12_join_absent_delivers_the_linking_entity_alone() {
     let mut st = AppState::new("me".into());
     // the notification pipeline is wired, not implied: without this the
     // Subscription is stored and nothing ever delivers
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     seed_device(&st, "urn:ngsi-ld:Device:flat3").await;
     let (uri, rx) = capture_server().await;
     let (status, body) = send(

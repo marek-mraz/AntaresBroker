@@ -187,7 +187,7 @@ async fn clause_5_8_1_4_consumer_half_end_to_end() {
     allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-distsub".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
 
     let (remote_port, remote_seen) = recording_mock();
 
@@ -234,6 +234,7 @@ async fn clause_5_8_1_4_consumer_half_end_to_end() {
             antares_store::Kind::DistSub,
             "urn:ngsi-ld:Subscription:ds-own",
         )
+        .await
         .expect("mapping read")
         .expect("the distributed half stores a mapping");
     assert!(
@@ -363,7 +364,7 @@ async fn clause_5_8_1_4_consumer_half_end_to_end() {
 async fn clause_5_8_6_origin_csf_gates_inbound_notifications() {
     allow_private();
     let mut st = AppState::new("antares-distsub3".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (sensor_port, sensor_seen) = recording_mock();
     let (archive_port, archive_seen) = recording_mock();
     for (name, port, source_type) in [
@@ -502,7 +503,7 @@ async fn clause_5_8_6_split_entities_inbound_merge() {
     allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-split".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
 
     // origin: receives the reduced subscription copy, notifies fragments
     let (remote_port, remote_seen) = recording_mock();
@@ -659,7 +660,7 @@ async fn clause_5_8_5_4_delete_races_slow_create_forward() {
     allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-distsub4".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (remote_port, remote_seen) = recording_mock_with_delay(800);
     let reg = json!({
         "id": "urn:ngsi-ld:ContextSourceRegistration:ds4",
@@ -749,7 +750,7 @@ async fn clause_5_8_5_4_delete_races_slow_create_forward() {
 async fn clause_5_8_1_4_local_only_subscription_stays_local() {
     allow_private();
     let mut st = AppState::new("antares-distsub2".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (remote_port, remote_seen) = recording_mock();
     let reg = json!({
         "id": "urn:ngsi-ld:ContextSourceRegistration:ds2",
@@ -812,7 +813,7 @@ async fn clause_4_3_6_4_local_only_registration_bounds_the_forwarded_subscriptio
     allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-lo-reg".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
 
     let (remote_port, remote_seen) = recording_mock();
 
@@ -877,7 +878,7 @@ async fn clause_5_2_33_inbound_notification_refiltered_by_selector() {
     allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-distsub-idr".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
 
     let (remote_port, remote_seen) = recording_mock();
     let reg = json!({
@@ -1007,7 +1008,7 @@ async fn clause_6_3_18_forwarded_copy_extends_the_via_chain() {
     allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-via-ext".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (remote_port, remote_seen) = recording_mock_head();
     let reg = json!({
         "id": "urn:ngsi-ld:ContextSourceRegistration:viaext",
@@ -1078,7 +1079,7 @@ async fn clause_6_3_18_a_looped_copy_is_not_reforwarded() {
     allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-via-loop".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (remote_port, remote_seen) = recording_mock();
     let reg = json!({
         "id": "urn:ngsi-ld:ContextSourceRegistration:vialoop",
@@ -1176,7 +1177,7 @@ async fn clause_6_3_18_registration_already_in_the_via_chain_receives_no_copy() 
     allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-via-reg".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (origin_port, origin_seen) = recording_mock();
     let (other_port, other_seen) = recording_mock_head();
     for (id, port, alias) in [
@@ -1272,7 +1273,7 @@ async fn clause_6_3_18_registration_already_in_the_via_chain_receives_no_copy() 
 async fn clause_5_8_6_the_inbound_csf_is_read_in_the_subscriptions_own_context() {
     allow_private();
     let mut st = AppState::new("antares-distsub-csfctx".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (sensor_port, sensor_seen) = recording_mock();
     // The Context Source Property as the source itself spells it.
     let (status, body) = send(
@@ -1371,7 +1372,7 @@ async fn clause_5_8_6_split_merge_keeps_a_notified_deletion() {
     allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-split-null".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
 
     let (remote_port, remote_seen) = recording_mock();
     let reg = json!({
@@ -1519,7 +1520,7 @@ async fn clause_5_8_6_split_merge_keeps_a_notified_deletion() {
 async fn clause_5_11_5_the_internal_registration_subscription_is_not_a_client_resource() {
     allow_private();
     let st = AppState::new("antares-internal-csr".into());
-    antares_api::wire(&mut st.clone());
+    antares_api::wire(&mut st.clone()).await;
     let own = "urn:ngsi-ld:Subscription:internal-csr-owner";
     let (status, _) = send(
         &st,
@@ -1542,6 +1543,7 @@ async fn clause_5_11_5_the_internal_registration_subscription_is_not_a_client_re
     let csr = st
         .store
         .get(&t, antares_store::Kind::DistSub, own)
+        .await
         .expect("mapping read")
         .expect("the distributed half stores a mapping")
         .get("csr_sub")
@@ -1579,6 +1581,7 @@ async fn clause_5_11_5_the_internal_registration_subscription_is_not_a_client_re
     assert!(
         st.store
             .get(&t, antares_store::Kind::DistSub, &csr)
+            .await
             .expect("read")
             .is_some(),
         "the distributed half survives every client request aimed at it"
@@ -1635,7 +1638,7 @@ async fn send_tenant(
 async fn clause_5_8_1_4_an_inbound_notification_is_routed_by_the_mapping_alone() {
     allow_private();
     let mut st = AppState::new("antares-ds-tenants".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (remote_port, remote_seen) = recording_mock();
     let (alpha_port, alpha_seen) = recording_mock();
     let (beta_port, beta_seen) = recording_mock();
@@ -1750,7 +1753,7 @@ async fn clause_5_8_1_4_an_inbound_notification_is_routed_by_the_mapping_alone()
 async fn a_client_cannot_address_the_brokers_own_index_tenant() {
     allow_private();
     let mut st = AppState::new("antares-ds-index-tenant".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (remote_port, remote_seen) = recording_mock();
     let (cb_port, cb_seen) = recording_mock();
 

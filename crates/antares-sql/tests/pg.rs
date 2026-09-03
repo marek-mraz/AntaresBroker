@@ -44,12 +44,14 @@ async fn tenant_exists_answers_for_the_actual_tenant() {
     assert!(
         !store
             .tenant_exists(&t)
+            .await
             .expect("tenant_exists must not error"),
         "never-seen tenant reads as existing"
     );
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     assert!(store
         .tenant_exists(&t)
+        .await
         .expect("tenant_exists must not error"));
 }
 
@@ -386,7 +388,9 @@ async fn purge_tenant_empties_every_tenant_table() {
                 doc(id)
             };
             assert!(
-                CurrentStateDriver::create(&store, t, kind, id, d).expect("create"),
+                CurrentStateDriver::create(&store, t, kind, id, d)
+                    .await
+                    .expect("create"),
                 "{kind:?}"
             );
         }
@@ -401,8 +405,10 @@ async fn purge_tenant_empties_every_tenant_table() {
                                "owner": t.as_str(), "createdAt": "2026-08-04T09:00:00Z",
                                "body": {"@context": {"n": "https://x/n"}}}),
         )
-        .expect("hosted @context");
-        TemporalDriver::create(&store, t, "urn:x:1", doc("urn:x:1")).expect("temporal");
+        .await.expect("hosted @context");
+        TemporalDriver::create(&store, t, "urn:x:1", doc("urn:x:1"))
+            .await
+            .expect("temporal");
         store
             .temporal_append(
                 t,
@@ -411,6 +417,7 @@ async fn purge_tenant_empties_every_tenant_table() {
                 &serde_json::json!({"n": [{"type": "Property", "value": 2,
                     "observedAt": "2026-08-04T09:01:00Z", "instanceId": "urn:i:1"}]}),
             )
+            .await
             .expect("append");
     }
     const TABLES: [&str; 13] = [
@@ -475,7 +482,7 @@ async fn purge_tenant_empties_every_tenant_table() {
         }
         v
     };
-    let ids = store.tenant_ids().expect("ids");
+    let ids = store.tenant_ids().await.expect("ids");
     assert!(ids.iter().any(|t| t == a.as_str()), "listed: {ids:?}");
     assert!(
         ids.iter().any(|t| t == antares_model::TenantId::DEFAULT),
@@ -483,6 +490,7 @@ async fn purge_tenant_empties_every_tenant_table() {
     );
     let row = store
         .tenant_stats_one(&a)
+        .await
         .expect("stats")
         .expect("tenant exists");
     assert_eq!(
@@ -497,14 +505,24 @@ async fn purge_tenant_empties_every_tenant_table() {
     assert!(
         store
             .tenant_stats_one(&TenantId::new("never-seen").expect("tenant"))
+            .await
             .expect("stats")
             .is_none(),
         "an unknown tenant has no stats to report"
     );
-    assert!(TemporalDriver::attr_instance_count(&store, &a).expect("n") >= 1);
+    assert!(
+        TemporalDriver::attr_instance_count(&store, &a)
+            .await
+            .expect("n")
+            >= 1
+    );
 
-    assert!(CurrentStateDriver::purge_tenant(&store, &a).expect("purge"));
-    TemporalDriver::purge_tenant(&store, &a).expect("purge history");
+    assert!(CurrentStateDriver::purge_tenant(&store, &a)
+        .await
+        .expect("purge"));
+    TemporalDriver::purge_tenant(&store, &a)
+        .await
+        .expect("purge history");
     for table in TABLES {
         assert_eq!(
             count(table, &a).await,
@@ -512,7 +530,7 @@ async fn purge_tenant_empties_every_tenant_table() {
             "{table} still holds rows of the purged tenant"
         );
     }
-    assert!(!store.tenant_exists(&a).expect("exists"));
+    assert!(!store.tenant_exists(&a).await.expect("exists"));
     for (table, before) in TABLES.iter().zip(before_b) {
         assert_eq!(
             count(table, &b).await,
@@ -521,12 +539,18 @@ async fn purge_tenant_empties_every_tenant_table() {
         );
     }
     assert!(
-        !CurrentStateDriver::purge_tenant(&store, &a).expect("purge"),
+        !CurrentStateDriver::purge_tenant(&store, &a)
+            .await
+            .expect("purge"),
         "nothing left"
     );
     // cleanup
-    assert!(CurrentStateDriver::purge_tenant(&store, &b).expect("purge b"));
-    TemporalDriver::purge_tenant(&store, &b).expect("purge b history");
+    assert!(CurrentStateDriver::purge_tenant(&store, &b)
+        .await
+        .expect("purge b"));
+    TemporalDriver::purge_tenant(&store, &b)
+        .await
+        .expect("purge b history");
 }
 
 /// The startup probe reads what the server actually is, and the store serves
@@ -583,6 +607,6 @@ async fn the_postgres_store_keeps_the_driver_contract() {
         pool.clone(),
     ));
     let prefix = format!("pgctr{run}");
-    antares_store::contract::run_current_state_contract(&store, &a, &b, &prefix);
-    antares_store::contract::run_temporal_contract(&store, &a, &b, &prefix);
+    antares_store::contract::run_current_state_contract(&store, &a, &b, &prefix).await;
+    antares_store::contract::run_temporal_contract(&store, &a, &b, &prefix).await;
 }

@@ -23,6 +23,7 @@ use antares_store::CurrentStateDriverExt;
 use antares_store::Kind;
 use antares_store::{TemporalEvent, TemporalOp};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 const DEFAULT_TRIGGERS: &[&str] = &["attributeCreated", "attributeUpdated"];
@@ -71,13 +72,18 @@ enum ChangeClass {
 /// Where the matcher reads candidates from: the indexed mirror (both bus
 /// modes wire one), with the store scan only as the never-wired
 /// fallback so a missing mirror degrades to correct-but-slow.
-fn subs_for(st: &AppState, tenant: &TenantId, types: &[&str], changed: &[&str]) -> Vec<Value> {
+async fn subs_for(
+    st: &AppState,
+    tenant: &TenantId,
+    types: &[&str],
+    changed: &[&str],
+) -> Vec<Value> {
     match &st.sub_mirror {
         Some(m) => m.candidates(tenant.as_str(), types, changed),
         // The scan is the fallback, so its own failure may not be read as
         // "this tenant has no subscriptions" either: that is the silence
         // the mirror seed refuses to install.
-        None => match st.store.list(tenant, Kind::Subscription) {
+        None => match st.store.list(tenant, Kind::Subscription).await {
             Ok(subs) => subs,
             Err(e) => {
                 tracing::error!(
@@ -117,16 +123,18 @@ fn subs_for(st: &AppState, tenant: &TenantId, types: &[&str], changed: &[&str]) 
 /// The domain is `subscription_tenants`, whose contract covers every kind a
 /// mirror is built from. A tenant holding nothing of this kind costs one
 /// empty page.
-pub fn seed_mirror(
+pub async fn seed_mirror(
     store: &dyn antares_store::CurrentStateDriver,
     mirror: &dyn Mirror,
     kind: Kind,
 ) -> Result<(), antares_model::NgsiError> {
-    for tenant_str in store.subscription_tenants()? {
+    for tenant_str in store.subscription_tenants().await? {
         let tenant = TenantId::new(&tenant_str)?;
         let mut after: Option<String> = None;
         loop {
-            let page = store.list_page(&tenant, kind, after.as_deref(), SEED_PAGE)?;
+            let page = store
+                .list_page(&tenant, kind, after.as_deref(), SEED_PAGE)
+                .await?;
             let short = page.len() < SEED_PAGE;
             let before = after.clone();
             for doc in page {
@@ -157,11 +165,11 @@ const SEED_PAGE: usize = 1_000;
 /// Install the subscription mirror, the store change hook that feeds the
 /// matcher, and the background tasks the pipeline needs. Called once at
 /// startup, by `crate::wire`.
-pub(crate) fn wire_matcher(state: &mut AppState) {
+pub(crate) async fn wire_matcher(state: &mut AppState) {
     // bus=local: the same indexed mirror the nats wiring builds, fed
     // synchronously by the CUD hook — the matcher never rescans the store.
     let mirror = Arc::new(SubMirror::default());
-    match seed_mirror(state.store.as_ref(), mirror.as_ref(), Kind::Subscription) {
+    match seed_mirror(state.store.as_ref(), mirror.as_ref(), Kind::Subscription).await {
         Ok(()) => state.sub_mirror = Some(mirror.clone()),
         // Not installed, so `subs_for` takes the store scan it documents as
         // the missing-mirror fallback. Installing what the seed managed to
@@ -196,19 +204,27 @@ pub(crate) fn wire_matcher(state: &mut AppState) {
     // work is handed to the async task below. One choke point for every write.
     let st_rec = state.clone();
     let hook_pending = state.pending_changes.clone();
-    state
-        .store
-        .set_change_hook(Box::new(move |tenant, before, after| {
-            record_temporal_change(&st_rec, tenant, before.as_ref(), after.as_ref());
-            // inside a request the change rides the request's buffer and
-            // reaches the matcher with the rest of that request's changes
-            let Some(change) =
-                crate::history::buffer_change((tenant.as_str().to_owned(), before, after))
-            else {
-                return;
-            };
-            queue_for_matching(&tx, &hook_pending, vec![change]);
-        }));
+    state.store.set_change_hook(Arc::new(
+        move |tenant: &TenantId,
+              before: Option<Value>,
+              after: Option<Value>|
+              -> antares_store::HookFuture<'_> {
+            let st_rec = st_rec.clone();
+            let tx = tx.clone();
+            let hook_pending = hook_pending.clone();
+            Box::pin(async move {
+                record_temporal_change(&st_rec, tenant, before.as_ref(), after.as_ref()).await;
+                // inside a request the change rides the request's buffer and
+                // reaches the matcher with the rest of that request's changes
+                let Some(change) =
+                    crate::history::buffer_change((tenant.as_str().to_owned(), before, after))
+                else {
+                    return;
+                };
+                queue_for_matching(&tx, &hook_pending, vec![change]);
+            })
+        },
+    ));
     let st = state.clone();
     let pending = state.pending_changes.clone();
     crate::spawn_loop(async move {
@@ -386,7 +402,7 @@ fn diff(before: Option<&Value>, after: Option<&Value>) -> Vec<(String, ChangeCla
 /// DELETIONS keep their dedicated typed-null mirrors (`mirror_delete_entity` /
 /// `mirror_delete_attr`), which the delete handlers still call — their deletion
 /// shape is not derivable from a plain append.
-pub fn record_temporal_change(
+pub async fn record_temporal_change(
     st: &AppState,
     tenant: &TenantId,
     before: Option<&Value>,
@@ -434,7 +450,7 @@ pub fn record_temporal_change(
                 "instanceId": format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()),
                 "createdAt": ts, "modifiedAt": ts, "observedAt": ts,
             });
-            crate::history::push(st, event(TemporalOp::ScopeChanged, "scope", inst));
+            crate::history::push(st, event(TemporalOp::ScopeChanged, "scope", inst)).await;
         }
     }
     for (k, class) in diff(before, Some(after)) {
@@ -451,7 +467,7 @@ pub fn record_temporal_change(
                 o.entry("instanceId".to_owned())
                     .or_insert_with(|| Value::String(iid));
             }
-            crate::history::push(st, event(op, &k, inst));
+            crate::history::push(st, event(op, &k, inst)).await;
         }
     }
 }
@@ -519,12 +535,45 @@ fn sub_str<'a>(sub: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// 4.9 EXAMPLE 13/14: linked-entity q terms (`attr{path}`) resolve through
-/// the local store, same tenant.
-pub(crate) fn store_lookup<'a>(
-    st: &'a AppState,
-    tenant: &'a TenantId,
-) -> impl Fn(&str) -> Option<Value> + 'a {
-    move |uri: &str| st.store.get(tenant, Kind::Entity, uri).ok().flatten()
+/// the local store, same tenant. The evaluator is synchronous and the store
+/// is not, so `eval` runs against a cache: a URI the cache misses is
+/// recorded, reads as absent for that pass, and is fetched before the next
+/// one. The first pass that misses nothing is the answer. Every miss of a
+/// pass is fetched together, so the pass count is the depth of the link
+/// chain rather than the number of entities it touches.
+pub(crate) async fn linked_eval<F>(st: &AppState, tenant: &TenantId, mut eval: F) -> bool
+where
+    F: for<'a> FnMut(antares_ql::eval::EntityLookup<'a>) -> bool,
+{
+    let mut cache: HashMap<String, Option<Value>> = HashMap::new();
+    // ponytail: the evaluator's own lookup budget bounds how many distinct
+    // URIs one expression can name, so it bounds the passes too; a chain
+    // deeper than that reads as unresolved, which is what exhausting the
+    // budget inside the evaluator already does.
+    for _ in 0..antares_ql::eval::MAX_Q_LINK_LOOKUPS {
+        let missed = std::cell::RefCell::new(Vec::new());
+        let out = eval(&|uri: &str| match cache.get(uri) {
+            Some(doc) => doc.clone(),
+            None => {
+                missed.borrow_mut().push(uri.to_owned());
+                None
+            }
+        });
+        let missed = missed.into_inner();
+        if missed.is_empty() {
+            return out;
+        }
+        for uri in missed {
+            let doc = st
+                .store
+                .get(tenant, Kind::Entity, &uri)
+                .await
+                .ok()
+                .flatten();
+            cache.insert(uri, doc);
+        }
+    }
+    eval(&|uri: &str| cache.get(uri).cloned().flatten())
 }
 
 pub(crate) use antares_matcher::{
@@ -715,7 +764,7 @@ pub(crate) fn notif_shape(sub: &Value, ctx: &Context) -> NotifShape {
 
 /// Build the notification `data` array for one change and one subscription.
 #[allow(clippy::too_many_arguments)] // one param per 5.8.6 payload input
-fn build_data(
+async fn build_data(
     st: &AppState,
     tenant: &TenantId,
     sub: &Value,
@@ -851,13 +900,14 @@ fn build_data(
     let mut data = Vec::new();
     match &shape.join {
         Some((mode, level)) if mode == "inline" => {
-            crate::repr::inline_join(st, tenant, ctx, &shape.repr, &mut main, *level);
+            crate::repr::inline_join(st, tenant, ctx, &shape.repr, &mut main, *level).await;
             data.push(main);
         }
         Some((mode, level)) if mode == "flat" => {
             let main_id = internal.get("id").and_then(Value::as_str).unwrap_or("");
             let mut linked = std::collections::BTreeMap::new();
-            crate::repr::collect_flat(st, tenant, &shape.repr, &internal, *level, &mut linked);
+            crate::repr::collect_flat(st, tenant, &shape.repr, &internal, *level, &mut linked)
+                .await;
             data.push(main);
             for (id, (ldoc, lrepr)) in linked {
                 if id != main_id {
@@ -959,10 +1009,9 @@ pub(crate) async fn process_changes(st: &AppState, changes: Vec<Change>) {
     // Groups are distinct subscriptions, so they leave concurrently; a
     // subscription's changes in this drain are already one group, and the
     // next drain starts only after this one, so per-subscription order holds.
-    // Each group is its own task: the store bridge blocks the calling
-    // thread (block_in_place) for every bookkeeping read/write, and inside
-    // one task's for_each_concurrent that stalled all 64 deliveries behind
-    // each Postgres round-trip (~320 notifications/s on 32 idle cores).
+    // Each group is its own task: a group's bookkeeping reads and writes
+    // await the store, and one task's `for_each_concurrent` would still put
+    // every group's round-trips on a single task's poll budget.
     #[cfg(not(target_arch = "wasm32"))]
     {
         let mut set = tokio::task::JoinSet::new();
@@ -1077,7 +1126,7 @@ async fn matches_for(
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     let changed_keys: Vec<&str> = changes.iter().map(|(k, _)| k.as_str()).collect();
-    let subs = subs_for(st, &tenant, &types, &changed_keys);
+    let subs = subs_for(st, &tenant, &types, &changed_keys).await;
     for sub in subs {
         if !is_active(&sub) || sub.get("timeInterval").is_some() {
             continue;
@@ -1109,7 +1158,7 @@ async fn matches_for(
         if !selector_match(&sub, eval_doc, &ctx) {
             continue;
         }
-        if !conditions_match(&sub, eval_doc, &ctx, &store_lookup(st, &tenant)) {
+        if !linked_eval(st, &tenant, |l| conditions_match(&sub, eval_doc, &ctx, l)).await {
             continue;
         }
         if throttled(&sub) {
@@ -1136,7 +1185,8 @@ async fn matches_for(
             &deleted,
             entity_deleted_fired,
             &now,
-        );
+        )
+        .await;
         out.push(Matched {
             tenant: tenant.clone(),
             sub,
@@ -1228,7 +1278,7 @@ fn read_or_warn<T>(res: Result<Vec<T>, antares_model::NgsiError>, what: &str) ->
 /// have nothing to send gives it back through [`release_interval`], because
 /// Table 5.2.14.2-1 stamps the instant a notification was SENT and 5.8.6
 /// sends none when nothing matches.
-fn claim_interval(
+async fn claim_interval(
     st: &AppState,
     tenant: &TenantId,
     kind: Kind,
@@ -1237,25 +1287,28 @@ fn claim_interval(
 ) -> Option<Option<Value>> {
     let id = sub.get("id").and_then(Value::as_str)?;
     let mut prev: Option<Value> = None;
-    let res = st.store.mutate(tenant, kind, id, |doc| {
-        if chrono::Utc::now().timestamp_millis() < due_at_ms(doc, interval) {
-            return Err(());
-        }
-        let Some(sub_doc) = doc.as_object_mut() else {
-            // a stored Subscription is an object; one that is not carries no
-            // notification member to stamp, and Err(()) is the same "nothing
-            // written" the not-due branch above returns
-            return Err(());
-        };
-        if let Some(n) = sub_doc
-            .entry("notification")
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-        {
-            prev = n.insert("lastNotification".into(), Value::String(now_iso()));
-        }
-        Ok(())
-    });
+    let res = st
+        .store
+        .mutate(tenant, kind, id, |doc| {
+            if chrono::Utc::now().timestamp_millis() < due_at_ms(doc, interval) {
+                return Err(());
+            }
+            let Some(sub_doc) = doc.as_object_mut() else {
+                // a stored Subscription is an object; one that is not carries no
+                // notification member to stamp, and Err(()) is the same "nothing
+                // written" the not-due branch above returns
+                return Err(());
+            };
+            if let Some(n) = sub_doc
+                .entry("notification")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+            {
+                prev = n.insert("lastNotification".into(), Value::String(now_iso()));
+            }
+            Ok(())
+        })
+        .await;
     matches!(res, Ok(Some(Ok(())))).then_some(prev)
 }
 
@@ -1263,20 +1316,29 @@ fn claim_interval(
 /// The stamp returns to what [`claim_interval`] found, which both keeps
 /// `lastNotification` truthful and leaves the subscription due, exactly as
 /// the single-process path does.
-fn release_interval(st: &AppState, tenant: &TenantId, kind: Kind, id: &str, prev: Option<Value>) {
-    let res = st.store.mutate::<(), ()>(tenant, kind, id, |doc| {
-        if let Some(n) = doc
-            .as_object_mut()
-            .and_then(|o| o.get_mut("notification"))
-            .and_then(Value::as_object_mut)
-        {
-            match &prev {
-                Some(v) => n.insert("lastNotification".into(), v.clone()),
-                None => n.remove("lastNotification"),
-            };
-        }
-        Ok(())
-    });
+async fn release_interval(
+    st: &AppState,
+    tenant: &TenantId,
+    kind: Kind,
+    id: &str,
+    prev: Option<Value>,
+) {
+    let res = st
+        .store
+        .mutate::<(), ()>(tenant, kind, id, |doc| {
+            if let Some(n) = doc
+                .as_object_mut()
+                .and_then(|o| o.get_mut("notification"))
+                .and_then(Value::as_object_mut)
+            {
+                match &prev {
+                    Some(v) => n.insert("lastNotification".into(), v.clone()),
+                    None => n.remove("lastNotification"),
+                };
+            }
+            Ok(())
+        })
+        .await;
     if let Err(e) = res {
         tracing::warn!("releasing the interval claim for {id} failed: {e}");
     }
@@ -1326,7 +1388,7 @@ pub async fn interval_tick(st: &AppState) {
     #[cfg(not(target_arch = "wasm32"))]
     let mut sending = tokio::task::JoinSet::new();
     for tenant_str in read_or_warn(
-        st.store.subscription_tenants(),
+        st.store.subscription_tenants().await,
         "the tenants with subscriptions",
     ) {
         let Ok(tenant) = TenantId::new(&tenant_str) else {
@@ -1338,7 +1400,7 @@ pub async fn interval_tick(st: &AppState) {
             (_, false) => Vec::new(),
             (Some(m), _) => m.periodic_docs(tenant.as_str()),
             (None, _) => read_or_warn(
-                st.store.list(&tenant, Kind::Subscription),
+                st.store.list(&tenant, Kind::Subscription).await,
                 "the periodic Subscriptions",
             ),
         };
@@ -1360,7 +1422,7 @@ pub async fn interval_tick(st: &AppState) {
             // instead of parking on an anchor only the winner advanced.
             next_sub = next_sub.min(now_ms.saturating_add(interval_offset_ms(interval)));
             let claim = if st.nats {
-                match claim_interval(st, &tenant, Kind::Subscription, &sub, interval) {
+                match claim_interval(st, &tenant, Kind::Subscription, &sub, interval).await {
                     Some(prev) => Some(prev),
                     None => continue,
                 }
@@ -1415,18 +1477,24 @@ pub async fn interval_tick(st: &AppState) {
                     ..Default::default()
                 };
                 read_or_warn(
-                    st.store.query_entities(&tenant, &filter).map(|o| o.rows),
+                    st.store
+                        .query_entities(&tenant, &filter)
+                        .await
+                        .map(|o| o.rows),
                     "the Entities a periodic Subscription notifies about",
                 )
             };
-            let matching: Vec<Value> = rows
-                .into_iter()
-                .filter(|d| {
-                    selector_match(&sub, d, &ctx)
-                        && conditions_match(&sub, d, &ctx, &store_lookup(st, &tenant))
-                })
-                .flat_map(|d| build_data(st, &tenant, &sub, &ctx, None, Some(&d), &[], false, &now))
-                .collect();
+            let mut matching: Vec<Value> = Vec::new();
+            for d in rows {
+                if !selector_match(&sub, &d, &ctx)
+                    || !linked_eval(st, &tenant, |l| conditions_match(&sub, &d, &ctx, l)).await
+                {
+                    continue;
+                }
+                matching.extend(
+                    build_data(st, &tenant, &sub, &ctx, None, Some(&d), &[], false, &now).await,
+                );
+            }
             if matching.is_empty() {
                 // 5.8.6: "If there are no matching Entities, no Notification
                 // is sent" — lastNotification stays untouched, so this
@@ -1435,7 +1503,7 @@ pub async fn interval_tick(st: &AppState) {
                 // here, or the multi-pod path would stamp an instant nothing
                 // was sent at and park the subscription for a whole interval.
                 if let (Some(prev), Some(id)) = (claim, sub.get("id").and_then(Value::as_str)) {
-                    release_interval(st, &tenant, Kind::Subscription, id, prev);
+                    release_interval(st, &tenant, Kind::Subscription, id, prev).await;
                 }
                 next_sub = next_sub.min(due_at);
                 continue;
@@ -1457,7 +1525,7 @@ pub async fn interval_tick(st: &AppState) {
         // csource timeInterval subs: periodic CSourceNotification with all
         // matching registrations, independent of changes (5.11.7)
         for sub in read_or_warn(
-            st.store.list(&tenant, Kind::CSourceSubscription),
+            st.store.list(&tenant, Kind::CSourceSubscription).await,
             "the periodic Context Source Registration Subscriptions",
         ) {
             let Some(interval) = sub.get("timeInterval").and_then(Value::as_f64) else {
@@ -1475,14 +1543,16 @@ pub async fn interval_tick(st: &AppState) {
             // 5.11.7 sends the periodic CSourceNotification whatever the
             // matching set is, so this claim is never given back.
             if st.nats
-                && claim_interval(st, &tenant, Kind::CSourceSubscription, &sub, interval).is_none()
+                && claim_interval(st, &tenant, Kind::CSourceSubscription, &sub, interval)
+                    .await
+                    .is_none()
             {
                 continue;
             }
             let ctx = sub_context(st, &tenant, &sub).await;
             let spec = crate::registry::spec_for_subscription(&sub);
             let data: Vec<Value> = read_or_warn(
-                st.store.list(&tenant, Kind::Registration),
+                st.store.list(&tenant, Kind::Registration).await,
                 "the registrations a periodic Context Source Notification carries",
             )
             .into_iter()
@@ -1647,7 +1717,7 @@ pub(crate) async fn prepare_csource_jobs(
     // client kind in the internal id namespace is a leftover of a release
     // that stored the internal ones there, and drives nothing.
     let client = read_or_warn(
-        st.store.list(tenant, Kind::CSourceSubscription),
+        st.store.list(tenant, Kind::CSourceSubscription).await,
         "the Context Source Registration Subscriptions of a changed registration",
     )
     .into_iter()
@@ -1656,7 +1726,7 @@ pub(crate) async fn prepare_csource_jobs(
             .is_some_and(|id| crate::registry::csr_kind(id) == Kind::CSourceSubscription)
     });
     let internal = read_or_warn(
-        st.store.list(tenant, Kind::DistSub),
+        st.store.list(tenant, Kind::DistSub).await,
         "the internal Registration Subscriptions of a changed registration",
     )
     .into_iter()
@@ -1701,7 +1771,7 @@ pub(crate) async fn send_csource_jobs(st: &AppState, tenant: &TenantId, jobs: Ve
             .and_then(Value::as_str)
             .unwrap_or_default();
         let kind = crate::registry::csr_kind(sub_id);
-        if !matches!(st.store.get(tenant, kind, sub_id), Ok(Some(_))) {
+        if !matches!(st.store.get(tenant, kind, sub_id).await, Ok(Some(_))) {
             continue;
         }
         deliver_as(
@@ -1783,6 +1853,7 @@ pub(crate) async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &s
     let Some(sub) = st
         .store
         .get(tenant, crate::registry::csr_kind(sub_id), sub_id)
+        .await
         .ok()
         .flatten()
     else {
@@ -1794,7 +1865,7 @@ pub(crate) async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &s
     let ctx = sub_context(st, tenant, &sub).await;
     let spec = crate::registry::spec_for_subscription(&sub);
     let data: Vec<Value> = read_or_warn(
-        st.store.list(tenant, Kind::Registration),
+        st.store.list(tenant, Kind::Registration).await,
         "the registrations an initial Context Source Notification carries",
     )
     .into_iter()
@@ -2048,10 +2119,11 @@ async fn deliver_as(
     // 6.3.22: a subscription living under a snapshot's synthetic tenant
     // notifies with the NGSILD-Snapshot header and the OWNER tenant — the
     // internal "snap-…" tenant never leaks.
-    let (hdr_tenant, snapshot_id) = match crate::snapshots::snapshot_of_synth(st, tenant.as_str()) {
-        Some((owner, sid)) => (owner, Some(sid)),
-        None => (tenant.clone(), None),
-    };
+    let (hdr_tenant, snapshot_id) =
+        match crate::snapshots::snapshot_of_synth(st, tenant.as_str()).await {
+            Some((owner, sid)) => (owner, Some(sid)),
+            None => (tenant.clone(), None),
+        };
 
     // Prepared BEFORE the bookkeeping writeback so the optimistic stamp
     // covers only the in-flight attempt (046_12_01 race). The parts are
@@ -2086,6 +2158,7 @@ async fn deliver_as(
     let booked = st
         .store
         .record_delivery(tenant, kind, &sub_id, &now)
+        .await
         .unwrap_or_else(|e| {
             tracing::warn!("bookkeeping writeback failed: {e}");
             None
@@ -2184,6 +2257,7 @@ async fn deliver_as(
                 failed_doc = Some(doc.clone());
                 Ok::<(), antares_model::NgsiError>(())
             })
+            .await
             .unwrap_or_else(|e| {
                 tracing::warn!("failure-status writeback failed: {e}");
                 None
@@ -2298,7 +2372,14 @@ async fn retry_and_settle(
         tokio::time::sleep(delay).await;
         // the subscription may have gone, or its endpoint may have tripped
         // the breaker meanwhile — a retry is still one more attempt
-        if st.store.get(tenant, kind, sub_id).ok().flatten().is_none() {
+        if st
+            .store
+            .get(tenant, kind, sub_id)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
             return;
         }
         made += 1;
@@ -2325,6 +2406,7 @@ async fn retry_and_settle(
                         retried_doc = Some(doc.clone());
                         Ok::<(), antares_model::NgsiError>(())
                     })
+                    .await
                     .unwrap_or_else(|e| {
                         tracing::warn!("retry bookkeeping writeback failed: {e}");
                         None
@@ -2347,7 +2429,7 @@ async fn retry_and_settle(
         sub_id, uri, timeout_ms, &outbound, made, &first_err, &last_err, &first_at,
     );
     let id = letter["id"].as_str().unwrap_or_default().to_owned();
-    match st.store.create(tenant, Kind::DeadLetter, &id, letter) {
+    match st.store.create(tenant, Kind::DeadLetter, &id, letter).await {
         Ok(_) => {
             DEAD_LETTERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
@@ -2866,7 +2948,7 @@ mod change_pipeline {
         crate::allow_private();
         let (uri, hits) = counting_endpoint().await;
         let mut st = AppState::new("antares-mirror-booked".into());
-        crate::wire(&mut st);
+        crate::wire(&mut st).await;
         subscribe(&st, "booked", &uri, 30_000).await;
         assert_eq!(create_vehicle(&st, 7).await, 201);
         let deadline = std::time::Instant::now()
@@ -2890,6 +2972,7 @@ mod change_pipeline {
         let stored = st
             .store
             .get(&tenant, Kind::Subscription, id)
+            .await
             .expect("store")
             .expect("row");
         assert_eq!(stored["notification"]["timesSent"], json!(1));
@@ -2912,7 +2995,7 @@ mod change_pipeline {
         crate::allow_private();
         let (uri, hits) = counting_endpoint().await;
         let mut st = AppState::new("antares-panic-guard".into());
-        crate::wire(&mut st);
+        crate::wire(&mut st).await;
         subscribe(&st, "guard", &uri, 2_000).await;
         // Poison the mirror lock while a change is in flight: whatever the
         // matcher does with that (recover, or panic into the supervision
@@ -2968,7 +3051,7 @@ mod change_pipeline {
             }
         });
         let mut st = AppState::new("antares-queue-bound".into());
-        crate::wire(&mut st);
+        crate::wire(&mut st).await;
         // the stall is bounded by the outbound client's own 5 s timeout, not
         // by endpoint.timeout: after each timeout the consumer frees another
         // CHANGE_BATCH slots, and on a slow runner a single-queue-depth loop
@@ -2998,7 +3081,7 @@ mod change_pipeline {
         crate::allow_private();
         let (uri, hits) = counting_endpoint().await;
         let mut st = AppState::new("antares-pending-changes".into());
-        crate::wire(&mut st);
+        crate::wire(&mut st).await;
         subscribe(&st, "counter", &uri, 30_000).await;
         for n in 0..20 {
             assert_eq!(create_vehicle(&st, 5_000 + n).await, 201);
@@ -3035,7 +3118,7 @@ mod change_pipeline {
         let (uri, hits) = counting_endpoint().await;
         let (quiet_uri, quiet_hits) = counting_endpoint().await;
         let mut st = AppState::new("antares-trigger-equivalence".into());
-        crate::wire(&mut st);
+        crate::wire(&mut st).await;
         let sub = |id: &str, trigger: &str, uri: &str| {
             json!({
                 "id": format!("urn:ngsi-ld:Subscription:{id}"),
@@ -3062,18 +3145,19 @@ mod change_pipeline {
         }
         // the receiver's count alone cannot say WHY nothing arrived: the
         // subscription's own bookkeeping and the pipeline counters can
+        let sub = st
+            .store
+            .get(
+                &TenantId::default(),
+                Kind::Subscription,
+                "urn:ngsi-ld:Subscription:eu",
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s["notification"].to_string())
+            .unwrap_or_else(|| "subscription missing".into());
         let diagnosis = || {
-            let sub = st
-                .store
-                .get(
-                    &TenantId::default(),
-                    Kind::Subscription,
-                    "urn:ngsi-ld:Subscription:eu",
-                )
-                .ok()
-                .flatten()
-                .map(|s| s["notification"].to_string())
-                .unwrap_or_else(|| "subscription missing".into());
             format!(
                 "notification={sub} changes_dropped={} task_panics={} dead_letters={}",
                 changes_dropped(),
@@ -3276,7 +3360,7 @@ mod clause_5_8_6_deletion_payload {
         }
     }
 
-    fn build(
+    async fn build(
         sub: &Value,
         before: &Value,
         after: Option<&Value>,
@@ -3296,7 +3380,8 @@ mod clause_5_8_6_deletion_payload {
             deleted,
             entity_deleted,
             "2026-01-01T00:00:00Z",
-        );
+        )
+        .await;
         assert_eq!(data.len(), 1, "one changed entity ⇒ one data entry");
         data.into_iter().next().expect("entry")
     }
@@ -3304,8 +3389,8 @@ mod clause_5_8_6_deletion_payload {
     /// 5.8.6: a deleted Attribute is notified as the NGSI-LD null value of
     /// its own type — `object` for a Relationship, the `{"@none": …}`
     /// languageMap form for a LanguageProperty, `json`, `vocab`, `value`.
-    #[test]
-    fn typed_null_member_per_attribute_type() {
+    #[tokio::test]
+    async fn typed_null_member_per_attribute_type() {
         let cases = [
             ("Property", "value", json!("urn:ngsi-ld:null")),
             ("Relationship", "object", json!("urn:ngsi-ld:null")),
@@ -3333,7 +3418,8 @@ mod clause_5_8_6_deletion_payload {
                 Some(&after),
                 &[format!("{DC}/gone")],
                 false,
-            );
+            )
+            .await;
             let got = insts(&entry, "gone");
             assert_eq!(got.len(), 1, "{atype}: one tombstone");
             assert_eq!(got[0].get("type"), Some(&json!(atype)));
@@ -3359,8 +3445,8 @@ mod clause_5_8_6_deletion_payload {
     /// 5.8.6: a whole Attribute deleted at once is ONE tombstone with no
     /// datasetId, while losing individual instances tombstones each lost
     /// datasetId and leaves the survivors untouched.
-    #[test]
-    fn whole_attribute_versus_per_instance_deletion() {
+    #[tokio::test]
+    async fn whole_attribute_versus_per_instance_deletion() {
         let three = json!([
             {"type": "Property", "value": 1},
             {"type": "Property", "value": 2, "datasetId": "urn:ds:a"},
@@ -3384,7 +3470,8 @@ mod clause_5_8_6_deletion_payload {
             Some(&after),
             &attr,
             false,
-        );
+        )
+        .await;
         let got = insts(&entry, "speed");
         assert_eq!(got.len(), 1, "a whole-attribute deletion is one tombstone");
         assert!(
@@ -3407,7 +3494,8 @@ mod clause_5_8_6_deletion_payload {
             Some(&after),
             &attr,
             false,
-        );
+        )
+        .await;
         let got = insts(&entry, "speed");
         assert_eq!(got.len(), 3, "two survivors plus one tombstone");
         let tombs: Vec<&&Value> = got
@@ -3443,8 +3531,8 @@ mod clause_5_8_6_deletion_payload {
     /// two apart. 5.5.4 confines the bare form to concise: normalized keeps
     /// the object, and a first-level `urn:ngsi-ld:null` is BadRequestData
     /// everywhere else.
-    #[test]
-    fn a_deleted_attribute_is_bare_unless_it_has_more_to_say() {
+    #[tokio::test]
+    async fn a_deleted_attribute_is_bare_unless_it_has_more_to_say() {
         let speed = format!("{DC}/speed");
         let label = format!("{DC}/label");
         let before = json!({
@@ -3458,19 +3546,23 @@ mod clause_5_8_6_deletion_payload {
             "type": [format!("{DC}/Vehicle")],
         });
         let deleted = [speed.clone(), label.clone()];
-        let entry = |n: Value| {
+        // a nested fn, not a closure: the future borrows the arguments and
+        // the `sub` it builds, and a closure cannot return a value borrowing
+        // its own captures
+        async fn entry(before: &Value, after: &Value, deleted: &[String], n: Value) -> Value {
             build(
                 &json!({"notification": n}),
-                &before,
-                Some(&after),
-                &deleted,
+                before,
+                Some(after),
+                deleted,
                 false,
             )
-        };
+            .await
+        }
 
         // Nothing more is required: the attribute IS the URI.
         for fmt in ["concise", "simplified"] {
-            let e = entry(json!({"format": fmt}));
+            let e = entry(&before, &after, &deleted, json!({"format": fmt})).await;
             assert_eq!(
                 e["speed"],
                 json!("urn:ngsi-ld:null"),
@@ -3484,7 +3576,7 @@ mod clause_5_8_6_deletion_payload {
         }
 
         // Normalized is not the bare form (5.5.4 confines that to concise).
-        let e = entry(json!({"format": "normalized"}));
+        let e = entry(&before, &after, &deleted, json!({"format": "normalized"})).await;
         assert_eq!(
             e["speed"],
             json!({"type": "Property", "value": "urn:ngsi-ld:null"}),
@@ -3493,12 +3585,24 @@ mod clause_5_8_6_deletion_payload {
 
         // sysAttrs: the system-generated sub-attributes have to be provided,
         // so the deletion becomes an object carrying them.
-        let e = entry(json!({"format": "concise", "sysAttrs": true}));
+        let e = entry(
+            &before,
+            &after,
+            &deleted,
+            json!({"format": "concise", "sysAttrs": true}),
+        )
+        .await;
         assert_eq!(e["speed"]["value"], json!("urn:ngsi-ld:null"));
         assert_eq!(e["speed"]["deletedAt"], json!("2026-01-01T00:00:00Z"));
 
         // showChanges: a previous value has to be provided.
-        let e = entry(json!({"format": "concise", "showChanges": true}));
+        let e = entry(
+            &before,
+            &after,
+            &deleted,
+            json!({"format": "concise", "showChanges": true}),
+        )
+        .await;
         assert_eq!(e["speed"]["value"], json!("urn:ngsi-ld:null"));
         assert_eq!(e["speed"]["previousValue"], json!(1));
         assert_eq!(
@@ -3526,7 +3630,8 @@ mod clause_5_8_6_deletion_payload {
             Some(&after_ds),
             &[speed],
             false,
-        );
+        )
+        .await;
         let gone = e["speed"]
             .as_array()
             .and_then(|a| a.iter().find(|i| i["value"] == json!("urn:ngsi-ld:null")))
@@ -3542,8 +3647,8 @@ mod clause_5_8_6_deletion_payload {
 
     /// 5.8.6 with sysAttrs and showChanges: the tombstone carries deletedAt
     /// and the previous value of its own typed member.
-    #[test]
-    fn sys_attrs_and_show_changes_stamp_the_tombstone() {
+    #[tokio::test]
+    async fn sys_attrs_and_show_changes_stamp_the_tombstone() {
         let before = json!({
             "id": "urn:ngsi-ld:Vehicle:stamp",
             "type": [format!("{DC}/Vehicle")],
@@ -3555,7 +3660,7 @@ mod clause_5_8_6_deletion_payload {
             "type": [format!("{DC}/Vehicle")],
         });
         let sub = json!({"notification": {"sysAttrs": true, "showChanges": true}});
-        let entry = build(&sub, &before, Some(&after), &[format!("{DC}/where")], false);
+        let entry = build(&sub, &before, Some(&after), &[format!("{DC}/where")], false).await;
         let got = insts(&entry, "where");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].get("object"), Some(&json!("urn:ngsi-ld:null")));
@@ -3735,9 +3840,10 @@ mod clause_5_2_14_2_bookkeeping {
         (format!("http://{addr}/notify"), hits)
     }
 
-    fn stored_notification(st: &AppState, tenant: &TenantId) -> Value {
+    async fn stored_notification(st: &AppState, tenant: &TenantId) -> Value {
         st.store
             .get(tenant, Kind::Subscription, SUB_ID)
+            .await
             .expect("store read")
             .expect("subscription row")
             .get("notification")
@@ -3760,7 +3866,7 @@ mod clause_5_2_14_2_bookkeeping {
         .await;
     }
 
-    fn subscribe(st: &AppState, tenant: &TenantId, uri: &str) -> Value {
+    async fn subscribe(st: &AppState, tenant: &TenantId, uri: &str) -> Value {
         let sub = json!({
             "id": SUB_ID,
             "type": "Subscription",
@@ -3769,6 +3875,7 @@ mod clause_5_2_14_2_bookkeeping {
         });
         st.store
             .create(tenant, Kind::Subscription, SUB_ID, sub.clone())
+            .await
             .expect("subscription row");
         sub
     }
@@ -3782,10 +3889,10 @@ mod clause_5_2_14_2_bookkeeping {
         let (uri, hits) = endpoint(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
         let st = AppState::new("antares-times-failed".into());
         let tenant = TenantId::new("default").expect("tenant");
-        let sub = subscribe(&st, &tenant, &uri);
+        let sub = subscribe(&st, &tenant, &uri).await;
 
         send(&st, &tenant, &sub).await;
-        let n = stored_notification(&st, &tenant);
+        let n = stored_notification(&st, &tenant).await;
         assert_eq!(hits.load(Ordering::SeqCst), 1, "the endpoint was tried");
         assert_eq!(n.get("timesFailed"), Some(&json!(1)));
         assert_eq!(n.get("timesSent"), Some(&json!(1)), "the attempt was sent");
@@ -3796,7 +3903,7 @@ mod clause_5_2_14_2_bookkeeping {
         );
 
         send(&st, &tenant, &sub).await;
-        let n = stored_notification(&st, &tenant);
+        let n = stored_notification(&st, &tenant).await;
         assert_eq!(
             n.get("timesFailed"),
             Some(&json!(2)),
@@ -3814,7 +3921,7 @@ mod clause_5_2_14_2_bookkeeping {
         let (uri, hits) = endpoint(axum::http::StatusCode::OK).await;
         let st = AppState::new("antares-breaker-bookkeeping".into());
         let tenant = TenantId::new("default").expect("tenant");
-        let sub = subscribe(&st, &tenant, &uri);
+        let sub = subscribe(&st, &tenant, &uri).await;
         for _ in 0..crate::egress::TRIP_AFTER {
             st.egress.record_failure(tenant.as_str(), &uri);
         }
@@ -3824,7 +3931,7 @@ mod clause_5_2_14_2_bookkeeping {
         );
 
         send(&st, &tenant, &sub).await;
-        let n = stored_notification(&st, &tenant);
+        let n = stored_notification(&st, &tenant).await;
         assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing left the process");
         assert!(
             n.get("timesSent").is_none(),
@@ -3839,7 +3946,7 @@ mod clause_5_2_14_2_bookkeeping {
         // so the assertions above cannot pass vacuously.
         st.egress.record_success(tenant.as_str(), &uri);
         send(&st, &tenant, &sub).await;
-        let n = stored_notification(&st, &tenant);
+        let n = stored_notification(&st, &tenant).await;
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(n.get("timesSent"), Some(&json!(1)));
         assert!(n.get("lastNotification").is_some());
@@ -3901,7 +4008,7 @@ mod delivery_policy_tests {
         (st, TenantId::new("default").expect("tenant"))
     }
 
-    fn subscribe(st: &AppState, tenant: &TenantId, id: &str, uri: &str) -> Value {
+    async fn subscribe(st: &AppState, tenant: &TenantId, id: &str, uri: &str) -> Value {
         let sub = json!({
             "id": id,
             "type": "Subscription",
@@ -3910,6 +4017,7 @@ mod delivery_policy_tests {
         });
         st.store
             .create(tenant, Kind::Subscription, id, sub.clone())
+            .await
             .expect("subscription row");
         sub
     }
@@ -3929,21 +4037,26 @@ mod delivery_policy_tests {
         .await;
     }
 
-    fn notification(st: &AppState, tenant: &TenantId, id: &str) -> Value {
+    async fn notification(st: &AppState, tenant: &TenantId, id: &str) -> Value {
         st.store
             .get(tenant, Kind::Subscription, id)
+            .await
             .expect("store read")
             .expect("subscription row")["notification"]
             .clone()
     }
 
-    fn letters(st: &AppState, tenant: &TenantId) -> Vec<Value> {
-        st.store.list(tenant, Kind::DeadLetter).expect("list")
+    async fn letters(st: &AppState, tenant: &TenantId) -> Vec<Value> {
+        st.store.list(tenant, Kind::DeadLetter).await.expect("list")
     }
 
-    async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+    async fn wait_until<F, Fut>(mut cond: F, what: &str)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
         for _ in 0..100 {
-            if cond() {
+            if cond().await {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3955,20 +4068,20 @@ mod delivery_policy_tests {
     async fn a_retry_that_succeeds_is_one_notification() {
         let (st, t) = state(policy(3, 50));
         let (uri, hits) = flaky_endpoint(2).await;
-        let sub = subscribe(&st, &t, SUB_ID, &uri);
+        let sub = subscribe(&st, &t, SUB_ID, &uri).await;
         send(&st, &t, &sub).await;
         // the first attempt is booked at once, as 5.8.6 says
-        let n = notification(&st, &t, SUB_ID);
+        let n = notification(&st, &t, SUB_ID).await;
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(n["timesSent"], json!(1));
         assert_eq!(n["status"], json!("failed"));
         assert!(n.get("lastSuccess").is_none());
         wait_until(
-            || notification(&st, &t, SUB_ID)["status"] == json!("ok"),
+            || async { notification(&st, &t, SUB_ID).await["status"] == json!("ok") },
             "retry success",
         )
         .await;
-        let n = notification(&st, &t, SUB_ID);
+        let n = notification(&st, &t, SUB_ID).await;
         assert_eq!(hits.load(Ordering::SeqCst), 3, "two retries were made");
         assert_eq!(
             n["timesSent"],
@@ -3986,7 +4099,7 @@ mod delivery_policy_tests {
             "the earlier failure stays recorded"
         );
         assert!(
-            letters(&st, &t).is_empty(),
+            letters(&st, &t).await.is_empty(),
             "a delivered notification is no dead letter"
         );
     }
@@ -3995,12 +4108,16 @@ mod delivery_policy_tests {
     async fn an_exhausted_policy_leaves_exactly_one_dead_letter() {
         let (st, t) = state(policy(2, 50));
         let (uri, hits) = flaky_endpoint(usize::MAX).await;
-        let sub = subscribe(&st, &t, SUB_ID, &uri);
+        let sub = subscribe(&st, &t, SUB_ID, &uri).await;
         let before = dead_letters_written();
         send(&st, &t, &sub).await;
-        wait_until(|| !letters(&st, &t).is_empty(), "dead letter").await;
+        wait_until(
+            || async { !letters(&st, &t).await.is_empty() },
+            "dead letter",
+        )
+        .await;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let l = letters(&st, &t);
+        let l = letters(&st, &t).await;
         assert_eq!(l.len(), 1, "{l:?}");
         assert_eq!(hits.load(Ordering::SeqCst), 2, "attempts = policy.attempts");
         let l = &l[0];
@@ -4020,7 +4137,7 @@ mod delivery_policy_tests {
         assert!(l["link"].as_str().is_some_and(|v| v.contains("rel=")));
         assert!(l["receiverInfo"].is_array());
         assert!(dead_letters_written() > before);
-        let n = notification(&st, &t, SUB_ID);
+        let n = notification(&st, &t, SUB_ID).await;
         assert_eq!(n["timesSent"], json!(1));
         assert_eq!(n["timesFailed"], json!(1));
         assert_eq!(n["status"], json!("failed"));
@@ -4030,12 +4147,15 @@ mod delivery_policy_tests {
     async fn the_default_policy_never_retries_and_never_dead_letters() {
         let (st, t) = state(DeliveryPolicy::default());
         let (uri, hits) = flaky_endpoint(usize::MAX).await;
-        let sub = subscribe(&st, &t, SUB_ID, &uri);
+        let sub = subscribe(&st, &t, SUB_ID, &uri).await;
         send(&st, &t, &sub).await;
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert!(letters(&st, &t).is_empty());
-        assert_eq!(notification(&st, &t, SUB_ID)["status"], json!("failed"));
+        assert!(letters(&st, &t).await.is_empty());
+        assert_eq!(
+            notification(&st, &t, SUB_ID).await["status"],
+            json!("failed")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4043,8 +4163,8 @@ mod delivery_policy_tests {
         let (st, t) = state(policy(2, 3_000));
         let (dead, _) = flaky_endpoint(usize::MAX).await;
         let (live, live_hits) = flaky_endpoint(0).await;
-        let a = subscribe(&st, &t, "urn:ngsi-ld:Subscription:a", &dead);
-        let b = subscribe(&st, &t, "urn:ngsi-ld:Subscription:b", &live);
+        let a = subscribe(&st, &t, "urn:ngsi-ld:Subscription:a", &dead).await;
+        let b = subscribe(&st, &t, "urn:ngsi-ld:Subscription:b", &live).await;
         let started = std::time::Instant::now();
         send(&st, &t, &a).await;
         send(&st, &t, &b).await;
@@ -4060,10 +4180,11 @@ mod delivery_policy_tests {
     async fn retries_stop_when_the_subscription_is_deleted() {
         let (st, t) = state(policy(4, 100));
         let (uri, hits) = flaky_endpoint(usize::MAX).await;
-        let sub = subscribe(&st, &t, SUB_ID, &uri);
+        let sub = subscribe(&st, &t, SUB_ID, &uri).await;
         send(&st, &t, &sub).await;
         st.store
             .delete(&t, Kind::Subscription, SUB_ID)
+            .await
             .expect("delete");
         tokio::time::sleep(Duration::from_millis(800)).await;
         assert_eq!(
@@ -4072,7 +4193,7 @@ mod delivery_policy_tests {
             "no retry for a gone subscription"
         );
         assert!(
-            letters(&st, &t).is_empty(),
+            letters(&st, &t).await.is_empty(),
             "no dead letter for a gone subscription"
         );
     }
@@ -4088,7 +4209,7 @@ mod delivery_policy_tests {
             allow_private: false,
         }));
         let (uri, hits) = flaky_endpoint(0).await;
-        let sub = subscribe(&st, &t, SUB_ID, &uri);
+        let sub = subscribe(&st, &t, SUB_ID, &uri).await;
         send(&st, &t, &sub).await;
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(
@@ -4097,10 +4218,13 @@ mod delivery_policy_tests {
             "policy refusal: nothing leaves"
         );
         assert!(
-            letters(&st, &t).is_empty(),
+            letters(&st, &t).await.is_empty(),
             "a policy verdict is not a transport failure"
         );
-        assert_eq!(notification(&st, &t, SUB_ID)["status"], json!("failed"));
+        assert_eq!(
+            notification(&st, &t, SUB_ID).await["status"],
+            json!("failed")
+        );
     }
 }
 
@@ -4277,10 +4401,11 @@ mod clause_5_8_6_periodic_sweep {
         })
     }
 
-    fn install(st: &AppState, tenant: &TenantId, sub: &Value) {
+    async fn install(st: &AppState, tenant: &TenantId, sub: &Value) {
         let id = sub["id"].as_str().expect("sub id");
         st.store
             .create(tenant, Kind::Subscription, id, sub.clone())
+            .await
             .expect("subscription row");
         if let Some(m) = &st.sub_mirror {
             m.apply(tenant.as_str(), id, Some(sub.clone()));
@@ -4313,6 +4438,7 @@ mod clause_5_8_6_periodic_sweep {
         ] {
             st.store
                 .create(&tenant, Kind::Entity, id, entity(id, ty))
+                .await
                 .expect("entity row");
         }
         install(
@@ -4324,7 +4450,8 @@ mod clause_5_8_6_periodic_sweep {
                 json!([{"id": "urn:ngsi-ld:Vehicle:2", "type": format!("{DC}/Vehicle")}]),
                 10,
             ),
-        );
+        )
+        .await;
         install(
             &st,
             &tenant,
@@ -4334,7 +4461,8 @@ mod clause_5_8_6_periodic_sweep {
                 json!([{"id": "urn:ngsi-ld:Vehicle:404", "type": format!("{DC}/Vehicle")}]),
                 10,
             ),
-        );
+        )
+        .await;
 
         interval_tick(&st).await;
 
@@ -4378,6 +4506,7 @@ mod clause_5_8_6_periodic_sweep {
                 "urn:ngsi-ld:Vehicle:1",
                 entity("urn:ngsi-ld:Vehicle:1", "Vehicle"),
             )
+            .await
             .expect("entity row");
         let sub = periodic(
             "urn:ngsi-ld:Subscription:clock",
@@ -4385,7 +4514,7 @@ mod clause_5_8_6_periodic_sweep {
             json!([{"type": format!("{DC}/Vehicle")}]),
             10,
         );
-        install(&st, &tenant, &sub);
+        install(&st, &tenant, &sub).await;
         let armed = chrono::Utc::now().timestamp_millis() + 60_000;
         mirror.next_sub_sweep_ms.store(armed, Relaxed);
 
@@ -4527,7 +4656,7 @@ mod clause_5_8_6_grouped_delivery {
         crate::allow_private();
         let (uri, seen) = recording_endpoint().await;
         let mut st = AppState::new("antares-grouped-delivery".into());
-        crate::wire(&mut st);
+        crate::wire(&mut st).await;
         assert_eq!(
             post(
                 &st,
@@ -4581,6 +4710,7 @@ mod clause_5_8_6_grouped_delivery {
                 Kind::Subscription,
                 "urn:ngsi-ld:Subscription:grouped",
             )
+            .await
             .expect("store")
             .expect("row");
         assert_eq!(sub["notification"]["timesSent"], json!(1));
@@ -4613,7 +4743,7 @@ mod interval_claim {
     use super::*;
     use serde_json::json;
 
-    fn seed(st: &AppState, tenant: &TenantId) {
+    async fn seed(st: &AppState, tenant: &TenantId) {
         st.store
             .create(
                 tenant,
@@ -4629,12 +4759,14 @@ mod interval_claim {
                     "notification": {"endpoint": {"uri": "http://127.0.0.1:9/notify"}},
                 }),
             )
+            .await
             .expect("seed");
     }
 
-    fn stamp(st: &AppState, tenant: &TenantId) -> Option<String> {
+    async fn stamp(st: &AppState, tenant: &TenantId) -> Option<String> {
         st.store
             .get(tenant, Kind::Subscription, "urn:ngsi-ld:Subscription:tick")
+            .await
             .expect("store")
             .expect("row")["notification"]["lastNotification"]
             .as_str()
@@ -4655,10 +4787,10 @@ mod interval_claim {
         for nats in [false, true] {
             let mut st = AppState::new("me".into());
             st.nats = nats;
-            seed(&st, &tenant);
+            seed(&st, &tenant).await;
             interval_tick(&st).await;
             assert_eq!(
-                stamp(&st, &tenant),
+                stamp(&st, &tenant).await,
                 None,
                 "nats={nats}: nothing matched, so nothing was sent"
             );
@@ -4683,7 +4815,7 @@ mod change_grouping {
     async fn every_change_of_a_drain_reaches_each_matching_subscription_once() {
         crate::allow_private();
         let mut st = AppState::new("antares-grouping-test".into());
-        crate::wire(&mut st);
+        crate::wire(&mut st).await;
         let tenant = TenantId::new("default").expect("tenant");
         let posts: StdArc<AtomicUsize> = StdArc::default();
         let entities: StdArc<std::sync::Mutex<Vec<usize>>> = StdArc::default();
@@ -4727,6 +4859,7 @@ mod change_grouping {
                     &format!("urn:ngsi-ld:Subscription:group-{i}"),
                     sub.clone(),
                 )
+                .await
                 .expect("seed subscription");
             if let Some(m) = &st.sub_mirror {
                 m.apply(
@@ -4807,6 +4940,7 @@ mod interval_sweep_concurrency {
                     "type": ["https://uri.etsi.org/ngsi-ld/default-context/Vehicle"],
                 }),
             )
+            .await
             .expect("seed entity");
         const SUBS: u32 = 4;
         const TIMEOUT_MS: u64 = 300;
@@ -4832,6 +4966,7 @@ mod interval_sweep_concurrency {
                         }},
                     }),
                 )
+                .await
                 .expect("seed subscription");
         }
         let started = std::time::Instant::now();
@@ -4949,6 +5084,7 @@ mod delivery_share {
                     "type": ["https://uri.etsi.org/ngsi-ld/default-context/Vehicle"],
                 }),
             )
+            .await
             .expect("seed entity");
         // more subscriptions than the whole width, so an unbounded tenant
         // would hold every slot
@@ -4977,6 +5113,7 @@ mod delivery_share {
                         }},
                     }),
                 )
+                .await
                 .expect("seed subscription");
         }
         let sweep = tokio::spawn(async move { interval_tick(&st).await });

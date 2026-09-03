@@ -78,7 +78,7 @@ async fn temporal_doc_roundtrip_and_instance_append() {
     let t = TenantId::new("pgtemp").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let id = "urn:ngsi-ld:Vehicle:temp1";
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
 
     let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
     let doc = json!({
@@ -87,11 +87,14 @@ async fn temporal_doc_roundtrip_and_instance_append() {
         attr: [{"type": "Property", "value": 80, "observedAt": "2026-08-04T09:00:00Z",
                 "instanceId": "urn:ngsi-ld:Instance:1"}]
     });
-    assert!(s.create(&t, id, &doc).expect("create"));
-    assert!(!s.create(&t, id, &doc).expect("dup"), "existing id → false");
+    assert!(s.create(&t, id, &doc).await.expect("create"));
+    assert!(
+        !s.create(&t, id, &doc).await.expect("dup"),
+        "existing id → false"
+    );
 
     // byte-faithful doc roundtrip (the property the bridge must hold)
-    assert_eq!(s.get(&t, id).expect("get").expect("present"), doc);
+    assert_eq!(s.get(&t, id).await.expect("get").expect("present"), doc);
 
     // append an instance under the row lock — the 5.6.12 shape
     let r = s.mutate(&t, id, |d| {
@@ -103,17 +106,17 @@ async fn temporal_doc_roundtrip_and_instance_append() {
         d["modifiedAt"] = json!("2026-08-04T09:05:00Z");
         Ok::<(), ()>(())
     });
-    assert!(matches!(r, Ok(Some(Ok(())))));
-    let got = s.get(&t, id).expect("get").expect("present");
+    assert!(matches!(r.await, Ok(Some(Ok(())))));
+    let got = s.get(&t, id).await.expect("get").expect("present");
     assert_eq!(got[attr].as_array().expect("arr").len(), 2);
 
     // cross-tenant invisible; list sees exactly one
     let other = TenantId::new("pgtemp_other").expect("t");
-    assert!(s.get(&other, id).expect("get").is_none());
-    assert_eq!(s.list(&t).expect("list").len(), 1);
+    assert!(s.get(&other, id).await.expect("get").is_none());
+    assert_eq!(s.list(&t).await.expect("list").len(), 1);
 
-    assert!(s.delete(&t, id).expect("delete"));
-    assert!(s.get(&t, id).expect("get").is_none());
+    assert!(s.delete(&t, id).await.expect("delete"));
+    assert!(s.get(&t, id).await.expect("get").is_none());
 }
 
 /// The bridge doc decomposes into attr_instances rows in the same tx,
@@ -147,7 +150,7 @@ async fn attr_instances_decomposition_and_maintenance() {
              "datasetId": "urn:ds:1", "modifiedAt": "2026-08-04T10:00:00Z"}
         ]
     });
-    assert!(s.create(&t, "urn:t:dec1", &doc).expect("create"));
+    assert!(s.create(&t, "urn:t:dec1", &doc).await.expect("create"));
     let n: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM attr_instances WHERE tenant_id = 'pgtempdec' AND entity_id = 'urn:t:dec1'",
     )
@@ -169,7 +172,7 @@ async fn attr_instances_decomposition_and_maintenance() {
     );
 
     // delete cleans the instances (no FK on a partitioned table)
-    assert!(s.delete(&t, "urn:t:dec1").expect("delete"));
+    assert!(s.delete(&t, "urn:t:dec1").await.expect("delete"));
     let n: i64 =
         sqlx::query_scalar("SELECT count(*) FROM attr_instances WHERE tenant_id = 'pgtempdec'")
             .fetch_one(&pool)
@@ -304,7 +307,7 @@ async fn clause_4_22_expired_attr_instances_reaped() {
              "instanceId": "urn:ngsi-ld:Instance:durable"}
         ]
     });
-    assert!(s.create(&t, "urn:t:exp422", &doc).expect("create"));
+    assert!(s.create(&t, "urn:t:exp422", &doc).await.expect("create"));
     let before: i64 =
         sqlx::query_scalar("SELECT count(*) FROM attr_instances WHERE tenant_id = 'pgtempexp'")
             .fetch_one(&pool)
@@ -329,7 +332,7 @@ async fn clause_4_22_expired_attr_instances_reaped() {
         .execute(&pool)
         .await
         .expect("cleanup");
-    let _ = s.delete(&t, "urn:t:exp422");
+    let _ = s.delete(&t, "urn:t:exp422").await;
 }
 
 /// 4.22 + 5.6.16.4: an expired `Temporal Evolution of an Entity` is not "an
@@ -365,7 +368,7 @@ async fn clause_4_22_an_expired_temporal_entity_is_absent_from_writes_too() {
         attr: [{"type": "Property", "value": 1, "observedAt": "2026-08-04T09:00:00Z",
                 "instanceId": "urn:ngsi-ld:Instance:exp422w"}]
     });
-    assert!(s.create(&t, id, &doc).expect("create"));
+    assert!(s.create(&t, id, &doc).await.expect("create"));
 
     // The premise: the row IS stored, and the read side already refuses it.
     // Without this every later assertion could be about a row that was never
@@ -377,17 +380,24 @@ async fn clause_4_22_an_expired_temporal_entity_is_absent_from_writes_too() {
             .expect("count");
     assert_eq!(stored, 1, "the expired entity is stored, not rejected");
     assert!(
-        s.get(&t, id).expect("get").is_none(),
+        s.get(&t, id).await.expect("get").is_none(),
         "4.22: an expired temporal entity is absent from a read"
     );
     assert!(
-        !s.list(&t).expect("list").iter().any(|d| d["id"] == id),
+        !s.list(&t)
+            .await
+            .expect("list")
+            .iter()
+            .any(|d| d["id"] == id),
         "4.22: an expired temporal entity is absent from a listing"
     );
 
     // 5.6.12 to 5.6.15 all reach the history through `mutate`. An entity the
     // read side calls absent may not be modified in place.
-    let mutated = s.mutate::<(), ()>(&t, id, |_doc| Ok(())).expect("mutate");
+    let mutated = s
+        .mutate::<(), ()>(&t, id, |_doc| Ok(()))
+        .await
+        .expect("mutate");
     assert!(
         mutated.is_none(),
         "4.22: an expired temporal entity cannot be modified — the read side calls it absent"
@@ -396,7 +406,7 @@ async fn clause_4_22_an_expired_temporal_entity_is_absent_from_writes_too() {
     // 5.6.16.4: "no existing Entity whose id (URI) is equivalent held
     // locally" is ResourceNotFound, which this seam reports as `false`.
     assert!(
-        !s.delete(&t, id).expect("delete"),
+        !s.delete(&t, id).await.expect("delete"),
         "5.6.16.4: deleting an expired temporal entity is ResourceNotFound, not 204"
     );
 
@@ -425,10 +435,14 @@ async fn clause_4_22_an_expired_temporal_entity_is_absent_from_writes_too() {
                 "instanceId": "urn:ngsi-ld:Instance:fresh"}]
     });
     assert!(
-        s.create(&t, id, &fresh).expect("create over expired"),
+        s.create(&t, id, &fresh).await.expect("create over expired"),
         "4.22: an expired temporal entity is absent, so this is a creation"
     );
-    let doc = s.get(&t, id).expect("get").expect("the fresh entity reads");
+    let doc = s
+        .get(&t, id)
+        .await
+        .expect("get")
+        .expect("the fresh entity reads");
     let insts = doc[attr].as_array().expect("instances");
     assert_eq!(
         insts.len(),
@@ -440,12 +454,13 @@ async fn clause_4_22_an_expired_temporal_entity_is_absent_from_writes_too() {
     // And now that it is not expired, the write paths reach it again.
     assert!(
         s.mutate::<(), ()>(&t, id, |_doc| Ok(()))
+            .await
             .expect("mutate")
             .is_some(),
         "a live temporal entity is still modifiable"
     );
     assert!(
-        s.delete(&t, id).expect("delete"),
+        s.delete(&t, id).await.expect("delete"),
         "5.6.16: a live temporal evolution is deleted, 204"
     );
 
@@ -499,6 +514,7 @@ async fn clause_4_6_3_a_comma_seconds_fraction_records_and_expires() {
     });
     assert!(s
         .create(&t, id, &doc)
+        .await
         .expect("4.6.3: the comma form is legal"));
 
     // The instance landed, and its column holds the instant the client meant.
@@ -516,7 +532,7 @@ async fn clause_4_6_3_a_comma_seconds_fraction_records_and_expires() {
         "the comma and point forms are the same instant"
     );
     assert!(
-        s.get(&t, id).expect("get").is_some(),
+        s.get(&t, id).await.expect("get").is_some(),
         "and the evolution reads back"
     );
 
@@ -531,9 +547,9 @@ async fn clause_4_6_3_a_comma_seconds_fraction_records_and_expires() {
                 "observedAt": "2020-01-01T00:00:00,750Z",
                 "instanceId": "urn:ngsi-ld:Instance:commagone"}]
     });
-    assert!(s.create(&t, gone, &expired).expect("create expired"));
+    assert!(s.create(&t, gone, &expired).await.expect("create expired"));
     assert!(
-        s.get(&t, gone).expect("get").is_none(),
+        s.get(&t, gone).await.expect("get").is_none(),
         "4.22 + 4.6.3: a comma-stamped expiry in the past is still an expiry"
     );
 
@@ -559,7 +575,7 @@ async fn append_refreshes_types_after_first_touch() {
     let t = TenantId::new("pgtempretype").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let id = "urn:ngsi-ld:Vehicle:retype";
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
     ensure_entity(&pool, &t, id).await;
     let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
     let shell1 = json!({"id": id, "type": "Vehicle",
@@ -567,22 +583,22 @@ async fn append_refreshes_types_after_first_touch() {
     let adds = json!({attr: [{"type": "Property", "value": 1,
         "observedAt": "2026-08-15T09:00:00Z",
         "instanceId": "urn:ngsi-ld:Instance:rt1"}]});
-    s.append(&t, id, &shell1, &adds).expect("append 1");
+    s.append(&t, id, &shell1, &adds).await.expect("append 1");
 
     let shell2 = json!({"id": id, "type": ["Vehicle", "Camera"],
         "createdAt": "2026-08-15T09:00:00Z", "modifiedAt": "2026-08-15T09:01:00Z"});
     let adds2 = json!({attr: [{"type": "Property", "value": 2,
         "observedAt": "2026-08-15T09:01:00Z",
         "instanceId": "urn:ngsi-ld:Instance:rt2"}]});
-    s.append(&t, id, &shell2, &adds2).expect("append 2");
+    s.append(&t, id, &shell2, &adds2).await.expect("append 2");
 
-    let got = s.get(&t, id).expect("get").expect("present");
+    let got = s.get(&t, id).await.expect("get").expect("present");
     assert!(
         got["type"].to_string().contains("Camera"),
         "a type gained after first touch must reach the temporal evolution: {}",
         got["type"]
     );
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
     sqlx::query("DELETE FROM entities WHERE tenant_id = $1")
         .bind(t.as_str())
         .execute(&pool)
@@ -608,7 +624,7 @@ async fn append_for_a_deleted_entity_does_not_resurrect_its_history() {
     let t = TenantId::new("pgtempghost").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let id = "urn:ngsi-ld:Vehicle:ghost";
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
     let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
     let shell = json!({"id": id, "type": "Vehicle",
         "createdAt": "2026-08-17T09:00:00Z", "modifiedAt": "2026-08-17T09:00:00Z"});
@@ -630,8 +646,12 @@ async fn append_for_a_deleted_entity_does_not_resurrect_its_history() {
     // control: with the entity present the append records normally
     ensure_entity(&pool, &t, id).await;
     s.append(&t, id, &shell, &adds(1, "urn:ngsi-ld:Instance:live"))
+        .await
         .expect("append while the entity lives");
-    assert!(s.get(&t, id).expect("get").is_some(), "history recorded");
+    assert!(
+        s.get(&t, id).await.expect("get").is_some(),
+        "history recorded"
+    );
     assert_eq!(instances(pool.clone()).await, 1);
 
     // the delete, as the API does it: the entity row, then its evolution
@@ -641,13 +661,14 @@ async fn append_for_a_deleted_entity_does_not_resurrect_its_history() {
         .execute(&pool)
         .await
         .expect("delete entity");
-    assert!(s.delete(&t, id).expect("delete temporal"));
+    assert!(s.delete(&t, id).await.expect("delete temporal"));
 
     // the late hook: an append for an entity that is gone records NOTHING
     s.append(&t, id, &shell, &adds(2, "urn:ngsi-ld:Instance:ghost"))
+        .await
         .expect("a late append is a no-op, not an error");
     assert!(
-        s.get(&t, id).expect("get").is_none(),
+        s.get(&t, id).await.expect("get").is_none(),
         "no temporal evolution may exist for a deleted entity"
     );
     assert_eq!(
@@ -671,7 +692,7 @@ async fn aggregation_pushdown_buckets_like_the_api() {
     let t = TenantId::new("pgaggr").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let id = "urn:ngsi-ld:Vehicle:aggr1";
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
     let speed = "https://uri.etsi.org/ngsi-ld/default-context/speed";
     let inst = |v: serde_json::Value, at: &str, n: u32| {
         json!({"type": "Property", "value": v, "observedAt": at,
@@ -685,7 +706,7 @@ async fn aggregation_pushdown_buckets_like_the_api() {
                 inst(json!(30), "2026-01-01T01:15:00Z", 3),
                 inst(json!(99), "2025-12-31T23:00:00Z", 4)]
     });
-    assert!(s.create(&t, id, &doc).expect("create"));
+    assert!(s.create(&t, id, &doc).await.expect("create"));
     let methods = ["avg".to_owned(), "max".to_owned(), "totalCount".to_owned()];
     let expand = |t: &str| t.to_owned();
     let range = InstanceRange {
@@ -705,7 +726,7 @@ async fn aggregation_pushdown_buckets_like_the_api() {
         }),
         ..TemporalFilter::default()
     };
-    let out = s.query(&t, &f).expect("query");
+    let out = s.query(&t, &f).await.expect("query");
     assert!(out.aggregated, "the store aggregated");
     assert_eq!(out.rows.len(), 1);
     let a = &out.rows[0][speed];
@@ -762,7 +783,7 @@ async fn aggregation_pushdown_buckets_like_the_api() {
         }),
         ..TemporalFilter::default()
     };
-    let out = s.query(&t, &f0).expect("query");
+    let out = s.query(&t, &f0).await.expect("query");
     assert!(out.aggregated);
     assert_eq!(
         rows(&out.rows[0][speed]["totalCount"]),
@@ -792,7 +813,7 @@ async fn aggregation_pushdown_buckets_like_the_api() {
         }),
         ..TemporalFilter::default()
     };
-    let out = s.query(&t, &fb).expect("query");
+    let out = s.query(&t, &fb).await.expect("query");
     assert!(out.aggregated);
     assert_eq!(
         rows(&out.rows[0][speed]["totalCount"]),
@@ -821,7 +842,7 @@ async fn aggregation_pushdown_buckets_like_the_api() {
         }),
         ..TemporalFilter::default()
     };
-    let out = s.query(&t, &fbt).expect("query");
+    let out = s.query(&t, &fbt).await.expect("query");
     assert_eq!(
         rows(&out.rows[0][speed]["totalCount"]),
         vec![(
@@ -840,11 +861,11 @@ async fn aggregation_pushdown_buckets_like_the_api() {
         );
         Ok::<(), ()>(())
     });
-    assert!(matches!(r, Ok(Some(Ok(())))));
-    let out = s.query(&t, &f).expect("query");
+    assert!(matches!(r.await, Ok(Some(Ok(())))));
+    let out = s.query(&t, &f).await.expect("query");
     assert!(!out.aggregated, "mixed classes fall back to instances");
     assert!(out.rows[0][speed].is_array(), "{}", out.rows[0]);
-    assert!(s.delete(&t, id).expect("delete"));
+    assert!(s.delete(&t, id).await.expect("delete"));
 }
 
 /// 4.14 through the temporal reads that build SQL of their own. `get`,
@@ -901,11 +922,16 @@ async fn a_temporal_query_never_reads_another_tenants_history() {
         })
     };
     for (t, tag, v1, v2) in [(&a, "isoa", 10, 20), (&b, "isob", 1000, 2000)] {
-        let _ = s.delete(t, id);
-        let _ = s.delete(t, geo_id);
-        assert!(s.create(t, id, &doc(tag, v1, v2)).expect("create"), "{tag}");
+        let _ = s.delete(t, id).await;
+        let _ = s.delete(t, geo_id).await;
         assert!(
-            s.create(t, geo_id, &geo_doc(tag)).expect("create geo"),
+            s.create(t, id, &doc(tag, v1, v2)).await.expect("create"),
+            "{tag}"
+        );
+        assert!(
+            s.create(t, geo_id, &geo_doc(tag))
+                .await
+                .expect("create geo"),
             "{tag}"
         );
     }
@@ -934,7 +960,7 @@ async fn a_temporal_query_never_reads_another_tenants_history() {
         expand: &expand,
         ..TemporalFilter::default()
     };
-    let out = s.query(&a, &plain).expect("query a");
+    let out = s.query(&a, &plain).await.expect("query a");
     assert_eq!(
         instance_ids(&out.rows, speed),
         [
@@ -959,7 +985,7 @@ async fn a_temporal_query_never_reads_another_tenants_history() {
         }),
         ..TemporalFilter::default()
     };
-    let out = s.query(&a, &aggregated).expect("aggregate a");
+    let out = s.query(&a, &aggregated).await.expect("aggregate a");
     assert!(out.aggregated, "the store aggregated");
     let agg = &out.rows[0][speed];
     assert_eq!(
@@ -992,7 +1018,7 @@ async fn a_temporal_query_never_reads_another_tenants_history() {
         expand: &expand,
         ..TemporalFilter::default()
     };
-    let out = s.query(&a, &geo).expect("geo a");
+    let out = s.query(&a, &geo).await.expect("geo a");
     assert_eq!(
         instance_ids(&out.rows, location),
         ["urn:ngsi-ld:Instance:isoageo".to_owned()],
@@ -1002,7 +1028,7 @@ async fn a_temporal_query_never_reads_another_tenants_history() {
 
     // And the mirror image: b sees b's, so the reads are narrowed by tenant
     // rather than by whatever happened to be written first.
-    let out = s.query(&b, &plain).expect("query b");
+    let out = s.query(&b, &plain).await.expect("query b");
     assert_eq!(
         instance_ids(&out.rows, speed),
         [
@@ -1015,13 +1041,17 @@ async fn a_temporal_query_never_reads_another_tenants_history() {
     let empty = TenantId::new("pgtempiso_c").expect("tenant");
     pg::ensure_tenant(&pool, &empty).await.expect("tenant row");
     assert!(
-        s.query(&empty, &plain).expect("query c").rows.is_empty(),
+        s.query(&empty, &plain)
+            .await
+            .expect("query c")
+            .rows
+            .is_empty(),
         "a tenant with no temporal entity of that id reads nothing"
     );
 
     for t in [&a, &b] {
-        assert!(s.delete(t, id).expect("delete"));
-        assert!(s.delete(t, geo_id).expect("delete geo"));
+        assert!(s.delete(t, id).await.expect("delete"));
+        assert!(s.delete(t, geo_id).await.expect("delete geo"));
     }
 }
 
@@ -1043,7 +1073,7 @@ async fn a_comma_seconds_fraction_survives_the_geo_prefilter() {
     let t = TenantId::new("pgcommageo").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let id = "urn:ngsi-ld:Vehicle:commageo";
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
     let location = antares_sql::store::filter::LOCATION_IRI;
     let doc = json!({
         "id": id, "type": "Vehicle",
@@ -1055,7 +1085,7 @@ async fn a_comma_seconds_fraction_survives_the_geo_prefilter() {
             "instanceId": "urn:ngsi-ld:Instance:commageo1",
         }],
     });
-    assert!(s.create(&t, id, &doc).expect("create"));
+    assert!(s.create(&t, id, &doc).await.expect("create"));
     let expand = |t: &str| t.to_owned();
     let coordinates = json!([0.0, 0.0]);
     let spec = GeoSpec {
@@ -1086,6 +1116,7 @@ async fn a_comma_seconds_fraction_survives_the_geo_prefilter() {
         };
         let out = s
             .query(&t, &f)
+            .await
             .unwrap_or_else(|e| panic!("timeAt {time_at} was refused by the store: {e}"));
         assert_eq!(
             out.rows.len(),

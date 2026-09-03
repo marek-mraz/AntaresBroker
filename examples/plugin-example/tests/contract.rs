@@ -7,18 +7,18 @@
 use antares_model::TenantId;
 use antares_plugin_example::ExampleStore;
 
-#[test]
-fn the_example_driver_keeps_the_current_state_contract() {
+#[tokio::test]
+async fn the_example_driver_keeps_the_current_state_contract() {
     let a = TenantId::new("plugina").expect("tenant");
     let b = TenantId::new("pluginb").expect("tenant");
     let store = ExampleStore::new();
-    antares_store::contract::run_current_state_contract(&store, &a, &b, "plugin");
+    antares_store::contract::run_current_state_contract(&store, &a, &b, "plugin").await;
 }
 
-#[test]
-fn the_example_driver_keeps_the_temporal_contract() {
+#[tokio::test]
+async fn the_example_driver_keeps_the_temporal_contract() {
     let a = TenantId::new("plugintempa").expect("tenant");
     let b = TenantId::new("plugintempb").expect("tenant");
     let store = ExampleStore::new();
-    antares_store::contract::run_temporal_contract(&store, &a, &b, "plugintemp");
+    antares_store::contract::run_temporal_contract(&store, &a, &b, "plugintemp").await;
 }

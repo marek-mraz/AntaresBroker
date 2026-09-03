@@ -65,7 +65,7 @@ async fn capture_headers() -> (String, tokio::sync::mpsc::Receiver<HeaderMap>) {
 async fn a_receiver_info_pair_never_doubles_a_header_the_binding_owns() {
     antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let (uri, mut rx) = capture_headers().await;
 
     // The subscriber names, in receiverInfo, every header the binding sets

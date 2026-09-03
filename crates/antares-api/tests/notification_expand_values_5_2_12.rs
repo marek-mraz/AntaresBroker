@@ -80,7 +80,7 @@ async fn subscribe(st: &AppState, id: &str, uri: &str, expand: Option<&str>) {
 async fn a_subscription_that_names_the_attribute_compares_the_coerced_value() {
     antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("test-expandvalues".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
 
     let (uri_coerced, mut rx_coerced) = sink().await;
     let (uri_literal, mut rx_literal) = sink().await;

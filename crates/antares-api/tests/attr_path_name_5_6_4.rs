@@ -90,7 +90,7 @@ fn link(url: &str) -> String {
 /// path has a target that exists.
 async fn seeded() -> AppState {
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     for (uri, body) in [
         (
             "/ngsi-ld/v1/entities",

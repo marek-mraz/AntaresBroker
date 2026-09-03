@@ -39,7 +39,7 @@ async fn outbox_enqueue_is_transactional() {
     tx.commit().await.expect("commit");
     // 1000, not 10: sibling tests enqueue concurrently and a small page can
     // miss our row without any bug existing
-    let page = outbox::peek(&pool, 1000).expect("peek");
+    let page = outbox::peek(&pool, 1000).await.expect("peek");
     assert!(page
         .iter()
         .any(|(s, tn, e)| *s == seq && tn == "pgoutbox" && e["id"] == "urn:o:1"));
@@ -55,7 +55,7 @@ async fn outbox_enqueue_is_transactional() {
     .await
     .expect("enqueue2");
     tx.rollback().await.expect("rollback");
-    let page = outbox::peek(&pool, 100).expect("peek2");
+    let page = outbox::peek(&pool, 100).await.expect("peek2");
     assert!(
         !page.iter().any(|(s, _, _)| *s == seq2),
         "a rolled-back write must take its outbox event down with it"
@@ -79,9 +79,9 @@ async fn outbox_enqueue_is_transactional() {
             .expect("count")
     };
     let before = mine().await;
-    let acked = outbox::ack(&pool, &[seq]).expect("ack");
+    let acked = outbox::ack(&pool, &[seq]).await.expect("ack");
     assert_eq!(acked, 1, "acking one seq deleted {acked} rows");
-    let page = outbox::peek(&pool, 1000).expect("peek3");
+    let page = outbox::peek(&pool, 1000).await.expect("peek3");
     assert!(!page.iter().any(|(s, _, _)| *s == seq));
     assert_eq!(
         mine().await,
@@ -106,7 +106,7 @@ async fn outbox_enqueue_many_of_nothing_writes_nothing() {
         .expect("empty batch");
     tx.commit().await.expect("commit");
 
-    let page = outbox::peek(&pool, 1000).expect("peek");
+    let page = outbox::peek(&pool, 1000).await.expect("peek");
     assert!(
         !page.iter().any(|(_, tn, _)| tn == "pgoutboxempty"),
         "an empty batch must leave no rows behind"
@@ -143,7 +143,7 @@ async fn outbox_ack_never_deletes_an_unpublished_gap_row() {
     assert!(seq_b > seq_a, "B allocated after A");
 
     // the drain peeks: only B is visible
-    let page = outbox::peek(&pool, 1000).expect("peek");
+    let page = outbox::peek(&pool, 1000).await.expect("peek");
     let published: Vec<i64> = page.iter().map(|(s, _, _)| *s).collect();
     assert!(published.contains(&seq_b));
     assert!(
@@ -159,10 +159,10 @@ async fn outbox_ack_never_deletes_an_unpublished_gap_row() {
     // the sibling's own ack then deletes nothing. The regression power is
     // unchanged — under a blanket `DELETE WHERE seq <= max` an ack of just
     // seq_b still kills seq_a.
-    outbox::ack(&pool, &[seq_b]).expect("ack");
+    outbox::ack(&pool, &[seq_b]).await.expect("ack");
 
     // the gap row MUST survive to be published next round
-    let page = outbox::peek(&pool, 1000).expect("peek 2");
+    let page = outbox::peek(&pool, 1000).await.expect("peek 2");
     assert!(
         page.iter().any(|(s, _, _)| *s == seq_a),
         "a row committing between peek and ack must never be deleted unpublished"
@@ -172,5 +172,5 @@ async fn outbox_ack_never_deletes_an_unpublished_gap_row() {
         "the published row is acked"
     );
     // cleanup: drain the survivor
-    outbox::ack(&pool, &[seq_a]).expect("ack survivor");
+    outbox::ack(&pool, &[seq_a]).await.expect("ack survivor");
 }

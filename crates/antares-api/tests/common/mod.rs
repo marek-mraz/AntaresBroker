@@ -105,15 +105,15 @@ impl Double {
         }
     }
 
-    fn race(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<(), NgsiError> {
+    async fn race(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<(), NgsiError> {
         let Some(doc) = &self.racing_write else {
             return Ok(());
         };
         if kind != Kind::Entity || self.raced.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        if self.inner.get(tenant, kind, id)?.is_some() {
-            self.inner.upsert(tenant, kind, id, doc.clone())?;
+        if self.inner.get(tenant, kind, id).await?.is_some() {
+            self.inner.upsert(tenant, kind, id, doc.clone()).await?;
         }
         Ok(())
     }
@@ -206,8 +206,9 @@ impl Double {
     }
 }
 
+#[async_trait::async_trait]
 impl CurrentStateDriver for Double {
-    fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
+    async fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
         self.pool_wall()?;
         if self
             .fail_next
@@ -216,12 +217,12 @@ impl CurrentStateDriver for Double {
         {
             return Err(NgsiError::TooManyResults("list refused".into()));
         }
-        self.inner.list(tenant, kind)
+        self.inner.list(tenant, kind).await
     }
 
     /// The paged read is the one the Postgres arm leaves uncapped, so it
     /// keeps working past the ceiling that refuses `list`.
-    fn list_page(
+    async fn list_page(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -229,12 +230,12 @@ impl CurrentStateDriver for Double {
         limit: usize,
     ) -> Result<Vec<Value>, NgsiError> {
         self.pool_wall()?;
-        self.inner.list_page(tenant, kind, after, limit)
+        self.inner.list_page(tenant, kind, after, limit).await
     }
 
     /// The windowed read is not refused either: it is bounded by the
     /// client's own limit, so there is nothing for a ceiling to protect.
-    fn list_slice(
+    async fn list_slice(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -242,19 +243,19 @@ impl CurrentStateDriver for Double {
         limit: usize,
     ) -> Result<(Vec<Value>, usize), NgsiError> {
         self.pool_wall()?;
-        self.inner.list_slice(tenant, kind, offset, limit)
+        self.inner.list_slice(tenant, kind, offset, limit).await
     }
 
-    fn ping(&self) -> Result<(), NgsiError> {
-        self.inner.ping()
+    async fn ping(&self) -> Result<(), NgsiError> {
+        self.inner.ping().await
     }
-    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        self.inner.close()
+    async fn close(&self) {
+        self.inner.close().await;
     }
     fn set_change_hook(&self, h: antares_store::ChangeHook) {
         self.inner.set_change_hook(h);
     }
-    fn create(
+    async fn create(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -263,26 +264,30 @@ impl CurrentStateDriver for Double {
     ) -> Result<bool, NgsiError> {
         self.pool_wall()?;
         self.refused_create(kind, id)?;
-        self.inner.create(tenant, kind, id, doc)
+        self.inner.create(tenant, kind, id, doc).await
     }
-    fn batch_create(
+    async fn batch_create(
         &self,
         tenant: &TenantId,
         items: Vec<(String, Value)>,
     ) -> Result<Vec<bool>, NgsiError> {
-        self.inner.batch_create(tenant, items)
+        self.inner.batch_create(tenant, items).await
     }
-    fn batch_delete(&self, tenant: &TenantId, ids: &[String]) -> Result<Vec<bool>, NgsiError> {
-        self.inner.batch_delete(tenant, ids)
+    async fn batch_delete(
+        &self,
+        tenant: &TenantId,
+        ids: &[String],
+    ) -> Result<Vec<bool>, NgsiError> {
+        self.inner.batch_delete(tenant, ids).await
     }
-    fn batch_upsert(
+    async fn batch_upsert(
         &self,
         tenant: &TenantId,
         items: Vec<(String, Value)>,
     ) -> Result<Vec<bool>, NgsiError> {
-        self.inner.batch_upsert(tenant, items)
+        self.inner.batch_upsert(tenant, items).await
     }
-    fn upsert(
+    async fn upsert(
         &self,
         tenant: &TenantId,
         kind: Kind,
@@ -290,33 +295,38 @@ impl CurrentStateDriver for Double {
         doc: Value,
     ) -> Result<bool, NgsiError> {
         self.pool_wall()?;
-        self.inner.upsert(tenant, kind, id, doc)
+        self.inner.upsert(tenant, kind, id, doc).await
     }
-    fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
+    async fn get(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+    ) -> Result<Option<Value>, NgsiError> {
         self.pool_wall()?;
         self.refused(kind, id)?;
-        let doc = self.inner.get(tenant, kind, id)?;
+        let doc = self.inner.get(tenant, kind, id).await?;
         if self.delete_on_get && doc.is_some() {
-            self.inner.delete(tenant, kind, id)?;
+            self.inner.delete(tenant, kind, id).await?;
         }
-        self.race(tenant, kind, id)?;
+        self.race(tenant, kind, id).await?;
         Ok(doc)
     }
-    fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
+    async fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
         self.pool_wall()?;
         self.refused(kind, id)?;
-        self.inner.delete(tenant, kind, id)
+        self.inner.delete(tenant, kind, id).await
     }
-    fn delete_entity_if(
+    async fn delete_entity_if(
         &self,
         tenant: &TenantId,
         id: &str,
-        keep: &dyn Fn(&Value) -> bool,
+        keep: &(dyn for<'v> Fn(&'v Value) -> bool + Sync),
     ) -> Result<bool, NgsiError> {
-        self.race(tenant, Kind::Entity, id)?;
-        self.inner.delete_entity_if(tenant, id, keep)
+        self.race(tenant, Kind::Entity, id).await?;
+        self.inner.delete_entity_if(tenant, id, keep).await
     }
-    fn matching_registrations(
+    async fn matching_registrations(
         &self,
         tenant: &TenantId,
         ids: Option<&[String]>,
@@ -326,64 +336,68 @@ impl CurrentStateDriver for Double {
         if self.refuse_registrations {
             return Err(NgsiError::InternalError("registrations unreadable".into()));
         }
-        self.inner.matching_registrations(tenant, ids, types)
+        self.inner.matching_registrations(tenant, ids, types).await
     }
-    fn query_entities(
+    async fn query_entities(
         &self,
         tenant: &TenantId,
         f: &antares_store::filter::EntityFilter<'_>,
     ) -> Result<antares_store::filter::QueryOutcome, NgsiError> {
         self.pool_wall()?;
-        self.inner.query_entities(tenant, f)
+        self.inner.query_entities(tenant, f).await
     }
-    fn mutate_boxed<'a>(
+    async fn mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         kind: Kind,
         id: &str,
         f: antares_store::MutateFn<'a>,
     ) -> Result<Option<Result<(), ()>>, NgsiError> {
-        self.inner.mutate_boxed(tenant, kind, id, f)
+        self.inner.mutate_boxed(tenant, kind, id, f).await
     }
-    fn batch_mutate_boxed<'a>(
+    async fn batch_mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
         ids: &[String],
         f: antares_store::BatchMutateFn<'a>,
     ) -> Result<Vec<Option<Result<(), ()>>>, NgsiError> {
-        self.inner.batch_mutate_boxed(tenant, ids, f)
+        self.inner.batch_mutate_boxed(tenant, ids, f).await
     }
-    fn record_delivery(
+    async fn record_delivery(
         &self,
         tenant: &TenantId,
         kind: Kind,
         id: &str,
         now: &str,
     ) -> Result<Option<antares_store::Delivery>, NgsiError> {
-        self.inner.record_delivery(tenant, kind, id, now)
+        self.inner.record_delivery(tenant, kind, id, now).await
     }
-    fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
-        self.inner.tenant_exists(tenant)
+    async fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        self.inner.tenant_exists(tenant).await
     }
-    fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
-        self.inner.subscription_tenants()
+    async fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
+        self.inner.subscription_tenants().await
     }
-    fn context_put(
+    async fn context_put(
         &self,
         tenant: Option<&TenantId>,
         id: &str,
         doc: Value,
     ) -> Result<(), NgsiError> {
-        self.inner.context_put(tenant, id, doc)
+        self.inner.context_put(tenant, id, doc).await
     }
-    fn context_get(&self, tenant: Option<&TenantId>, id: &str) -> Result<Option<Value>, NgsiError> {
-        self.inner.context_get(tenant, id)
+    async fn context_get(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+    ) -> Result<Option<Value>, NgsiError> {
+        self.inner.context_get(tenant, id).await
     }
-    fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
-        self.inner.context_delete(tenant, id)
+    async fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
+        self.inner.context_delete(tenant, id).await
     }
-    fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
-        self.inner.context_list_meta(tenant)
+    async fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
+        self.inner.context_list_meta(tenant).await
     }
     // The trait's PROVIDED methods delegate too. Left out, each one answers
     // the trait's own default — `OperationNotSupported`, an empty inventory,
@@ -396,28 +410,28 @@ impl CurrentStateDriver for Double {
     fn set_outbox(&self, on: bool) {
         self.inner.set_outbox(on);
     }
-    fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, Value)>, NgsiError> {
-        self.inner.outbox_peek(limit)
+    async fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, Value)>, NgsiError> {
+        self.inner.outbox_peek(limit).await
     }
-    fn outbox_ack(&self, seqs: &[i64]) -> Result<u64, NgsiError> {
-        self.inner.outbox_ack(seqs)
+    async fn outbox_ack(&self, seqs: &[i64]) -> Result<u64, NgsiError> {
+        self.inner.outbox_ack(seqs).await
     }
     fn version_info(&self) -> Value {
         self.inner.version_info()
     }
-    fn sweep_expired(&self) -> usize {
-        self.inner.sweep_expired()
+    async fn sweep_expired(&self) -> usize {
+        self.inner.sweep_expired().await
     }
-    fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
-        self.inner.tenant_ids()
+    async fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
+        self.inner.tenant_ids().await
     }
-    fn tenant_stats_one(
+    async fn tenant_stats_one(
         &self,
         tenant: &TenantId,
     ) -> Result<Option<antares_store::TenantStats>, NgsiError> {
-        self.inner.tenant_stats_one(tenant)
+        self.inner.tenant_stats_one(tenant).await
     }
-    fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
-        self.inner.purge_tenant(tenant)
+    async fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        self.inner.purge_tenant(tenant).await
     }
 }

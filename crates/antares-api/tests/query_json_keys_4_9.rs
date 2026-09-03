@@ -99,7 +99,7 @@ async fn json_keys_subtract_from_expand_values_on_the_entity_query() {
 #[tokio::test(flavor = "multi_thread")]
 async fn json_keys_subtract_from_expand_values_on_the_temporal_query() {
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st); // temporal auto-recording
+    antares_api::wire(&mut st).await; // temporal auto-recording
     seed(&st, "urn:ngsi-ld:Shop:jk2").await;
     let q = "/ngsi-ld/v1/temporal/entities?type=Shop&q=category%3D%3Dcommercial\
              &timerel=after&timeAt=2000-01-01T00:00:00Z&timeproperty=createdAt";

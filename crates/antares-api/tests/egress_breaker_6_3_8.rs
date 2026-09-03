@@ -259,10 +259,10 @@ async fn wait_hits(hits: &AtomicUsize, want: usize, ms: u64) -> usize {
     hits.load(Ordering::SeqCst)
 }
 
-fn state() -> AppState {
+async fn state() -> AppState {
     antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("antares1".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     st
 }
 
@@ -270,7 +270,7 @@ fn state() -> AppState {
 /// change must still be attempted, past any trip threshold.
 #[tokio::test(flavor = "multi_thread")]
 async fn responding_endpoint_errors_never_suppress_later_sends() {
-    let st = state();
+    let st = state().await;
     let (port, hits) = mock_counting("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
     subscribe(&st, "alive404", port, 2000).await;
 
@@ -295,7 +295,7 @@ async fn responding_endpoint_errors_never_suppress_later_sends() {
 /// after enough consecutive timeouts.
 #[tokio::test(flavor = "multi_thread")]
 async fn stalling_endpoint_still_trips_the_breaker() {
-    let st = state();
+    let st = state().await;
     let (port, hits) = mock_stalling();
     subscribe(&st, "staller", port, 300).await;
 
@@ -335,7 +335,7 @@ async fn stalling_endpoint_still_trips_the_breaker() {
 /// breaker beside it was not.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_tenants_timeouts_never_suppress_another_tenants_notifications() {
-    let st = state();
+    let st = state().await;
     // Alive, and answers well inside tenant-b's deadline — but not inside
     // tenant-a's, which sits at the 6.3.8 floor. The endpoint deadline the
     // broker arms is `endpoint.timeout` STRETCHED by `slow_factor` under a

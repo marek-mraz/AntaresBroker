@@ -29,10 +29,10 @@ const T2: &str = "2026-01-01T11:00:00Z";
 /// The table runs on whatever backend the harness names: `AppState::new`
 /// composes from `ANTARES_TEST_STORE`, so CI puts the same rows through the
 /// in-memory and the durable redb store without a second copy of the file.
-fn state(mode: TemporalRecord) -> AppState {
+async fn state(mode: TemporalRecord) -> AppState {
     let mut st = AppState::new("me".into());
     st.temporal_record = mode;
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     st
 }
 
@@ -266,7 +266,7 @@ async fn run_cell(st: &AppState, cell: &Cell) -> String {
 /// not the producer supplied one.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_recording_matrix_under_all() {
-    let st = state(TemporalRecord::All);
+    let st = state(TemporalRecord::All).await;
     for cell in MATRIX {
         let id = run_cell(&st, cell).await;
         let got = instances(&st, &id, None).await;
@@ -286,7 +286,7 @@ async fn the_recording_matrix_under_all() {
 /// Temporal Property becomes history.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_recording_matrix_under_observed() {
-    let st = state(TemporalRecord::Observed);
+    let st = state(TemporalRecord::Observed).await;
     for cell in MATRIX {
         let id = run_cell(&st, cell).await;
         let got = instances(&st, &id, None).await;
@@ -308,7 +308,7 @@ async fn the_recording_matrix_under_observed() {
 /// rather than a second id appearing beside it.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_point_in_time_keeps_one_instance_id() {
-    let st = state(TemporalRecord::All);
+    let st = state(TemporalRecord::All).await;
     let id = "urn:ngsi-ld:Matrix:identity";
     let (status, _) = req(
         &st,
@@ -369,7 +369,7 @@ async fn one_point_in_time_keeps_one_instance_id() {
 /// rather than declining to keep it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_gated_write_is_absent_from_every_axis() {
-    let st = state(TemporalRecord::Observed);
+    let st = state(TemporalRecord::Observed).await;
     let id = "urn:ngsi-ld:Matrix:axes";
     let (status, _) = req(
         &st,
@@ -422,7 +422,7 @@ async fn a_gated_write_is_absent_from_every_axis() {
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_an_attribute_ends_its_series_in_either_mode() {
     for mode in [TemporalRecord::All, TemporalRecord::Observed] {
-        let st = state(mode);
+        let st = state(mode).await;
         let id = "urn:ngsi-ld:Matrix:deleted";
         let (status, body) = req(
             &st,
@@ -474,7 +474,7 @@ async fn deleting_an_attribute_ends_its_series_in_either_mode() {
 /// never observed.
 #[tokio::test(flavor = "multi_thread")]
 async fn aggregation_counts_instances_not_distinct_values() {
-    let st = state(TemporalRecord::All);
+    let st = state(TemporalRecord::All).await;
     let id = "urn:ngsi-ld:Matrix:aggregate";
     let (status, body) = req(
         &st,

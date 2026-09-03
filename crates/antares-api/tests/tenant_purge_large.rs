@@ -54,6 +54,7 @@ async fn a_tenant_past_the_list_ceiling_is_still_purgeable() {
                        "entities": [{"type": "Vehicle"}],
                        "notification": {"endpoint": {"uri": "http://127.0.0.1:9/n"}}}),
             )
+            .await
             .expect("seed subscription");
     }
     st.store
@@ -63,6 +64,7 @@ async fn a_tenant_past_the_list_ceiling_is_still_purgeable() {
             "urn:ngsi-ld:Vehicle:big",
             json!({"id": "urn:ngsi-ld:Vehicle:big", "type": "Vehicle"}),
         )
+        .await
         .expect("seed entity");
     let inner = st.store.clone();
     st.store = Arc::new(Double::flaky_list(inner.clone(), usize::MAX));
@@ -75,6 +77,7 @@ async fn a_tenant_past_the_list_ceiling_is_still_purgeable() {
     assert!(
         inner
             .list_page(&tenant, Kind::Subscription, None, 10)
+            .await
             .expect("paged read")
             .is_empty(),
         "the purge removed what it collected"
@@ -82,6 +85,7 @@ async fn a_tenant_past_the_list_ceiling_is_still_purgeable() {
     assert!(
         inner
             .get(&tenant, Kind::Entity, "urn:ngsi-ld:Vehicle:big")
+            .await
             .expect("store")
             .is_none(),
         "the Tenant's entities are gone"

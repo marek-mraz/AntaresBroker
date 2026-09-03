@@ -10,9 +10,9 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-fn state() -> AppState {
+async fn state() -> AppState {
     let mut st = AppState::new("antares-em".into());
-    antares_api::wire(&mut st); // temporal auto-recording
+    antares_api::wire(&mut st).await; // temporal auto-recording
     st
 }
 
@@ -84,7 +84,7 @@ async fn create_map(st: &AppState) -> (String, Value) {
 /// resource (6.34.3.1).
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_4_create_map_for_query() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:m1", 40).await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:m2", 90).await;
 
@@ -113,7 +113,7 @@ async fn clause_5_14_4_create_map_for_query() {
 /// an invalid entityMapLifetime is 400.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_4_too_wide_and_bad_lifetime() {
-    let st = state();
+    let st = state().await;
     let (status, _, body) = get(&st, "/ngsi-ld/v1/entityMaps?id=urn:ngsi-ld:Vehicle:m1").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(
@@ -134,7 +134,7 @@ async fn clause_5_14_4_too_wide_and_bad_lifetime() {
 /// 6.34.3.2: the POST form takes a 5.2.23 Query object.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_4_post_query_form() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:p1", 10).await;
     let body = json!({"type": "Query", "entities": [{"type": "Vehicle"}]}).to_string();
     let (status, headers, map) = send(
@@ -176,7 +176,7 @@ async fn clause_5_14_4_post_query_form() {
 /// document.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_1_retrieve() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:r1", 10).await;
     let (loc, map) = create_map(&st).await;
 
@@ -210,7 +210,7 @@ async fn clause_5_14_1_retrieve() {
 /// (5.2.39: entityMap, linkedMaps) are ignored even when provided.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_2_update() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:u1", 10).await;
     let (loc, _) = create_map(&st).await;
 
@@ -289,7 +289,7 @@ async fn clause_5_14_2_update() {
 /// 5.14.3.4: delete removes the map (204/404), invalid id → 400.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_3_delete() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:d1", 10).await;
     let (loc, _) = create_map(&st).await;
 
@@ -326,7 +326,7 @@ async fn clause_5_14_3_delete() {
 /// tells the client it deleted a map the broker had already stopped serving.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_3_delete_of_an_expired_map_is_not_found() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:d2", 10).await;
     let (loc, _) = create_map(&st).await;
 
@@ -374,7 +374,7 @@ async fn clause_5_14_3_delete_of_an_expired_map_is_not_found() {
 /// header, and the entity payload is still the query result.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_4_entity_map_true_on_query() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:q1", 10).await;
     let (status, headers, body) =
         get(&st, "/ngsi-ld/v1/entities?type=Vehicle&entityMap=true").await;
@@ -407,7 +407,7 @@ async fn clause_5_14_4_entity_map_true_on_query() {
 /// matching are pruned by the creator; an unknown map leads to a new one.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_5_14_entity_map_usage() {
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:s1", 10).await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:s2", 20).await;
     let (loc, map) = create_map(&st).await;
@@ -479,7 +479,7 @@ async fn clause_5_5_14_entity_map_usage() {
 /// with one, the S1-S4 candidates land in the map (201 + header).
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_5_temporal_map() {
-    let st = state();
+    let st = state().await;
     // creating an entity auto-records its temporal evolution
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:t1", 10).await;
 
@@ -521,7 +521,7 @@ async fn clause_5_14_5_temporal_map() {
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_4_federated_map_merge() {
     antares_jsonld::allow_private_egress(true);
-    let st = state();
+    let st = state().await;
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:localf", 10).await;
 
     // canned Context Source answering with its own EntityMap
@@ -613,10 +613,11 @@ async fn a_stored_map_of_the_wrong_shape_reads_as_absent() {
     .into_iter()
     .enumerate()
     {
-        let st = state();
+        let st = state().await;
         let id = format!("urn:ngsi-ld:entitymap:shape-{n}");
         st.store
             .create(&TenantId::default(), Kind::EntityMap, &id, stored.clone())
+            .await
             .expect("seed the row");
 
         let body = json!({"expiresAt": "2099-01-01T00:00:00.000Z"}).to_string();
@@ -652,7 +653,7 @@ async fn a_well_formed_map_takes_the_update_under_the_lifetime_ceiling() {
     use antares_model::TenantId;
     use antares_store::Kind;
 
-    let st = state();
+    let st = state().await;
     let id = "urn:ngsi-ld:entitymap:shape-ok";
     st.store
         .create(
@@ -663,6 +664,7 @@ async fn a_well_formed_map_takes_the_update_under_the_lifetime_ceiling() {
                    "expiresAt": "2098-01-01T00:00:00.000Z",
                    "entityMap": {}, "linkedMaps": {}}),
         )
+        .await
         .expect("seed the row");
 
     let body = json!({"expiresAt": "2099-01-01T00:00:00.000Z"}).to_string();

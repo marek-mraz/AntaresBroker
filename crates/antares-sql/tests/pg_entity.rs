@@ -47,7 +47,7 @@ async fn clause_4_6_3_a_comma_seconds_fraction_is_stored_like_a_point() {
     let t = TenantId::new("pgcomma").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let id = "urn:ngsi-ld:Test:comma1";
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
 
     let with_comma = json!({
         "id": id, "type": "Test",
@@ -58,6 +58,7 @@ async fn clause_4_6_3_a_comma_seconds_fraction_is_stored_like_a_point() {
     });
     assert!(
         s.create(&t, id, &with_comma)
+            .await
             .expect("4.6.3: the comma form is legal"),
         "created"
     );
@@ -86,27 +87,27 @@ async fn clause_4_6_3_a_comma_seconds_fraction_is_stored_like_a_point() {
     );
 
     // A future expiry means present; the entity is readable, not a 4.22 ghost.
-    assert!(s.get(&t, id).expect("get").is_some(), "still valid");
+    assert!(s.get(&t, id).await.expect("get").is_some(), "still valid");
 
     // And the past-comma form actually expires, rather than reading as no
     // expiry at all: the meta-side `try_timestamptz` returns NULL for text it
     // cannot parse, which would silently make the entity immortal.
     let gone = "urn:ngsi-ld:Test:comma2";
-    let _ = s.delete(&t, gone);
+    let _ = s.delete(&t, gone).await;
     let expired = json!({
         "id": gone, "type": "Test",
         "createdAt": "2020-01-01T00:00:00,250Z", "modifiedAt": "2020-01-01T00:00:00,250Z",
         "expiresAt": "2020-01-01T00:00:00,250Z",
         "n": {"type": "Property", "value": 2}
     });
-    assert!(s.create(&t, gone, &expired).expect("create expired"));
+    assert!(s.create(&t, gone, &expired).await.expect("create expired"));
     assert!(
-        s.get(&t, gone).expect("get").is_none(),
+        s.get(&t, gone).await.expect("get").is_none(),
         "4.22 + 4.6.3: a comma-stamped expiry in the past is still an expiry"
     );
 
-    let _ = s.delete(&t, id);
-    let _ = s.delete(&t, gone);
+    let _ = s.delete(&t, id).await;
+    let _ = s.delete(&t, gone).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -117,62 +118,69 @@ async fn entity_crud_roundtrip_with_extracted_columns() {
     let t = TenantId::new("pgcrud").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let id = "urn:ngsi-ld:Test:crud1";
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
 
-    assert!(s.create(&t, id, &doc(id, 1)).expect("create"));
+    assert!(s.create(&t, id, &doc(id, 1)).await.expect("create"));
     assert!(
-        !s.create(&t, id, &doc(id, 1)).expect("dup"),
+        !s.create(&t, id, &doc(id, 1)).await.expect("dup"),
         "AlreadyExists → false"
     );
     assert_eq!(
-        s.get(&t, id).expect("get").expect("present")["n"]["value"],
+        s.get(&t, id).await.expect("get").expect("present")["n"]["value"],
         1
     );
-    assert_eq!(s.version(&t, id).expect("v"), Some(1));
+    assert_eq!(s.version(&t, id).await.expect("v"), Some(1));
 
     // extracted columns really extracted (types tenant-scoped index shape)
     let other = TenantId::new("pgcrud_other").expect("tenant");
-    assert!(s.get(&other, id).expect("cross-tenant get").is_none());
-    assert_eq!(s.list(&t).expect("list").len(), 1);
+    assert!(s.get(&other, id).await.expect("cross-tenant get").is_none());
+    assert_eq!(s.list(&t).await.expect("list").len(), 1);
 
-    let r: Option<Result<(), ()>> = match s.mutate(&t, id, |d| {
-        d["n"]["value"] = json!(2);
-        d["modifiedAt"] = json!("2026-08-04T09:01:00Z");
-        Ok(())
-    }) {
+    let r: Option<Result<(), ()>> = match s
+        .mutate(&t, id, |d| {
+            d["n"]["value"] = json!(2);
+            d["modifiedAt"] = json!("2026-08-04T09:01:00Z");
+            Ok(())
+        })
+        .await
+    {
         Ok(x) => x,
         Err(e) => panic!("mutate: {e}"),
     };
     assert!(matches!(r, Some(Ok(()))));
     assert_eq!(
-        s.get(&t, id).expect("get").expect("present")["n"]["value"],
+        s.get(&t, id).await.expect("get").expect("present")["n"]["value"],
         2
     );
     assert_eq!(
-        s.version(&t, id).expect("v"),
+        s.version(&t, id).await.expect("v"),
         Some(2),
         "version bumped under the lock"
     );
 
     // closure error rolls back, version untouched
-    let r: Option<Result<(), &str>> = match s.mutate(&t, id, |d| {
-        d["n"]["value"] = json!(99);
-        Err("nope")
-    }) {
+    let r: Option<Result<(), &str>> = match s
+        .mutate(&t, id, |d| {
+            d["n"]["value"] = json!(99);
+            Err("nope")
+        })
+        .await
+    {
         Ok(x) => x,
         Err(e) => panic!("mutate: {e}"),
     };
     assert!(matches!(r, Some(Err("nope"))));
     assert_eq!(
-        s.get(&t, id).expect("get").expect("present")["n"]["value"],
+        s.get(&t, id).await.expect("get").expect("present")["n"]["value"],
         2
     );
-    assert_eq!(s.version(&t, id).expect("v"), Some(2));
+    assert_eq!(s.version(&t, id).await.expect("v"), Some(2));
 
-    assert!(s.delete(&t, id).expect("delete").is_some());
-    assert!(s.get(&t, id).expect("get").is_none());
+    assert!(s.delete(&t, id).await.expect("delete").is_some());
+    assert!(s.get(&t, id).await.expect("get").is_none());
     assert!(s
         .mutate(&t, id, |_| Ok::<(), ()>(()))
+        .await
         .expect("mutate absent")
         .is_none());
 }
@@ -187,15 +195,15 @@ async fn concurrent_mutations_lose_nothing() {
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let s = std::sync::Arc::new(PgEntityStore::new(pool));
     let id = "urn:ngsi-ld:Test:storm";
-    let _ = s.delete(&t, id);
-    assert!(s.create(&t, id, &doc(id, 0)).expect("create"));
+    let _ = s.delete(&t, id).await;
+    assert!(s.create(&t, id, &doc(id, 0)).await.expect("create"));
 
     const WRITERS: i64 = 8;
     const ROUNDS: i64 = 10;
     let mut tasks = Vec::new();
     for _ in 0..WRITERS {
         let (s, t) = (s.clone(), t.clone());
-        tasks.push(tokio::task::spawn_blocking(move || {
+        tasks.push(tokio::spawn(async move {
             for _ in 0..ROUNDS {
                 let r = s
                     .mutate(&t, id, |d| {
@@ -203,6 +211,7 @@ async fn concurrent_mutations_lose_nothing() {
                         d["n"]["value"] = serde_json::json!(n + 1);
                         Ok::<(), ()>(())
                     })
+                    .await
                     .expect("mutate");
                 assert!(matches!(r, Some(Ok(()))), "row must exist throughout");
             }
@@ -212,7 +221,7 @@ async fn concurrent_mutations_lose_nothing() {
         task.await.expect("writer");
     }
 
-    let n = s.get(&t, id).expect("get").expect("present")["n"]["value"]
+    let n = s.get(&t, id).await.expect("get").expect("present")["n"]["value"]
         .as_i64()
         .expect("n");
     assert_eq!(
@@ -221,7 +230,7 @@ async fn concurrent_mutations_lose_nothing() {
         "every increment survived (no lost updates)"
     );
     assert_eq!(
-        s.version(&t, id).expect("v"),
+        s.version(&t, id).await.expect("v"),
         Some(1 + WRITERS * ROUNDS),
         "version = create + one bump per mutate"
     );
@@ -238,7 +247,10 @@ async fn batch_create_and_delete_multirow() {
     let s = PgEntityStore::new(pool);
 
     // pre-existing entity: its batch item must report false
-    assert!(s.create(&t, "urn:b:0", &doc("urn:b:0", 0)).expect("pre"));
+    assert!(s
+        .create(&t, "urn:b:0", &doc("urn:b:0", 0))
+        .await
+        .expect("pre"));
 
     let items = vec![
         ("urn:b:0".to_owned(), doc("urn:b:0", 9)), // exists → false
@@ -246,10 +258,10 @@ async fn batch_create_and_delete_multirow() {
         ("urn:b:2".to_owned(), doc("urn:b:2", 2)),
         ("urn:b:1".to_owned(), doc("urn:b:1", 99)), // duplicate → false
     ];
-    let flags = s.batch_create(&t, &items).expect("batch create");
+    let flags = s.batch_create(&t, &items).await.expect("batch create");
     assert_eq!(flags, vec![false, true, true, false]);
     // first instance won (5.5.11.1): value 1, not 99
-    let stored = s.get(&t, "urn:b:1").expect("get").expect("present");
+    let stored = s.get(&t, "urn:b:1").await.expect("get").expect("present");
     assert_eq!(stored["n"]["value"], 1);
 
     let deleted = s
@@ -257,6 +269,7 @@ async fn batch_create_and_delete_multirow() {
             &t,
             &["urn:b:0".into(), "urn:b:1".into(), "urn:b:missing".into()],
         )
+        .await
         .expect("batch delete");
     let mut ids: Vec<&str> = deleted.iter().map(|(id, _)| id.as_str()).collect();
     ids.sort();
@@ -268,10 +281,10 @@ async fn batch_create_and_delete_multirow() {
         .expect("b1")
         .1;
     assert_eq!(prev1["n"]["value"], 1);
-    assert!(s.get(&t, "urn:b:1").expect("get").is_none());
+    assert!(s.get(&t, "urn:b:1").await.expect("get").is_none());
 
     // cleanup
-    let _ = s.batch_delete(&t, &["urn:b:2".into()]);
+    let _ = s.batch_delete(&t, &["urn:b:2".into()]).await;
 }
 
 // ---- query pushdown ------------------------------------------------------
@@ -346,30 +359,35 @@ async fn query_pushdown_narrows_without_dropping_matches() {
         ),
     ];
     for (id, ty, attrs) in &seed {
-        let _ = s.delete(&t, id);
+        let _ = s.delete(&t, id).await;
         assert!(
             s.create(&t, id, &expanded(id, ty, attrs.clone()))
+                .await
                 .expect("create"),
             "seed {id}"
         );
     }
     let all: Vec<String> = seed.iter().map(|(id, ..)| (*id).to_owned()).collect();
 
-    let q = |f: &antares_sql::store::pg::entity::EntityFilter<'_>| {
-        ids_of(&s.query(&t, f).expect("query").rows)
-    };
+    // a macro, not a closure: the query is awaited and an async closure is
+    // not a stable language feature
+    macro_rules! q {
+        ($f:expr) => {
+            ids_of(&s.query(&t, $f).await.expect("query").rows)
+        };
+    }
     let base = || antares_sql::store::pg::entity::EntityFilter {
         expand: &ex,
         ..Default::default()
     };
 
     // no filter: everything this tenant holds
-    assert_eq!(q(&base()), all);
+    assert_eq!(q!(&base()), all);
 
     // ids
     let want = ["urn:ngsi-ld:Room:2"];
     assert_eq!(
-        q(&antares_sql::store::pg::entity::EntityFilter {
+        q!(&antares_sql::store::pg::entity::EntityFilter {
             ids: Some(&want),
             ..base()
         }),
@@ -385,20 +403,20 @@ async fn query_pushdown_narrows_without_dropping_matches() {
         ..base()
     };
     assert_eq!(
-        q(&lit("urn:ngsi-ld:Room:", true)),
+        q!(&lit("urn:ngsi-ld:Room:", true)),
         ["urn:ngsi-ld:Room:1", "urn:ngsi-ld:Room:2"]
     );
-    assert_eq!(q(&lit("Room:2", false)), ["urn:ngsi-ld:Room:2"]);
-    assert_eq!(q(&lit("Room:2", true)), Vec::<String>::new());
+    assert_eq!(q!(&lit("Room:2", false)), ["urn:ngsi-ld:Room:2"]);
+    assert_eq!(q!(&lit("Room:2", true)), Vec::<String>::new());
     assert_eq!(
-        q(&lit("ngsi-ld:V", false)),
+        q!(&lit("ngsi-ld:V", false)),
         ["urn:ngsi-ld:Vehicle:1", "urn:ngsi-ld:Vehicle:2"]
     );
 
     // type selection (OR of AND-groups, expanded IRIs)
     let groups = vec![vec![ex("Vehicle")]];
     assert_eq!(
-        q(&antares_sql::store::pg::entity::EntityFilter {
+        q!(&antares_sql::store::pg::entity::EntityFilter {
             types: Some(&groups),
             ..base()
         }),
@@ -408,7 +426,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     // attrs: carries at least one of them
     let attrs = vec![ex("speed"), ex("brandName")];
     assert_eq!(
-        q(&antares_sql::store::pg::entity::EntityFilter {
+        q!(&antares_sql::store::pg::entity::EntityFilter {
             attrs: Some(&attrs),
             ..base()
         }),
@@ -418,7 +436,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     // q=: numeric comparison over instance values
     let ast = antares_ql::parse_q("temperature>20").expect("parse");
     assert_eq!(
-        q(&antares_sql::store::pg::entity::EntityFilter {
+        q!(&antares_sql::store::pg::entity::EntityFilter {
             q: Some(&ast),
             ..base()
         }),
@@ -428,7 +446,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     // q=: string equality, and the AND of two predicates
     let ast = antares_ql::parse_q("name==\"south\";speed==60").expect("parse");
     assert_eq!(
-        q(&antares_sql::store::pg::entity::EntityFilter {
+        q!(&antares_sql::store::pg::entity::EntityFilter {
             q: Some(&ast),
             ..base()
         }),
@@ -439,7 +457,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     // — the case a naive `NOT jsonb_path_exists` on the wrong path gets wrong)
     let ast = antares_ql::parse_q("brandName").expect("parse");
     assert_eq!(
-        q(&antares_sql::store::pg::entity::EntityFilter {
+        q!(&antares_sql::store::pg::entity::EntityFilter {
             q: Some(&ast),
             ..base()
         }),
@@ -447,7 +465,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     );
     let ast = antares_ql::parse_q("!name").expect("parse");
     assert_eq!(
-        q(&antares_sql::store::pg::entity::EntityFilter {
+        q!(&antares_sql::store::pg::entity::EntityFilter {
             q: Some(&ast),
             ..base()
         }),
@@ -459,7 +477,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     for refused in ["address.city==\"Bonn\"", "name~=\"^so\"", "name>\"m\""] {
         let ast = antares_ql::parse_q(refused).expect("parse");
         assert_eq!(
-            q(&antares_sql::store::pg::entity::EntityFilter {
+            q!(&antares_sql::store::pg::entity::EntityFilter {
                 q: Some(&ast),
                 ..base()
             }),
@@ -472,7 +490,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     let groups = vec![vec![ex("Room")]];
     let ast = antares_ql::parse_q("temperature<20").expect("parse");
     assert_eq!(
-        q(&antares_sql::store::pg::entity::EntityFilter {
+        q!(&antares_sql::store::pg::entity::EntityFilter {
             types: Some(&groups),
             q: Some(&ast),
             ..base()
@@ -529,14 +547,17 @@ async fn clause_5_5_6_undecided_query_past_the_ceiling_is_refused() {
     // a dotted path is one of the shapes compile_q declines (see the pushdown
     // test above) — the request is undecided and therefore unpaged
     let ast = antares_ql::parse_q("address.city==\"Bonn\"").expect("parse");
-    let err = match s.query(
-        &t,
-        &antares_sql::store::pg::entity::EntityFilter {
-            q: Some(&ast),
-            expand: &ex,
-            ..Default::default()
-        },
-    ) {
+    let err = match s
+        .query(
+            &t,
+            &antares_sql::store::pg::entity::EntityFilter {
+                q: Some(&ast),
+                expand: &ex,
+                ..Default::default()
+            },
+        )
+        .await
+    {
         Ok(out) => panic!(
             "a cut result set must be refused, got {} rows (decided={}, paged={})",
             out.rows.len(),
@@ -571,6 +592,7 @@ async fn clause_5_5_6_undecided_query_past_the_ceiling_is_refused() {
                 ..Default::default()
             },
         )
+        .await
         .expect("a paged query over the same set is answerable");
     assert_eq!(out.rows.len(), 5, "exactly the requested page");
     assert!(out.paged && out.decided);
@@ -599,20 +621,33 @@ async fn the_batch_seams_answer_per_input_item_for_empty_and_repeated_input() {
     let t = TenantId::new("pgbatchedge").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let id = "urn:ngsi-ld:Test:edge1";
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
 
     // Empty in, empty out — and no row of this tenant is touched.
-    assert!(s.batch_create(&t, &[]).expect("empty create").is_empty());
-    assert!(s.batch_delete(&t, &[]).expect("empty delete").is_empty());
+    assert!(s
+        .batch_create(&t, &[])
+        .await
+        .expect("empty create")
+        .is_empty());
+    assert!(s
+        .batch_delete(&t, &[])
+        .await
+        .expect("empty delete")
+        .is_empty());
     assert!(s
         .batch_upsert_replace(&t, &[])
+        .await
         .expect("empty upsert")
         .is_empty());
     assert!(s
         .batch_mutate(&t, &[], |_id, _d| Ok::<(), ()>(()))
+        .await
         .expect("empty mutate")
         .is_empty());
-    assert!(s.get(&t, id).expect("get").is_none(), "nothing was written");
+    assert!(
+        s.get(&t, id).await.expect("get").is_none(),
+        "nothing was written"
+    );
 
     // The same id three times, upserted: one answer per input item, all of
     // them describing the one row the batch left behind.
@@ -620,6 +655,7 @@ async fn the_batch_seams_answer_per_input_item_for_empty_and_repeated_input() {
         (1..=3).map(|n| (id.to_owned(), doc(id, n))).collect();
     let out = s
         .batch_upsert_replace(&t, &three)
+        .await
         .expect("a repeated id must not reach ON CONFLICT twice");
     assert_eq!(out.len(), three.len(), "one answer per input item");
     assert!(
@@ -628,7 +664,7 @@ async fn the_batch_seams_answer_per_input_item_for_empty_and_repeated_input() {
          over no before-image: {out:?}"
     );
     assert_eq!(
-        s.get(&t, id).expect("get").expect("present")["n"]["value"],
+        s.get(&t, id).await.expect("get").expect("present")["n"]["value"],
         1,
         "5.5.11.1: the first instance of a repeated id is the one that wins"
     );
@@ -643,6 +679,7 @@ async fn the_batch_seams_answer_per_input_item_for_empty_and_repeated_input() {
             d["n"]["value"] = json!(calls);
             Ok::<(), ()>(())
         })
+        .await
         .expect("batch mutate");
     assert_eq!(out.len(), ids.len(), "one answer per input item: {out:?}");
     assert!(
@@ -652,7 +689,7 @@ async fn the_batch_seams_answer_per_input_item_for_empty_and_repeated_input() {
     assert!(out[2].is_none(), "an absent id is None: {out:?}");
     assert_eq!(calls, 2, "5.6.9.4 runs 5.6.3 once per input item");
     assert_eq!(
-        s.get(&t, id).expect("get").expect("present")["n"]["value"],
+        s.get(&t, id).await.expect("get").expect("present")["n"]["value"],
         2,
         "the row holds the LAST application, not an intermediate one"
     );
@@ -660,9 +697,10 @@ async fn the_batch_seams_answer_per_input_item_for_empty_and_repeated_input() {
     // And the delete: a repeated id is one row, returned once.
     let deleted = s
         .batch_delete(&t, &[id.to_owned(), id.to_owned()])
+        .await
         .expect("batch delete");
     assert_eq!(deleted.len(), 1, "one row, one before-image: {deleted:?}");
-    assert!(s.get(&t, id).expect("get").is_none());
+    assert!(s.get(&t, id).await.expect("get").is_none());
 }
 
 /// 4.22 through the batch paths.
@@ -689,52 +727,61 @@ async fn the_batch_paths_see_an_expired_entity_the_way_the_single_entity_paths_d
         d["expiresAt"] = json!("2020-01-01T00:00:00Z");
         d
     }
-    let seed = |id: &str| {
-        let _ = s.delete(&t, id);
-        assert!(s.create(&t, id, &expired(id)).expect("seed"));
-        // The row is there and already invalid: absent to a read, which is
-        // what makes every answer below about expiry and not about absence.
-        assert!(
-            s.get(&t, id).expect("get").is_none(),
-            "an expired entity must read as absent"
-        );
-    };
+    // a macro, not a closure: the store calls are awaited and an async
+    // closure is not a stable language feature
+    macro_rules! seed {
+        ($id:expr) => {{
+            let id: &str = $id;
+            let _ = s.delete(&t, id).await;
+            assert!(s.create(&t, id, &expired(id)).await.expect("seed"));
+            // The row is there and already invalid: absent to a read, which
+            // is what makes every answer below about expiry and not about
+            // absence.
+            assert!(
+                s.get(&t, id).await.expect("get").is_none(),
+                "an expired entity must read as absent"
+            );
+        }};
+    }
 
     // The single-entity answers this batch is measured against.
     let single = "urn:ngsi-ld:Test:exp-single";
-    seed(single);
+    seed!(single);
     assert!(
-        s.create(&t, single, &doc(single, 2)).expect("create"),
+        s.create(&t, single, &doc(single, 2)).await.expect("create"),
         "5.6.1: creating over an expired entity creates"
     );
-    seed(single);
+    seed!(single);
     assert!(
-        s.delete(&t, single).expect("delete").is_none(),
+        s.delete(&t, single).await.expect("delete").is_none(),
         "5.6.6: deleting an expired entity finds nothing"
     );
 
     let id = "urn:ngsi-ld:Test:exp-batch".to_owned();
 
-    seed(&id);
+    seed!(&id);
     assert_eq!(
         s.batch_create(&t, &[(id.clone(), doc(&id, 3))])
+            .await
             .expect("batch_create"),
         vec![true],
         "5.6.7.4: the batch create of an expired id is the 5.6.1 create, which creates"
     );
 
-    seed(&id);
+    seed!(&id);
     let deleted = s
         .batch_delete(&t, std::slice::from_ref(&id))
+        .await
         .expect("batch_delete");
     assert!(
         deleted.is_empty(),
         "5.6.10.4: the batch delete of an expired id is the 5.6.6 delete, which finds nothing: {deleted:?}"
     );
 
-    seed(&id);
+    seed!(&id);
     let upserted = s
         .batch_upsert_replace(&t, &[(id.clone(), doc(&id, 4))])
+        .await
         .expect("batch_upsert");
     assert_eq!(
         upserted
@@ -754,17 +801,22 @@ async fn the_batch_paths_see_an_expired_entity_the_way_the_single_entity_paths_d
     // absent, wrote to it, and emitted a change notification for it — the
     // merge form able to set a future `expiresAt` and resurrect an entity
     // the single-entity PATCH cannot touch.
-    seed(&id);
-    let single_patch = s.mutate(&t, single, |_d| Ok::<(), ()>(())).expect("mutate");
-    seed(single);
+    seed!(&id);
+    let single_patch = s
+        .mutate(&t, single, |_d| Ok::<(), ()>(()))
+        .await
+        .expect("mutate");
+    seed!(single);
     assert!(
         s.mutate(&t, single, |_d| Ok::<(), ()>(()))
+            .await
             .expect("mutate")
             .is_none(),
         "5.6.3: an expired entity cannot be updated ({single_patch:?})"
     );
     let mutated = s
         .batch_mutate(&t, std::slice::from_ref(&id), |_id, _d| Ok::<(), ()>(()))
+        .await
         .expect("batch_mutate");
     assert_eq!(mutated.len(), 1, "one id in, one answer out: {mutated:?}");
     assert!(
@@ -773,8 +825,8 @@ async fn the_batch_paths_see_an_expired_entity_the_way_the_single_entity_paths_d
          which finds nothing: {mutated:?}"
     );
 
-    let _ = s.delete(&t, &id);
-    let _ = s.delete(&t, single);
+    let _ = s.delete(&t, &id).await;
+    let _ = s.delete(&t, single).await;
 }
 
 /// 5.5.6 licenses TooManyResults for "a query operation … producing so many
@@ -822,6 +874,7 @@ async fn clause_5_5_6_a_page_is_served_where_the_whole_list_is_refused() {
 
     let refused = s
         .list(&t)
+        .await
         .expect_err("a tenant over the ceiling refuses `list`");
     assert_eq!(
         ngsi_error(&refused).map(antares_model::NgsiError::kind),
@@ -831,6 +884,7 @@ async fn clause_5_5_6_a_page_is_served_where_the_whole_list_is_refused() {
 
     let page = s
         .list_page(&t, None, 1_000)
+        .await
         .expect("a page is never refused");
     assert_eq!(page.len(), 1_000, "a full page is a full page");
     let first: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
@@ -843,6 +897,7 @@ async fn clause_5_5_6_a_page_is_served_where_the_whole_list_is_refused() {
     // The cursor is exclusive and the walk keeps moving past the ceiling.
     let next = s
         .list_page(&t, Some(first[999]), 3)
+        .await
         .expect("a page is never refused");
     let next: Vec<&str> = next.iter().filter_map(|d| d["id"].as_str()).collect();
     assert_eq!(
@@ -861,6 +916,7 @@ async fn clause_5_5_6_a_page_is_served_where_the_whole_list_is_refused() {
             Some(&format!("urn:ngsi-ld:Ceiling:{:06}", over - 2)),
             1_000,
         )
+        .await
         .expect("a page is never refused");
     assert_eq!(tail.len(), 2, "the tail page is short, not padded");
 
@@ -876,6 +932,7 @@ async fn clause_5_5_6_a_page_is_served_where_the_whole_list_is_refused() {
         None,
         1_000,
     )
+    .await
     .expect("the seam serves a page of a tenant over the ceiling");
     assert_eq!(
         page.len(),
@@ -910,7 +967,7 @@ async fn a_first_write_waits_for_the_tenant_row_lock() {
     let t = TenantId::new("pgclaim").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let id = "urn:ngsi-ld:Vehicle:claim1";
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
 
     // the purge's own first statement, held open
     let mut holder = pool.begin().await.expect("begin");
@@ -924,7 +981,7 @@ async fn a_first_write_waits_for_the_tenant_row_lock() {
     let doc = json!({"id": id, "type": "Vehicle",
                      "createdAt": "2026-01-01T00:00:00Z",
                      "modifiedAt": "2026-01-01T00:00:00Z"});
-    let writing = tokio::task::spawn_blocking(move || s2.create(&t2, id, &doc));
+    let writing = tokio::spawn(async move { s2.create(&t2, id, &doc).await });
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert!(
         !writing.is_finished(),
@@ -937,7 +994,7 @@ async fn a_first_write_waits_for_the_tenant_row_lock() {
         .expect("join")
         .expect("the write finishes once the lock is released");
     assert!(created, "the entity was created");
-    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, id).await;
 }
 
 /// 4.9: "If the target element is a Property, the target value is defined as
@@ -974,17 +1031,22 @@ async fn clause_4_9_a_typed_value_is_not_dropped_by_the_pushdown() {
         ),
     ];
     for (id, attrs) in &seed {
-        let _ = s.delete(&t, id);
+        let _ = s.delete(&t, id).await;
         assert!(
             s.create(&t, id, &expanded(id, "Vehicle", attrs.clone()))
+                .await
                 .expect("create"),
             "seed {id}"
         );
     }
 
-    let q = |f: &antares_sql::store::pg::entity::EntityFilter<'_>| {
-        ids_of(&s.query(&t, f).expect("query").rows)
-    };
+    // a macro, not a closure: the query is awaited and an async closure is
+    // not a stable language feature
+    macro_rules! q {
+        ($f:expr) => {
+            ids_of(&s.query(&t, $f).await.expect("query").rows)
+        };
+    }
     for (term, want) in [
         (
             "testedAt==2018-12-04T12:00:00Z",
@@ -1006,6 +1068,6 @@ async fn clause_4_9_a_typed_value_is_not_dropped_by_the_pushdown() {
             expand: &ex,
             ..Default::default()
         };
-        assert_eq!(q(&f), want, "{term}");
+        assert_eq!(q!(&f), want, "{term}");
     }
 }

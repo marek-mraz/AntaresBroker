@@ -66,9 +66,9 @@ fn slow() -> Filter {
 
 /// The notification pipeline is wired, because the history a temporal read
 /// answers from is written by it.
-fn state(f: Filter) -> AppState {
+async fn state(f: Filter) -> AppState {
     let mut st = AppState::new("me".into()).with_policy(Arc::new(Narrowing(f)));
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     st
 }
 
@@ -175,13 +175,13 @@ fn ids(list: &Value) -> Vec<String> {
 /// store runs, so the Entity over it is absent — not hidden after the fact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_policy_q_narrows_the_entity_query() {
-    let wide = state(Filter::default());
+    let wide = state(Filter::default()).await;
     seed(&wide).await;
     let (code, all) = send(&wide, "GET", "/ngsi-ld/v1/entities?type=Vehicle", None).await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(ids(&all).len(), 2, "the raw query returns both: {all}");
 
-    let narrow = state(slow());
+    let narrow = state(slow()).await;
     seed(&narrow).await;
     let (code, some) = send(&narrow, "GET", "/ngsi-ld/v1/entities?type=Vehicle", None).await;
     assert_eq!(code, StatusCode::OK);
@@ -197,7 +197,7 @@ async fn a_policy_q_narrows_the_entity_query() {
 /// empty rather than answered with the slow one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_request_query_and_the_policy_query_are_conjoined() {
-    let st = state(slow());
+    let st = state(slow()).await;
     seed(&st).await;
     let (code, list) = send(
         &st,
@@ -214,7 +214,7 @@ async fn the_request_query_and_the_policy_query_are_conjoined() {
 /// does, so a caller cannot tell a hidden Entity from one that never was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hidden_entity_is_a_resource_not_found() {
-    let st = state(slow());
+    let st = state(slow()).await;
     seed(&st).await;
     let (code, _) = send(
         &st,
@@ -245,7 +245,8 @@ async fn a_policy_omit_removes_the_member_from_every_document() {
     let st = state(Filter {
         omit: vec!["colour".into()],
         ..Filter::default()
-    });
+    })
+    .await;
     seed(&st).await;
     let (_, list) = send(&st, "GET", "/ngsi-ld/v1/entities?type=Vehicle", None).await;
     for e in list.as_array().expect("array") {
@@ -272,7 +273,8 @@ async fn a_policy_pick_leaves_the_entity_frame_and_nothing_it_did_not_name() {
     let st = state(Filter {
         pick: vec!["speed".into()],
         ..Filter::default()
-    });
+    })
+    .await;
     seed(&st).await;
     let (_, one) = send(
         &st,
@@ -296,7 +298,8 @@ async fn the_request_projection_and_the_policy_projection_both_apply() {
     let st = state(Filter {
         pick: vec!["speed".into()],
         ..Filter::default()
-    });
+    })
+    .await;
     seed(&st).await;
     let (_, one) = send(
         &st,
@@ -318,14 +321,15 @@ async fn a_restricted_answer_carries_the_header_and_a_silent_one_does_not() {
     let st = state(Filter {
         restricted: true,
         ..slow()
-    });
+    })
+    .await;
     seed(&st).await;
     assert_eq!(
         restricted(&st, "/ngsi-ld/v1/entities?type=Vehicle").await,
         Some("true".to_owned())
     );
 
-    let quiet = state(slow());
+    let quiet = state(slow()).await;
     seed(&quiet).await;
     assert_eq!(
         restricted(&quiet, "/ngsi-ld/v1/entities?type=Vehicle").await,
@@ -343,7 +347,8 @@ async fn the_restricted_header_reaches_every_read_that_was_narrowed() {
         restricted: true,
         omit: vec!["colour".into()],
         ..Filter::default()
-    });
+    })
+    .await;
     seed(&st).await;
     seed_history(&st).await;
     for uri in [
@@ -365,7 +370,7 @@ async fn the_restricted_header_reaches_every_read_that_was_narrowed() {
 /// is not the client's filter: a request that was too wide stays too wide.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_too_wide_query_is_still_too_wide_under_a_narrowing_policy() {
-    let st = state(slow());
+    let st = state(slow()).await;
     seed(&st).await;
     let (code, pd) = send(&st, "GET", "/ngsi-ld/v1/entities", None).await;
     assert_eq!(code, StatusCode::BAD_REQUEST, "{pd}");
@@ -374,7 +379,7 @@ async fn a_too_wide_query_is_still_too_wide_under_a_narrowing_policy() {
 /// The batch query (6.23) is the POST spelling of 5.7.2 and narrows with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_narrowing_reaches_the_batch_query() {
-    let st = state(slow());
+    let st = state(slow()).await;
     seed(&st).await;
     let (code, list) = send(
         &st,
@@ -398,7 +403,8 @@ async fn the_narrowing_reaches_the_temporal_query() {
     let st = state(Filter {
         omit: vec!["colour".into()],
         ..Filter::default()
-    });
+    })
+    .await;
     seed_history(&st).await;
     let (code, list) = send(
         &st,
@@ -432,7 +438,8 @@ async fn a_projection_named_as_an_iri_removes_the_member_it_names() {
     let st = state(Filter {
         omit: vec!["https://uri.etsi.org/ngsi-ld/default-context/colour".into()],
         ..Filter::default()
-    });
+    })
+    .await;
     seed(&st).await;
     let (code, list) = send(&st, "GET", "/ngsi-ld/v1/entities?type=Vehicle", None).await;
     assert_eq!(code, StatusCode::OK, "{list}");
@@ -453,7 +460,7 @@ async fn a_projection_named_as_an_iri_removes_the_member_it_names() {
 /// existence to every page read through the map afterwards.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_entity_map_lists_only_the_narrowed_candidates() {
-    let wide = state(Filter::default());
+    let wide = state(Filter::default()).await;
     seed(&wide).await;
     let (code, map) = send(&wide, "GET", "/ngsi-ld/v1/entityMaps?type=Vehicle", None).await;
     assert_eq!(code, StatusCode::CREATED, "{map}");
@@ -476,7 +483,7 @@ async fn the_entity_map_lists_only_the_narrowed_candidates() {
         "the raw query maps both: {map}"
     );
 
-    let st = state(slow());
+    let st = state(slow()).await;
     seed(&st).await;
     let (code, map) = send(&st, "GET", "/ngsi-ld/v1/entityMaps?type=Vehicle", None).await;
     assert_eq!(code, StatusCode::CREATED, "{map}");
@@ -528,7 +535,8 @@ async fn a_scope_narrowing_intersects_the_requests_own() {
     let st = state(Filter {
         scope_q: Some("/BB/#".into()),
         ..Filter::default()
-    });
+    })
+    .await;
     seed_scoped(&st).await;
 
     // no scopeQ of its own: the narrowing is simply the query's scope
@@ -576,7 +584,8 @@ async fn an_inexpressible_scope_intersection_is_still_a_refusal() {
     let st = state(Filter {
         scope_q: Some(many.clone()),
         ..Filter::default()
-    });
+    })
+    .await;
     seed_scoped(&st).await;
     let (code, pd) = send(
         &st,
@@ -631,8 +640,8 @@ async fn a_peer_that_ignores_the_forwarded_narrowing_still_does_not_widen_it() {
 
     // both brokers register the same peer: one narrowing, one not, so the
     // assertion below cannot pass because the peer was never reached
-    let wide = state(Filter::default());
-    let st = state(slow());
+    let wide = state(Filter::default()).await;
+    let st = state(slow()).await;
     for st in [&wide, &st] {
         let (code, _) = send(
             st,
@@ -695,7 +704,8 @@ async fn a_request_context_cannot_move_a_policy_name_off_its_target() {
     let st = state(Filter {
         omit: vec!["colour".into()],
         ..Filter::default()
-    });
+    })
+    .await;
     let (status, _) = send(
         &st,
         "POST",
@@ -757,7 +767,8 @@ async fn a_join_does_not_carry_a_narrowed_member_out_of_the_answer() {
     let st = state(Filter {
         omit: vec!["colour".into()],
         ..Filter::default()
-    });
+    })
+    .await;
     for (id, kind, colour, rel) in [
         (
             "urn:ngsi-ld:Vehicle:joined",

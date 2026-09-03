@@ -750,21 +750,35 @@ pub struct Loader {
 /// use itself (5.13.3.5, one client use = one hit).
 pub const INTERNAL_FETCH_HEADER: &str = "x-antares-ctx-fetch";
 
+/// What a store-backed hook hands back. Boxed because the store behind it
+/// is asynchronous and the hook is held as a trait object.
+pub type HookFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 /// (the Tenant the resolution acts for, url, parsed `@context` value) —
 /// called on every fresh remote fetch. The row it writes is `Cached` and so
 /// belongs to no Tenant, but reaching the store to write it is a call the
 /// store answers per Tenant (ADR-0021).
-pub type CacheWriter = Box<dyn Fn(Option<&TenantId>, &str, &Value) + Send + Sync>;
+pub type CacheWriter = std::sync::Arc<
+    dyn for<'a> Fn(Option<&'a TenantId>, &'a str, &'a Value) -> HookFuture<'a, ()> + Send + Sync,
+>;
 /// (Tenant, url) -> "the shared row still exists" (after bumping its hit
 /// counter). A Hosted row is only bumped by the Tenant that owns it, which
 /// is also the only Tenant whose resolutions reach it.
-pub type UsageBump = Box<dyn Fn(Option<&TenantId>, &str) -> bool + Send + Sync>;
+pub type UsageBump = std::sync::Arc<
+    dyn for<'a> Fn(Option<&'a TenantId>, &'a str) -> HookFuture<'a, bool> + Send + Sync,
+>;
 /// (Tenant, url) -> the `@context` value of the row this broker HOSTS under
 /// it, with the Tenant that owns it (5.13.1 Hosted/ImplicitlyCreated;
 /// `None` = owned by no Tenant). The store is where a broker-local @context
 /// comes from — see [`Loader::set_local_lookup`].
-pub type LocalLookup =
-    Box<dyn Fn(Option<&TenantId>, &str) -> Option<(Option<TenantId>, Value)> + Send + Sync>;
+pub type LocalLookup = std::sync::Arc<
+    dyn for<'a> Fn(
+            Option<&'a TenantId>,
+            &'a str,
+        ) -> HookFuture<'a, Option<(Option<TenantId>, Value)>>
+        + Send
+        + Sync,
+>;
 
 impl Default for Loader {
     fn default() -> Self {
@@ -943,13 +957,15 @@ impl Loader {
                 );
             }
         }
-        let row_exists = match self
+        // the hook is cloned out of the lock before it is awaited: a
+        // std guard held across an await is not Send
+        let bump = self
             .usage_bump
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            Some(f) => f(tenant, url),
+            .clone();
+        let row_exists = match bump {
+            Some(f) => f(tenant, url).await,
             None => true,
         };
         if row_exists {
@@ -1262,12 +1278,15 @@ impl Loader {
         }
         // A URL this broker hosts is served from its row, never fetched:
         // the warm copy is only a cache (see `set_local_lookup`).
-        let hosted = self
+        let lookup = self
             .local_lookup
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(|f| f(tenant, url));
+            .clone();
+        let hosted = match lookup {
+            Some(f) => f(tenant, url).await,
+            None => None,
+        };
         if let Some((owner, value)) = hosted {
             let doc = FetchedDoc {
                 value: Arc::new(value),
@@ -1412,10 +1431,13 @@ impl Loader {
             },
         );
         // Write-through: persist what was just fetched.
-        if let Ok(w) = self.cache_writer.read() {
-            if let Some(w) = w.as_ref() {
-                w(tenant, url, &arc);
-            }
+        let writer = self
+            .cache_writer
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(w) = writer {
+            w(tenant, url, &arc).await;
         }
         Ok(arc)
     }

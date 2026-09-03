@@ -676,17 +676,13 @@ async fn batch_write(
         attrs: spec.attrs.as_deref().unwrap_or(&[]),
     )
     .await?;
-    let fed_regs = match crate::federation::write_plan(
-        st,
-        &tenant,
-        &spec,
-        &st.loader.core(),
-        params,
-        headers,
-    )? {
-        crate::federation::WritePlan::Answered(r) => return Ok(*r),
-        crate::federation::WritePlan::Forward(regs) => regs,
-    };
+    let fed_regs =
+        match crate::federation::write_plan(st, &tenant, &spec, &st.loader.core(), params, headers)
+            .await?
+        {
+            crate::federation::WritePlan::Answered(r) => return Ok(*r),
+            crate::federation::WritePlan::Forward(regs) => regs,
+        };
     let mut out = BatchOutcome {
         success: vec![],
         errors: vec![],
@@ -811,10 +807,13 @@ async fn batch_write(
                     let ids: Vec<String> = round.iter().map(|(id, _)| id.clone()).collect();
                     let docs: HashMap<&str, &Value> =
                         round.iter().map(|(id, d)| (id.as_str(), d)).collect();
-                    let res = st.store.batch_mutate(&tenant, &ids, |id, doc| {
-                        merge_into(doc, docs[id], &ts);
-                        Ok::<(), NgsiError>(())
-                    })?;
+                    let res = st
+                        .store
+                        .batch_mutate(&tenant, &ids, |id, doc| {
+                            merge_into(doc, docs[id], &ts);
+                            Ok::<(), NgsiError>(())
+                        })
+                        .await?;
                     for ((id, expanded), r) in round.iter().zip(res) {
                         match r {
                             Some(Err(e)) => out.errors.push(err_entry(Some(id), &e)),
@@ -837,7 +836,7 @@ async fn batch_write(
                     // the loop below only needs the ids, so the batch payload
                     // is never deep-cloned on the ingest hot path.
                     let ids: Vec<String> = replaces.iter().map(|(id, _)| id.clone()).collect();
-                    let flags = st.store.batch_upsert(&tenant, replaces)?;
+                    let flags = st.store.batch_upsert(&tenant, replaces).await?;
                     for (id, created) in ids.iter().zip(flags) {
                         if created {
                             any_created = true;
@@ -859,44 +858,48 @@ async fn batch_write(
                 // are left alone; if any existed, the entity is a partial
                 // failure (005_02 ⇒ 207)
                 let mut skipped: HashMap<String, bool> = HashMap::new();
-                let res = st.store.batch_mutate(&tenant, &ids, |id, doc| {
-                    let expanded = docs[id];
-                    if mode == BatchMode::Update && no_overwrite {
-                        // noOverwrite is instance-level: only instances
-                        // whose datasetId already exists are skipped
-                        let target = antares_store::stored_object(doc)?;
-                        for (k, v) in antares_jsonld::expanded_object(expanded)? {
-                            if matches!(
-                                k.as_str(),
-                                "id" | "type" | "scope" | "createdAt" | "modifiedAt"
-                            ) {
-                                continue;
-                            }
-                            let incoming: Vec<Value> = v.as_array().cloned().unwrap_or_default();
-                            match target.get_mut(k).and_then(Value::as_array_mut) {
-                                None => {
-                                    target.insert(k.clone(), Value::Array(incoming));
+                let res = st
+                    .store
+                    .batch_mutate(&tenant, &ids, |id, doc| {
+                        let expanded = docs[id];
+                        if mode == BatchMode::Update && no_overwrite {
+                            // noOverwrite is instance-level: only instances
+                            // whose datasetId already exists are skipped
+                            let target = antares_store::stored_object(doc)?;
+                            for (k, v) in antares_jsonld::expanded_object(expanded)? {
+                                if matches!(
+                                    k.as_str(),
+                                    "id" | "type" | "scope" | "createdAt" | "modifiedAt"
+                                ) {
+                                    continue;
                                 }
-                                Some(cur) => {
-                                    for ni in incoming {
-                                        let ds = ni.get("datasetId").and_then(Value::as_str);
-                                        if cur.iter().any(|ci| {
-                                            ci.get("datasetId").and_then(Value::as_str) == ds
-                                        }) {
-                                            skipped.insert(id.to_owned(), true);
-                                        } else {
-                                            cur.push(ni);
+                                let incoming: Vec<Value> =
+                                    v.as_array().cloned().unwrap_or_default();
+                                match target.get_mut(k).and_then(Value::as_array_mut) {
+                                    None => {
+                                        target.insert(k.clone(), Value::Array(incoming));
+                                    }
+                                    Some(cur) => {
+                                        for ni in incoming {
+                                            let ds = ni.get("datasetId").and_then(Value::as_str);
+                                            if cur.iter().any(|ci| {
+                                                ci.get("datasetId").and_then(Value::as_str) == ds
+                                            }) {
+                                                skipped.insert(id.to_owned(), true);
+                                            } else {
+                                                cur.push(ni);
+                                            }
                                         }
                                     }
                                 }
                             }
+                            target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                        } else {
+                            merge_into(doc, expanded, &ts);
                         }
-                        target.insert("modifiedAt".into(), Value::String(ts.clone()));
-                    } else {
-                        merge_into(doc, expanded, &ts);
-                    }
-                    Ok::<(), NgsiError>(())
-                })?;
+                        Ok::<(), NgsiError>(())
+                    })
+                    .await?;
                 for ((id, _), r) in round.iter().zip(res) {
                     match r {
                         None => out.errors.push(err_entry(
@@ -924,7 +927,7 @@ async fn batch_write(
     // The collected creates, one multi-row statement, one transaction.
     if !pending_creates.is_empty() {
         let ids: Vec<String> = pending_creates.iter().map(|(id, _)| id.clone()).collect();
-        let flags = st.store.batch_create(&tenant, pending_creates)?;
+        let flags = st.store.batch_create(&tenant, pending_creates).await?;
         for (id, created) in ids.iter().zip(flags) {
             if created {
                 any_created = true;
@@ -1152,7 +1155,9 @@ pub async fn batch_delete(
             &st.loader.core(),
             &params,
             &headers,
-        )? {
+        )
+        .await?
+        {
             crate::federation::WritePlan::Answered(r) => return Ok(*r),
             crate::federation::WritePlan::Forward(regs) => regs,
         };
@@ -1166,7 +1171,7 @@ pub async fn batch_delete(
             .filter_map(Value::as_str)
             .map(str::to_owned)
             .collect();
-        let mut flags = st.store.batch_delete(&tenant, &id_strs)?.into_iter();
+        let mut flags = st.store.batch_delete(&tenant, &id_strs).await?.into_iter();
         let mut local_ok: std::collections::HashSet<String> = Default::default();
         let mut local_miss: Vec<String> = Vec::new();
         for id in ids {
@@ -1182,7 +1187,7 @@ pub async fn batch_delete(
                 // as 5.6.6 — without this, batch-deleted entities live on in
                 // the temporal store (the reset's batch delete leaked
                 // every prior suite's Buildings into the orderBy queries).
-                crate::history::mirror_delete_entity(&st, &tenant, id);
+                crate::history::mirror_delete_entity(&st, &tenant, id).await;
                 local_ok.insert(id.to_owned());
             } else {
                 // proxied entities may live remotely only (4.3.6.3) — a
@@ -1401,7 +1406,8 @@ async fn batch_query_inner(
     } else {
         Vec::new()
     };
-    let mut matches = crate::entities::filter_entities_fed(st, &tenant, &vp, &parsed.ctx, fed)?;
+    let mut matches =
+        crate::entities::filter_entities_fed(st, &tenant, &vp, &parsed.ctx, fed).await?;
     let mut page_params = params.clone();
     page_params.extend(vp.clone());
     // 5.2.43 ordering: same 4.23 keys as the GET twin, applied pre-pagination
@@ -1450,7 +1456,8 @@ async fn batch_query_inner(
                         *level,
                         &held,
                         &mut budget,
-                    );
+                    )
+                    .await;
                 }
             }
             "flat" => {
@@ -1465,7 +1472,8 @@ async fn batch_query_inner(
                         &mut linked,
                         &held,
                         &mut budget,
-                    );
+                    )
+                    .await;
                 }
                 let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
                 for (id, (ldoc, lrepr)) in linked {
@@ -1599,8 +1607,8 @@ mod tests {
             &app,
             "/ngsi-ld/v1/entityOperations/query",
             json!({"type": "Query", "entities": [{"type": "Vehicle"}], "q": format!("name==\"{huge}\"")}),
-        )
-        .await;
+        ).await
+        ;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_json(resp).await;
         assert!(
@@ -1614,8 +1622,8 @@ mod tests {
             &app,
             "/ngsi-ld/v1/entityOperations/query",
             json!({"type": "Query", "entities": [{"type": "Vehicle"}], "q": format!("name==\"{ok}\"")}),
-        )
-        .await;
+        ).await
+        ;
         assert_eq!(resp.status(), StatusCode::OK, "a normal query still works");
 
         // and the array members are assembled under the same cap
@@ -1969,8 +1977,8 @@ mod tests {
     /// 5.6.7.4: what merges into the client's S and E arrays is the outcome
     /// of the Entities this broker forwarded. Ids a Context Source invents
     /// are dropped, and its error text is never relayed verbatim.
-    #[test]
-    fn remote_batch_results_are_confined_to_forwarded_ids() {
+    #[tokio::test]
+    async fn remote_batch_results_are_confined_to_forwarded_ids() {
         let sent = vec!["urn:ngsi-ld:Building:mine".to_owned()];
         let (mut ok, mut err) = (Vec::new(), Vec::new());
         merge_remote_batch(

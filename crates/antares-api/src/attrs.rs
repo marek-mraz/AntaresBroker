@@ -123,12 +123,12 @@ async fn write_attrs(
     body: &[u8],
     mode: &AttrWrite,
     merge: impl FnOnce(
-        &mut Map<String, Value>,
-        &Map<String, Value>,
-        &str,
-        &mut Vec<String>,
-        &mut Vec<(String, String)>,
-    ),
+            &mut Map<String, Value>,
+            &Map<String, Value>,
+            &str,
+            &mut Vec<String>,
+            &mut Vec<(String, String)>,
+        ) + Send,
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
     antares_model::EntityId::new(id)?;
@@ -149,7 +149,7 @@ async fn write_attrs(
         },
     )?;
     let (plan, all_attr_iris) =
-        attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params, headers)?;
+        attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params, headers).await?;
     let regs = match plan {
         crate::federation::WritePlan::Answered(r) => return Ok(*r),
         crate::federation::WritePlan::Forward(regs) => regs,
@@ -163,43 +163,46 @@ async fn write_attrs(
     let local_resp: Option<ApiResult<Response>> = if local_covered {
         None
     } else {
-        let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
-            // 5.6.2.4 / 5.6.3.4: the ?type selector narrows the target — a
-            // mismatch means the entity is not known for this operation.
-            if !matches_type_param(doc, params, &parsed.ctx) {
-                return Err(NgsiError::ResourceNotFound(format!(
-                    "entity {id} does not match the type selector"
-                ))
-                .into());
-            }
-            let target = antares_store::stored_object(doc)?;
-            let frag = antares_jsonld::expanded_object(&fragment)?;
-            // 5.6.2.4 / 5.6.3.4: Entity Type names not yet in the target are
-            // added to its list
-            if let Some(new_types) = frag.get("type").and_then(Value::as_array) {
-                let mut cur: Vec<Value> = target
-                    .get("type")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                let known = cur.len();
-                for t in new_types {
-                    if !cur.contains(t) {
-                        cur.push(t.clone());
+        let res = st
+            .store
+            .mutate(&tenant, Kind::Entity, id, |doc| {
+                // 5.6.2.4 / 5.6.3.4: the ?type selector narrows the target — a
+                // mismatch means the entity is not known for this operation.
+                if !matches_type_param(doc, params, &parsed.ctx) {
+                    return Err(NgsiError::ResourceNotFound(format!(
+                        "entity {id} does not match the type selector"
+                    ))
+                    .into());
+                }
+                let target = antares_store::stored_object(doc)?;
+                let frag = antares_jsonld::expanded_object(&fragment)?;
+                // 5.6.2.4 / 5.6.3.4: Entity Type names not yet in the target are
+                // added to its list
+                if let Some(new_types) = frag.get("type").and_then(Value::as_array) {
+                    let mut cur: Vec<Value> = target
+                        .get("type")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let known = cur.len();
+                    for t in new_types {
+                        if !cur.contains(t) {
+                            cur.push(t.clone());
+                        }
+                    }
+                    if cur.len() > known {
+                        target.insert("type".into(), Value::Array(cur));
+                        updated.push("type".into());
                     }
                 }
-                if cur.len() > known {
-                    target.insert("type".into(), Value::Array(cur));
-                    updated.push("type".into());
+                merge(target, frag, &ts, &mut updated, &mut not_updated);
+                if updated.is_empty() {
+                    return Err(Unwritten::Untouched);
                 }
-            }
-            merge(target, frag, &ts, &mut updated, &mut not_updated);
-            if updated.is_empty() {
-                return Err(Unwritten::Untouched);
-            }
-            target.insert("modifiedAt".into(), Value::String(ts.clone()));
-            Ok::<(), Unwritten>(())
-        })?;
+                target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                Ok::<(), Unwritten>(())
+            })
+            .await?;
         Some(match res {
             None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
             Some(Err(Unwritten::Failed(e))) => Err(e.into()),
@@ -383,7 +386,7 @@ fn is_fragment_meta(k: &str) -> bool {
 
 /// Shared federation plan for attribute writes: the matching non-aux
 /// registrations, plus the touched attribute IRIs they were matched on.
-fn attr_fed_plan(
+async fn attr_fed_plan(
     st: &AppState,
     tenant: &antares_model::TenantId,
     id: &str,
@@ -393,11 +396,11 @@ fn attr_fed_plan(
     headers: &axum::http::HeaderMap,
 ) -> Result<(crate::federation::WritePlan, Vec<String>), NgsiError> {
     let attr_iris = attr_iris_of(fragment);
-    let plan = attr_fed_plan_iris(st, tenant, id, &attr_iris, ctx, params, headers)?;
+    let plan = attr_fed_plan_iris(st, tenant, id, &attr_iris, ctx, params, headers).await?;
     Ok((plan, attr_iris))
 }
 
-fn attr_fed_plan_iris(
+async fn attr_fed_plan_iris(
     st: &AppState,
     tenant: &antares_model::TenantId,
     id: &str,
@@ -411,14 +414,14 @@ fn attr_fed_plan_iris(
         attrs: (!attr_iris.is_empty()).then(|| attr_iris.to_vec()),
         ..Default::default()
     };
-    crate::federation::write_plan(st, tenant, &spec, ctx, params, headers)
+    crate::federation::write_plan(st, tenant, &spec, ctx, params, headers).await
 }
 
 /// The registrations an attribute-level operation has to consider, with the
 /// 6.3.18 loop guard already applied. A returned response is the loop
 /// chain's own answer (Table 6.3.18-2) and ends the operation before
 /// anything local happens.
-fn attr_regs_or_loop(
+async fn attr_regs_or_loop(
     st: &AppState,
     tenant: &antares_model::TenantId,
     id: &str,
@@ -428,7 +431,9 @@ fn attr_regs_or_loop(
     headers: &HeaderMap,
 ) -> Result<(Vec<crate::federation::FedReg>, Option<Response>), NgsiError> {
     Ok(
-        match attr_fed_plan_iris(st, tenant, id, &[attr_iri.to_owned()], ctx, params, headers)? {
+        match attr_fed_plan_iris(st, tenant, id, &[attr_iri.to_owned()], ctx, params, headers)
+            .await?
+        {
             crate::federation::WritePlan::Answered(r) => (Vec::new(), Some(*r)),
             crate::federation::WritePlan::Forward(regs) => (regs, None),
         },
@@ -798,7 +803,7 @@ async fn partial_update_inner(
         .into());
     }
     let (regs, loop_answer) =
-        attr_regs_or_loop(st, &tenant, id, &attr_iri, &parsed.ctx, params, headers)?;
+        attr_regs_or_loop(st, &tenant, id, &attr_iri, &parsed.ctx, params, headers).await?;
     if let Some(r) = loop_answer {
         return Ok(r);
     }
@@ -813,57 +818,60 @@ async fn partial_update_inner(
     let local_resp: Option<ApiResult<Response>> = if local_covered {
         None
     } else {
-        let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
-            // 5.6.4.4: the ?type selector narrows the target entity
-            if !matches_type_param(doc, params, &parsed.ctx) {
-                return Err(NgsiError::ResourceNotFound(format!(
-                    "entity {id} does not match the type selector"
-                )));
-            }
-            let target = antares_store::stored_object(doc)?;
-            if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
-                let pos = existing.iter().position(|ci| {
-                    ci.get("datasetId").and_then(Value::as_str) == want_ds.as_deref()
-                });
-                if let Some(p) = pos {
-                    found = true;
-                    if is_deletion {
-                        existing.remove(p);
-                    } else {
-                        // 5.6.4.4: the fragment may not change the Attribute type
-                        if let (Some(ft), Some(et)) = (
-                            frag_inst.get("type").and_then(Value::as_str),
-                            existing[p].get("type").and_then(Value::as_str),
-                        ) {
-                            if ft != et {
-                                return Err(NgsiError::BadRequestData(format!(
-                                    "attribute type mismatch: {ft} != {et} (5.6.4)"
-                                )));
+        let res = st
+            .store
+            .mutate(&tenant, Kind::Entity, id, |doc| {
+                // 5.6.4.4: the ?type selector narrows the target entity
+                if !matches_type_param(doc, params, &parsed.ctx) {
+                    return Err(NgsiError::ResourceNotFound(format!(
+                        "entity {id} does not match the type selector"
+                    )));
+                }
+                let target = antares_store::stored_object(doc)?;
+                if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
+                    let pos = existing.iter().position(|ci| {
+                        ci.get("datasetId").and_then(Value::as_str) == want_ds.as_deref()
+                    });
+                    if let Some(p) = pos {
+                        found = true;
+                        if is_deletion {
+                            existing.remove(p);
+                        } else {
+                            // 5.6.4.4: the fragment may not change the Attribute type
+                            if let (Some(ft), Some(et)) = (
+                                frag_inst.get("type").and_then(Value::as_str),
+                                existing[p].get("type").and_then(Value::as_str),
+                            ) {
+                                if ft != et {
+                                    return Err(NgsiError::BadRequestData(format!(
+                                        "attribute type mismatch: {ft} != {et} (5.6.4)"
+                                    )));
+                                }
                             }
+                            let t = antares_store::stored_object(&mut existing[p])?;
+                            for (k, v) in antares_jsonld::expanded_object(&frag_inst)? {
+                                if matches!(k.as_str(), "createdAt" | "modifiedAt") {
+                                    continue;
+                                }
+                                if v.is_null() || antares_jsonld::is_ngsi_null(v) {
+                                    t.remove(k);
+                                } else {
+                                    t.insert(k.clone(), v.clone());
+                                }
+                            }
+                            t.insert("modifiedAt".into(), Value::String(ts.clone()));
                         }
-                        let t = antares_store::stored_object(&mut existing[p])?;
-                        for (k, v) in antares_jsonld::expanded_object(&frag_inst)? {
-                            if matches!(k.as_str(), "createdAt" | "modifiedAt") {
-                                continue;
-                            }
-                            if v.is_null() || antares_jsonld::is_ngsi_null(v) {
-                                t.remove(k);
-                            } else {
-                                t.insert(k.clone(), v.clone());
-                            }
-                        }
-                        t.insert("modifiedAt".into(), Value::String(ts.clone()));
+                    }
+                    if existing.is_empty() {
+                        target.remove(&attr_iri);
                     }
                 }
-                if existing.is_empty() {
-                    target.remove(&attr_iri);
+                if found {
+                    target.insert("modifiedAt".into(), Value::String(ts.clone()));
                 }
-            }
-            if found {
-                target.insert("modifiedAt".into(), Value::String(ts.clone()));
-            }
-            Ok::<(), NgsiError>(())
-        })?;
+                Ok::<(), NgsiError>(())
+            })
+            .await?;
         Some(single_attr_local(res, found, id, attr, &tenant))
     };
     if regs.is_empty() {
@@ -960,7 +968,7 @@ pub async fn replace_attr(
             .and_then(Value::as_str)
             .map(String::from);
         let (regs, loop_answer) =
-            attr_regs_or_loop(&st, &tenant, &id, &attr_iri, &parsed.ctx, &params, &headers)?;
+            attr_regs_or_loop(&st, &tenant, &id, &attr_iri, &parsed.ctx, &params, &headers).await?;
         if let Some(r) = loop_answer {
             return Ok(r);
         }
@@ -970,39 +978,43 @@ pub async fn replace_attr(
         let local_resp: Option<ApiResult<Response>> = if local_covered {
             None
         } else {
-            let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
-                // 5.6.19.4: the ?type selector narrows the target entity
-                if !matches_type_param(doc, &params, &parsed.ctx) {
-                    return Err(NgsiError::ResourceNotFound(format!(
-                        "entity {id} does not match the type selector"
-                    )));
-                }
-                let target = antares_store::stored_object(doc)?;
-                if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
-                    // 5.6.19: only the instance with the matching datasetId is
-                    // replaced; its createdAt survives (055_01/055_02)
-                    if let Some(p) = existing.iter().position(|ci| {
-                        ci.get("datasetId").and_then(Value::as_str) == want_ds.as_deref()
-                    }) {
-                        found = true;
-                        let created = existing[p].get("createdAt").cloned();
-                        let mut ni = new_inst.clone();
-                        if let Some(o) = ni.as_object_mut() {
-                            if let Some(c) = created {
-                                o.insert("createdAt".into(), c);
-                            } else {
-                                o.insert("createdAt".into(), Value::String(ts.clone()));
-                            }
-                            o.insert("modifiedAt".into(), Value::String(ts.clone()));
-                        }
-                        existing[p] = ni;
+            let res = st
+                .store
+                .mutate(&tenant, Kind::Entity, &id, |doc| {
+                    // 5.6.19.4: the ?type selector narrows the target entity
+                    if !matches_type_param(doc, &params, &parsed.ctx) {
+                        return Err(NgsiError::ResourceNotFound(format!(
+                            "entity {id} does not match the type selector"
+                        )));
                     }
-                }
-                if found {
-                    target.insert("modifiedAt".into(), Value::String(ts.clone()));
-                }
-                Ok::<(), NgsiError>(())
-            })?;
+                    let target = antares_store::stored_object(doc)?;
+                    if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut)
+                    {
+                        // 5.6.19: only the instance with the matching datasetId is
+                        // replaced; its createdAt survives (055_01/055_02)
+                        if let Some(p) = existing.iter().position(|ci| {
+                            ci.get("datasetId").and_then(Value::as_str) == want_ds.as_deref()
+                        }) {
+                            found = true;
+                            let created = existing[p].get("createdAt").cloned();
+                            let mut ni = new_inst.clone();
+                            if let Some(o) = ni.as_object_mut() {
+                                if let Some(c) = created {
+                                    o.insert("createdAt".into(), c);
+                                } else {
+                                    o.insert("createdAt".into(), Value::String(ts.clone()));
+                                }
+                                o.insert("modifiedAt".into(), Value::String(ts.clone()));
+                            }
+                            existing[p] = ni;
+                        }
+                    }
+                    if found {
+                        target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                    }
+                    Ok::<(), NgsiError>(())
+                })
+                .await?;
             Some(single_attr_local(res, found, &id, &attr, &tenant))
         };
         if regs.is_empty() {
@@ -1082,7 +1094,8 @@ async fn delete_attr_inner(
     };
     let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
     let want_ds = params.get("datasetId").cloned();
-    let (regs, loop_answer) = attr_regs_or_loop(st, &tenant, id, &attr_iri, &ctx, params, headers)?;
+    let (regs, loop_answer) =
+        attr_regs_or_loop(st, &tenant, id, &attr_iri, &ctx, params, headers).await?;
     if let Some(r) = loop_answer {
         return Ok(r);
     }
@@ -1092,44 +1105,47 @@ async fn delete_attr_inner(
     let local_resp: Option<ApiResult<Response>> = if local_covered {
         None
     } else {
-        let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
-            // 5.6.5.4: the ?type selector narrows the target entity
-            if !matches_type_param(doc, params, &ctx) {
-                return Err(NgsiError::ResourceNotFound(format!(
-                    "entity {id} does not match the type selector"
-                )));
-            }
-            if attr_iri == "scope" {
+        let res = st
+            .store
+            .mutate(&tenant, Kind::Entity, id, |doc| {
+                // 5.6.5.4: the ?type selector narrows the target entity
+                if !matches_type_param(doc, params, &ctx) {
+                    return Err(NgsiError::ResourceNotFound(format!(
+                        "entity {id} does not match the type selector"
+                    )));
+                }
+                if attr_iri == "scope" {
+                    let target = antares_store::stored_object(doc)?;
+                    found = target.remove("scope").is_some();
+                    if found {
+                        target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                    }
+                    return Ok(());
+                }
                 let target = antares_store::stored_object(doc)?;
-                found = target.remove("scope").is_some();
+                if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
+                    if delete_all {
+                        found = !existing.is_empty();
+                        existing.clear();
+                    } else {
+                        let pos = existing.iter().position(|ci| {
+                            ci.get("datasetId").and_then(Value::as_str) == want_ds.as_deref()
+                        });
+                        if let Some(p) = pos {
+                            existing.remove(p);
+                            found = true;
+                        }
+                    }
+                    if existing.is_empty() {
+                        target.remove(&attr_iri);
+                    }
+                }
                 if found {
                     target.insert("modifiedAt".into(), Value::String(ts.clone()));
                 }
-                return Ok(());
-            }
-            let target = antares_store::stored_object(doc)?;
-            if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
-                if delete_all {
-                    found = !existing.is_empty();
-                    existing.clear();
-                } else {
-                    let pos = existing.iter().position(|ci| {
-                        ci.get("datasetId").and_then(Value::as_str) == want_ds.as_deref()
-                    });
-                    if let Some(p) = pos {
-                        existing.remove(p);
-                        found = true;
-                    }
-                }
-                if existing.is_empty() {
-                    target.remove(&attr_iri);
-                }
-            }
-            if found {
-                target.insert("modifiedAt".into(), Value::String(ts.clone()));
-            }
-            Ok::<(), NgsiError>(())
-        })?;
+                Ok::<(), NgsiError>(())
+            })
+            .await?;
         // The temporal representation records the deletion (4.8 deletedAt) — and
         // the entity may exist ONLY temporally (created via 5.6.11), so a
         // missing current-state entity still records. A REFUSED delete (the
@@ -1143,7 +1159,8 @@ async fn delete_attr_inner(
                 &attr_iri,
                 want_ds.as_deref(),
                 &ts,
-            );
+            )
+            .await;
         // An entity that exists only temporally still answers 204: the
         // deletion was recorded even though there was no current state.
         Some(if res.is_none() && temporal_had {
@@ -1510,6 +1527,7 @@ mod attr_name_and_via_paths {
         let doc = st
             .store
             .get(&tenant, antares_store::Kind::Temporal, ENTITY)
+            .await
             .expect("store read")
             .expect("temporal doc");
         assert!(

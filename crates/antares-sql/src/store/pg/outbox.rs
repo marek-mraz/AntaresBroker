@@ -14,8 +14,6 @@ use serde_json::Value;
 use sqlx::postgres::{PgConnection, PgPool};
 use sqlx::Row;
 
-use super::entity::wait;
-
 /// Every statement this module issues. Values are bound as `$n` — the strings
 /// are compile-time constants, so no request data ever reaches the parser.
 const ENQUEUE_SQL: &str = "INSERT INTO outbox (tenant_id, event) VALUES ($1, $2) RETURNING seq";
@@ -62,20 +60,18 @@ pub async fn enqueue_many(
 /// `antares.service` escape (0001_init.sql) so it stays correct under a
 /// non-superuser role, where the plain tenant policy would silently return
 /// zero rows forever (the very failure this table exists to prevent).
-pub fn peek(pool: &PgPool, limit: i64) -> Result<Vec<(i64, String, Value)>, sqlx::Error> {
-    wait(async {
-        let mut tx = pool.begin().await?;
-        crate::store::pg::set_service(&mut tx).await?;
-        let rows = sqlx::query(PEEK_SQL)
-            .bind(limit)
-            .fetch_all(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| (r.get(0), r.get(1), r.get(2)))
-            .collect())
-    })
+pub async fn peek(pool: &PgPool, limit: i64) -> Result<Vec<(i64, String, Value)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::store::pg::set_service(&mut tx).await?;
+    let rows = sqlx::query(PEEK_SQL)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect())
 }
 
 /// Ack EXACTLY the published seqs: bigserial
@@ -83,21 +79,19 @@ pub fn peek(pool: &PgPool, limit: i64) -> Result<Vec<(i64, String, Value)>, sqlx
 /// `seq <= max` deletes a lower-seq row that commits between peek and ack —
 /// an event lost unpublished. Deleting by exact seq can never touch a row
 /// the drain did not publish.
-pub fn ack(pool: &PgPool, seqs: &[i64]) -> Result<u64, sqlx::Error> {
+pub async fn ack(pool: &PgPool, seqs: &[i64]) -> Result<u64, sqlx::Error> {
     if seqs.is_empty() {
         return Ok(0);
     }
-    wait(async {
-        let mut tx = pool.begin().await?;
-        crate::store::pg::set_service(&mut tx).await?;
-        let n = sqlx::query(ACK_SQL)
-            .bind(seqs)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-        tx.commit().await?;
-        Ok(n)
-    })
+    let mut tx = pool.begin().await?;
+    crate::store::pg::set_service(&mut tx).await?;
+    let n = sqlx::query(ACK_SQL)
+        .bind(seqs)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -107,8 +101,8 @@ mod tests {
 
     /// A pool that has never connected: any statement issued through it fails
     /// immediately, so a test that succeeds proves no statement was issued.
-    /// Constructing one spawns sqlx's idle reaper, so it needs a runtime in
-    /// scope — the caller enters one.
+    /// Constructing one spawns sqlx's idle reaper, so it is built inside the
+    /// test's own runtime.
     fn unreachable_pool() -> PgPool {
         PgPoolOptions::new()
             .connect_lazy("postgres://nobody@127.0.0.1:1/antares_no_such_db")
@@ -117,14 +111,9 @@ mod tests {
 
     /// Acking an empty page must short-circuit: without the guard the drain
     /// opens a transaction (and `seq = ANY('{}')` scans) on every idle tick.
-    #[test]
-    fn ack_of_nothing_issues_no_statement() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let _guard = rt.enter();
-        assert_eq!(ack(&unreachable_pool(), &[]).expect("noop ack"), 0);
+    #[tokio::test]
+    async fn ack_of_nothing_issues_no_statement() {
+        assert_eq!(ack(&unreachable_pool(), &[]).await.expect("noop ack"), 0);
     }
 
     /// The ack deletes the published seqs one by one. A range form

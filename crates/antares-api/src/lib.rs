@@ -32,7 +32,7 @@ macro_rules! gate {
                 Some(engine) => {
                     $crate::policy::gate(
                         engine.as_ref(),
-                        &$crate::snapshots::asking_tenant(&$st, $tenant),
+                        &$crate::snapshots::asking_tenant(&$st, $tenant).await,
                         $headers,
                         &$crate::policy::Operation {
                             $($field: $value,)*
@@ -253,8 +253,8 @@ impl ApiSurface for Admin {
 /// distributed subscription (5.8.1.4) — a notification arriving on the
 /// internal endpoint is handed to `distsub` from here, so the delivery path
 /// never names it. Every root that serves requests calls this once.
-pub fn wire(state: &mut AppState) {
-    notify::wire_matcher(state);
+pub async fn wire(state: &mut AppState) {
+    notify::wire_matcher(state).await;
     state.csource_notification = Some(std::sync::Arc::new(|st, tenant, own_id, reason, regs| {
         Box::pin(distsub::on_csource_notification(
             st, tenant, own_id, reason, regs,
@@ -266,9 +266,9 @@ pub fn wire(state: &mut AppState) {
 /// exercise a route which notifies. The router does not wire it: a caller
 /// that only reads never pays for the mirror seed.
 #[cfg(any(test, feature = "test-kit"))]
-pub fn wired_state(host_alias: &str) -> AppState {
+pub async fn wired_state(host_alias: &str) -> AppState {
     let mut st = AppState::new(host_alias.to_owned());
-    wire(&mut st);
+    wire(&mut st).await;
     st
 }
 
@@ -622,7 +622,7 @@ async fn tenant_exists_layer(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| antares_model::TenantId::new(s).ok())
         {
-            match st.store.tenant_exists(&t) {
+            match st.store.tenant_exists(&t).await {
                 Ok(false) => {
                     let mut resp = crate::negotiate::ApiError::from(NgsiError::NonexistentTenant(
                         format!("tenant {} does not exist", t.as_str()),
@@ -923,7 +923,11 @@ async fn dead_letters_list(
             }
         },
     };
-    let mut letters = match st.store.list(&tenant, antares_store::Kind::DeadLetter) {
+    let mut letters = match st
+        .store
+        .list(&tenant, antares_store::Kind::DeadLetter)
+        .await
+    {
         Ok(l) => l,
         Err(e) => return ApiError::from(e).into_response(),
     };
@@ -955,7 +959,7 @@ async fn dead_letter_replay(
         Ok(t) => t,
         Err(e) => return ApiError::from(e).into_response(),
     };
-    let letter = match st.store.get(&tenant, Kind::DeadLetter, &id) {
+    let letter = match st.store.get(&tenant, Kind::DeadLetter, &id).await {
         Ok(Some(l)) => l,
         Ok(None) => {
             return ApiError::from(NgsiError::ResourceNotFound(format!("dead letter {id}")))
@@ -964,27 +968,30 @@ async fn dead_letter_replay(
         Err(e) => return ApiError::from(e).into_response(),
     };
     match notify::replay_dead_letter(&st, &letter).await {
-        Ok(()) => match st.store.delete(&tenant, Kind::DeadLetter, &id) {
+        Ok(()) => match st.store.delete(&tenant, Kind::DeadLetter, &id).await {
             Ok(_) => StatusCode::NO_CONTENT.into_response(),
             Err(e) => ApiError::from(e).into_response(),
         },
         Err(why) => {
             let ts = state::now_iso();
             let w = why.clone();
-            let _ = st.store.mutate(&tenant, Kind::DeadLetter, &id, move |d| {
-                let Some(letter) = d.as_object_mut() else {
-                    return Ok::<(), NgsiError>(());
-                };
-                let n = letter
-                    .get("attempts")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0)
-                    + 1;
-                letter.insert("attempts".into(), n.into());
-                letter.insert("lastError".into(), serde_json::Value::String(w));
-                letter.insert("lastAt".into(), serde_json::Value::String(ts));
-                Ok::<(), NgsiError>(())
-            });
+            let _ = st
+                .store
+                .mutate(&tenant, Kind::DeadLetter, &id, move |d| {
+                    let Some(letter) = d.as_object_mut() else {
+                        return Ok::<(), NgsiError>(());
+                    };
+                    let n = letter
+                        .get("attempts")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                        + 1;
+                    letter.insert("attempts".into(), n.into());
+                    letter.insert("lastError".into(), serde_json::Value::String(w));
+                    letter.insert("lastAt".into(), serde_json::Value::String(ts));
+                    Ok::<(), NgsiError>(())
+                })
+                .await;
             (
                 StatusCode::BAD_GATEWAY,
                 axum::Json(serde_json::json!({"detail": why, "id": id})),
@@ -1009,6 +1016,7 @@ async fn dead_letter_delete(
     match st
         .store
         .delete(&tenant, antares_store::Kind::DeadLetter, &id)
+        .await
     {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => {
@@ -1024,7 +1032,7 @@ async fn dead_letter_delete(
 /// reads its detail from `GET /q/tenants/{tenant}`. Admin surface, never
 /// under the API root.
 async fn tenants_list(axum::extract::State(st): axum::extract::State<AppState>) -> Response {
-    match st.store.tenant_ids() {
+    match st.store.tenant_ids().await {
         Ok(ids) => (StatusCode::OK, axum::Json(ids)).into_response(),
         Err(e) => crate::negotiate::ApiError::from(e).into_response(),
     }
@@ -1052,7 +1060,7 @@ async fn tenant_get(
     let Ok(tenant) = TenantId::new(&raw) else {
         return bad();
     };
-    let stats = match st.store.tenant_stats_one(&tenant) {
+    let stats = match st.store.tenant_stats_one(&tenant).await {
         Ok(Some(s)) => s,
         Ok(None) => {
             return ApiError::from(NgsiError::ResourceNotFound(format!("tenant {raw}")))
@@ -1060,7 +1068,7 @@ async fn tenant_get(
         }
         Err(e) => return ApiError::from(e).into_response(),
     };
-    let instances = st.temporal.attr_instance_count(&tenant).unwrap_or(0);
+    let instances = st.temporal.attr_instance_count(&tenant).await.unwrap_or(0);
     let mut row = serde_json::json!({
         "tenant": stats.tenant,
         "counts": {
@@ -1103,7 +1111,7 @@ async fn tenant_purge(
     let Ok(tenant) = TenantId::new(&raw) else {
         return bad();
     };
-    match st.store.tenant_exists(&tenant) {
+    match st.store.tenant_exists(&tenant).await {
         Ok(true) => {}
         Ok(false) => {
             return ApiError::from(NgsiError::ResourceNotFound(format!("tenant {raw}")))
@@ -1116,17 +1124,18 @@ async fn tenant_purge(
     // that ceiling means the Tenants most worth reclaiming are the ones that
     // can never be reclaimed — while their rows stay readable to anyone
     // sending the Tenant header.
-    let ids = |kind: Kind| -> Result<Vec<String>, NgsiError> {
+    async fn ids(st: &AppState, tenant: &TenantId, kind: Kind) -> Result<Vec<String>, NgsiError> {
         let mut out = Vec::new();
-        crate::csource::walk_docs(&st, &tenant, kind, |doc| {
+        crate::csource::walk_docs(st, tenant, kind, |doc| {
             if let Some(id) = doc.get("id").and_then(|v| v.as_str()) {
                 out.push(id.to_owned());
             }
             Ok(())
-        })?;
+        })
+        .await?;
         Ok(out)
-    };
-    let run = || -> Result<(), NgsiError> {
+    }
+    let run = async {
         // 5.8.1.4 stores one mapping document per distributed Subscription;
         // its `remotes` names the subscription copies that live AT context
         // sources. Those are deleted at their source by deleting the
@@ -1146,29 +1155,35 @@ async fn tenant_purge(
                 remote_copies = true;
             }
             Ok(())
-        })?;
+        })
+        .await?;
         if remote_copies {
             return Err(NgsiError::Conflict(
                 "tenant holds active distributed subscriptions".into(),
             ));
         }
-        let subs = ids(Kind::Subscription)?;
-        let csubs = ids(Kind::CSourceSubscription)?;
-        let regs = ids(Kind::Registration)?;
+        let subs = ids(&st, &tenant, Kind::Subscription).await?;
+        let csubs = ids(&st, &tenant, Kind::CSourceSubscription).await?;
+        let regs = ids(&st, &tenant, Kind::Registration).await?;
         // 5.2.41: a Snapshot's isolated copy does not live under the Tenant.
         // It lives under the synthetic tenant its internal `__tenant` member
         // names, and the Snapshot document is the only pointer to it — so the
         // two purges below would delete that pointer and leave the copy
         // behind, reachable by nothing and freeable by nothing. Each snapshot
         // goes through the same removal a DELETE of it does, first.
+        let mut snaps = Vec::new();
         crate::csource::walk_docs(&st, &tenant, Kind::Snapshot, |meta| {
-            if let Some(id) = meta.get("id").and_then(|v| v.as_str()) {
-                crate::snapshots::snap_remove(&st, &tenant, id, &meta);
-            }
+            snaps.push(meta);
             Ok(())
-        })?;
-        st.temporal.purge_tenant(&tenant)?;
-        st.store.purge_tenant(&tenant)?;
+        })
+        .await?;
+        for meta in &snaps {
+            if let Some(id) = meta.get("id").and_then(|v| v.as_str()) {
+                crate::snapshots::snap_remove(&st, &tenant, id, meta).await;
+            }
+        }
+        st.temporal.purge_tenant(&tenant).await?;
+        st.store.purge_tenant(&tenant).await?;
         if let Some(sync) = &st.sub_sync {
             // Kept apart: the mirror entry is keyed per kind, so one id
             // naming both a Subscription and a Context Source Registration
@@ -1185,9 +1200,9 @@ async fn tenant_purge(
                 sync(&tenant, id, None);
             }
         }
-        Ok(())
+        Ok::<(), NgsiError>(())
     };
-    if let Err(e) = run() {
+    if let Err(e) = run.await {
         return ApiError::from(e).into_response();
     }
     // 5.13.1: a Hosted @context belongs to the Tenant that stored it, and
@@ -1208,7 +1223,7 @@ async fn ready(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
     let draining = state.draining.load(std::sync::atomic::Ordering::Relaxed);
-    let store_ok = state.store.ping().is_ok();
+    let store_ok = state.store.ping().await.is_ok();
     let bus = state.bus_stats.as_ref().map(|b| b());
     let bus_ok = bus
         .as_ref()
@@ -2996,12 +3011,13 @@ mod tests {
             "https://uri.etsi.org/ngsi-ld/errors/BadRequestData"
         );
         assert!(
-            !state.store.tenant_exists(&idx).expect("store"),
+            !state.store.tenant_exists(&idx).await.expect("store"),
             "refused request must not create the internal tenant"
         );
         assert!(state
             .store
             .list(&idx, antares_store::Kind::Entity)
+            .await
             .expect("store")
             .is_empty());
 
@@ -6032,7 +6048,7 @@ mod clause_6_3_11 {
     #[tokio::test]
     async fn clause_6_3_11_expires_at_gated_by_sysattrs() {
         let mut st = AppState::new("antares-test".into());
-        crate::wire(&mut st);
+        crate::wire(&mut st).await;
         let app = router(st);
         let entity = serde_json::json!({
             "id": "urn:ngsi-ld:Building:exp6311", "type": "Building",
@@ -6110,8 +6126,8 @@ mod clause_6_3_11 {
                 )
                 .await
                 .expect("resp"),
-        )
-        .await;
+        ).await
+        ;
         assert!(
             inst_of(&t_plain).get("expiresAt").is_none(),
             "temporal instance expiresAt must be sysAttrs-gated (6.3.11): {t_plain}"
@@ -6127,8 +6143,8 @@ mod clause_6_3_11 {
                 )
                 .await
                 .expect("resp"),
-        )
-        .await;
+        ).await
+        ;
         assert_eq!(inst_of(&t_sys)["expiresAt"], "2100-01-01T00:00:00Z");
     }
 }

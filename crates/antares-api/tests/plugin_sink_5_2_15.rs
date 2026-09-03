@@ -76,9 +76,9 @@ async fn send(st: &AppState, path: &str, doc: Value) -> (StatusCode, String) {
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn state(tx: mpsc::Sender<(String, Outbound)>) -> AppState {
+async fn state(tx: mpsc::Sender<(String, Outbound)>) -> AppState {
     let mut st = AppState::new("plugin-sink".into()).with_sink(Box::new(MemorySink(tx)));
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     st
 }
 
@@ -92,7 +92,7 @@ fn subscription(uri: &str) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_sink_registered_outside_the_api_receives_the_notification() {
     let (tx, mut rx) = mpsc::channel(4);
-    let st = state(tx);
+    let st = state(tx).await;
     let (status, body) = send(&st, "subscriptions", subscription("memory://box1")).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, body) = send(
@@ -127,7 +127,7 @@ async fn a_sink_registered_outside_the_api_receives_the_notification() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_endpoint_scheme_with_no_sink_is_bad_request_at_creation() {
     let (tx, _rx) = mpsc::channel(1);
-    let st = state(tx);
+    let st = state(tx).await;
     let (status, body) = send(&st, "subscriptions", subscription("carrier-pigeon://roof")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let problem: Value = serde_json::from_str(&body).expect("ProblemDetails");
@@ -146,7 +146,7 @@ async fn an_endpoint_scheme_with_no_sink_is_bad_request_at_creation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sink_rejects_its_own_malformed_endpoint_at_creation() {
     let (tx, _rx) = mpsc::channel(1);
-    let st = state(tx);
+    let st = state(tx).await;
     let (status, body) = send(&st, "subscriptions", subscription("memory://")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
@@ -160,7 +160,7 @@ async fn the_sink_rejects_its_own_malformed_endpoint_at_creation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn delivery_never_falls_through_to_http() {
     let (tx, mut rx) = mpsc::channel(4);
-    let st = state(tx);
+    let st = state(tx).await;
     // A memory endpoint that resolves to no routable host: were the HTTP
     // binding to claim it, the delivery would fail rather than arrive.
     let (status, body) = send(&st, "subscriptions", subscription("memory://127.0.0.1")).await;

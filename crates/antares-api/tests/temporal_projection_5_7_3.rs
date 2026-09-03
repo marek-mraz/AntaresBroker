@@ -46,7 +46,7 @@ async fn get(st: &AppState, uri: &str) -> (StatusCode, Value) {
 
 async fn seeded() -> AppState {
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let body = json!({"id": ID, "type": "Vehicle",
         "speed": {"type": "Property", "value": 10}})
     .to_string();
@@ -153,7 +153,7 @@ const EXPIRING: &str = "urn:ngsi-ld:Vehicle:tpx";
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_6_3_11_sys_attrs_gates_the_root_expires_at_of_a_temporal_representation() {
     let mut st = AppState::new("me".into());
-    antares_api::wire(&mut st);
+    antares_api::wire(&mut st).await;
     let body = json!({
         "id": EXPIRING, "type": "Vehicle",
         "expiresAt": "2099-01-01T00:00:00Z",

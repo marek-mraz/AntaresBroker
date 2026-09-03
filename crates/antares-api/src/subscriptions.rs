@@ -829,19 +829,21 @@ pub async fn create(
             if a.len() > 1 {
                 let local_id = uuid::Uuid::new_v4().to_string();
                 let url = format!("{}/{local_id}", crate::contexts::base_url(headers));
-                st.store.context_put(
-                    Some(&tenant),
-                    &local_id,
-                    serde_json::json!({
-                        "url": url,
-                        "localId": local_id,
-                        "kind": "ImplicitlyCreated",
-                        "createdAt": ts,
-                        // owned by the tenant whose subscription created it
-                        "owner": tenant.as_str(),
-                        "body": {"@context": parsed.ctx.source.clone()},
-                    }),
-                )?;
+                st.store
+                    .context_put(
+                        Some(&tenant),
+                        &local_id,
+                        serde_json::json!({
+                            "url": url,
+                            "localId": local_id,
+                            "kind": "ImplicitlyCreated",
+                            "createdAt": ts,
+                            // owned by the tenant whose subscription created it
+                            "owner": tenant.as_str(),
+                            "body": {"@context": parsed.ctx.source.clone()},
+                        }),
+                    )
+                    .await?;
                 st.loader
                     .put_local_for(&tenant, url.clone(), parsed.ctx.source.clone())
                     .await;
@@ -850,14 +852,14 @@ pub async fn create(
         }
     }
     let doc = Value::Object(norm);
-    if !st.store.create(&tenant, kind, &id, doc.clone())? {
+    if !st.store.create(&tenant, kind, &id, doc.clone()).await? {
         return Err(NgsiError::AlreadyExists(format!("subscription {id} already exists")).into());
     }
     st.sub_changed(&tenant, kind, &id, Some(&doc));
     if kind == Kind::Subscription {
         // 5.8.1.4: a distributed Subscription creates its internal Context
         // Source Registration Subscription (consumer half)
-        crate::distsub::on_subscription_created(st, &tenant, &doc);
+        crate::distsub::on_subscription_created(st, &tenant, &doc).await;
     }
     if kind == Kind::CSourceSubscription {
         // initial CSourceNotification with all matching registrations (5.11.2.4)
@@ -890,7 +892,8 @@ pub async fn retrieve(
     gate!(st, &tenant, headers, clause_of(kind, "5.8.3", "5.11.4"), ids: &[id]).await?;
     let doc = st
         .store
-        .get(&tenant, kind, id)?
+        .get(&tenant, kind, id)
+        .await?
         .ok_or_else(|| NgsiError::ResourceNotFound(format!("subscription {id} not found")))?;
     let sys = sys_attrs_asked(params);
     let payload = present_subscription(&doc, &ctx, sys, kind == Kind::CSourceSubscription);
@@ -920,7 +923,7 @@ pub async fn list(
     // here made a tenant at the document ceiling unable to list at all,
     // because that read is the one carrying the ceiling for client queries.
     let (offset, limit, _) = crate::paging::page_params(st, params)?;
-    let (page_docs, total) = st.store.list_slice(&tenant, kind, offset, limit)?;
+    let (page_docs, total) = st.store.list_slice(&tenant, kind, offset, limit).await?;
     let (page, count_hdr, links) = crate::paging::paginate_pre_accept(
         st,
         params,
@@ -970,11 +973,14 @@ pub async fn update(
     check_endpoint(st, &norm)?;
     check_jsonld_context(st, &tenant, &norm).await?;
     let ts = now_iso();
-    let res = st.store.mutate(&tenant, kind, id, |doc| {
-        let target = antares_store::stored_object(doc)?;
-        crate::apply_doc_fragment(target, &norm, &ts);
-        Ok::<(), NgsiError>(())
-    })?;
+    let res = st
+        .store
+        .mutate(&tenant, kind, id, |doc| {
+            let target = antares_store::stored_object(doc)?;
+            crate::apply_doc_fragment(target, &norm, &ts);
+            Ok::<(), NgsiError>(())
+        })
+        .await?;
     match res {
         None => Err(NgsiError::ResourceNotFound(format!("subscription {id} not found")).into()),
         Some(Err(e)) => Err(e.into()),
@@ -987,13 +993,13 @@ pub async fn update(
                 });
             }
             if st.sub_sync.is_some() {
-                let doc = st.store.get(&tenant, kind, id)?;
+                let doc = st.store.get(&tenant, kind, id).await?;
                 st.sub_changed(&tenant, kind, id, doc.as_ref());
             }
             if kind == Kind::Subscription {
                 // 5.8.2.4: the CSR subscription and the mapped remote
                 // subscriptions follow the update (5.11.3)
-                crate::distsub::on_subscription_updated(st, &tenant, id);
+                crate::distsub::on_subscription_updated(st, &tenant, id).await;
             }
             Ok(no_content(&tenant))
         }
@@ -1014,12 +1020,12 @@ pub async fn delete(
         .map_err(|_| NgsiError::BadRequestData(format!("invalid subscription id {id:?}")))?;
     check_params(params, &["local"])?;
     gate!(st, &tenant, headers, clause_of(kind, "5.8.5", "5.11.6"), ids: &[id]).await?;
-    if st.store.delete(&tenant, kind, id)? {
+    if st.store.delete(&tenant, kind, id).await? {
         st.sub_changed(&tenant, kind, id, None);
         if kind == Kind::Subscription {
             // 5.8.5.4: forward the delete to every mapped Context Source
             // and drop the internal CSR subscription (5.11.6)
-            crate::distsub::on_subscription_deleted(st, &tenant, id);
+            crate::distsub::on_subscription_deleted(st, &tenant, id).await;
         }
         Ok(no_content(&tenant))
     } else {
