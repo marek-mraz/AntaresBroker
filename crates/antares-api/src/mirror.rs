@@ -243,7 +243,14 @@ pub(crate) const CSUB_SWEEP_BACKSTOP_MS: i64 = 60_000;
 
 #[derive(Default)]
 struct TenantIndex {
-    docs: std::collections::HashMap<String, Value>,
+    // Shared, not owned: `candidates` runs once per change and hands back
+    // every subscription that could fire. Cloning the documents there deep-
+    // copied each one — every string and every nested map — on the hot path,
+    // so the cost of a change grew with the size of the subscriptions it was
+    // evaluated against rather than with the work it caused. An `Arc` clone
+    // is a refcount bump, and the registration mirror above already holds
+    // its documents this way.
+    docs: std::collections::HashMap<String, std::sync::Arc<Value>>,
     by_type: std::collections::HashMap<String, std::collections::HashSet<String>>,
     by_attr: std::collections::HashMap<String, std::collections::HashSet<String>>,
     broad: std::collections::HashSet<String>,
@@ -348,7 +355,7 @@ impl SubMirror {
                     t.broad.insert(id.to_owned());
                 }
             }
-            t.docs.insert(id.to_owned(), d);
+            t.docs.insert(id.to_owned(), std::sync::Arc::new(d));
         }
         if map.get(tenant).is_some_and(|t| t.docs.is_empty()) {
             map.remove(tenant);
@@ -368,7 +375,12 @@ impl SubMirror {
     /// touching these entity types and these changed attributes. Union of
     /// the type hits, the attr hits and the broad bucket — a superset of
     /// the firing set, never a subset.
-    pub fn candidates(&self, tenant: &str, types: &[&str], changed_attrs: &[&str]) -> Vec<Value> {
+    pub fn candidates(
+        &self,
+        tenant: &str,
+        types: &[&str],
+        changed_attrs: &[&str],
+    ) -> Vec<std::sync::Arc<Value>> {
         let map = self
             .map
             .read()
@@ -393,7 +405,7 @@ impl SubMirror {
     }
 
     #[cfg(any(test, feature = "test-kit"))]
-    pub fn docs(&self, tenant: &str) -> Vec<Value> {
+    pub fn docs(&self, tenant: &str) -> Vec<std::sync::Arc<Value>> {
         self.map
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -404,9 +416,9 @@ impl SubMirror {
 
     /// The interval sweep's whole input: the tenant's periodic (5.2.12
     /// `timeInterval`) subscriptions. The walk is over every subscription the
-    /// tenant holds, but only the periodic ones are cloned — the sweep clocks
-    /// keep a tick with nothing due from reaching this at all.
-    pub(crate) fn periodic_docs(&self, tenant: &str) -> Vec<Value> {
+    /// tenant holds, but only the periodic ones are carried out of it — the
+    /// sweep clocks keep a tick with nothing due from reaching this at all.
+    pub(crate) fn periodic_docs(&self, tenant: &str) -> Vec<std::sync::Arc<Value>> {
         self.map
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

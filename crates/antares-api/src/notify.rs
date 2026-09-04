@@ -78,14 +78,14 @@ async fn subs_for(
     tenant: &TenantId,
     types: &[&str],
     changed: &[&str],
-) -> Vec<Value> {
+) -> Vec<Arc<Value>> {
     match &st.sub_mirror {
         Some(m) => m.candidates(tenant.as_str(), types, changed),
         // The scan is the fallback, so its own failure may not be read as
         // "this tenant has no subscriptions" either: that is the silence
         // the mirror seed refuses to install.
         None => match st.store.list(tenant, Kind::Subscription).await {
-            Ok(subs) => subs,
+            Ok(subs) => subs.into_iter().map(Arc::new).collect(),
             Err(e) => {
                 tracing::error!(
                     "subscription scan failed for tenant {}: {e}; no candidate matched this change",
@@ -587,10 +587,9 @@ pub(crate) use antares_matcher::{
 /// The @context governing a subscription's notifications (5.8.6): the
 /// jsonldContext member if set, else the @context of the creating request.
 pub(crate) async fn sub_context(st: &AppState, tenant: &TenantId, sub: &Value) -> Arc<Context> {
-    let source = sub
-        .get("jsonldContext")
-        .cloned()
-        .or_else(|| sub.get("__context").cloned());
+    // Borrowed: the resolver only reads it, and this is on the per-candidate
+    // path, where cloning an inline @context copied the whole document.
+    let source = sub.get("jsonldContext").or_else(|| sub.get("__context"));
     match source {
         // 5.5.10: the Subscription belongs to one Tenant, so the @context it
         // names resolves within that Tenant — a Hosted @context another Tenant
@@ -598,7 +597,7 @@ pub(crate) async fn sub_context(st: &AppState, tenant: &TenantId, sub: &Value) -
         // context rather than compacting this Notification against it.
         Some(v) if !v.is_null() => st
             .loader
-            .resolve_quiet_for(tenant, &v)
+            .resolve_quiet_for(tenant, v)
             .await
             .unwrap_or_else(|_| st.loader.core()),
         _ => st.loader.core(),
@@ -934,21 +933,19 @@ async fn build_data(
 /// equivalent to the combination `"attributeCreated"`, `"attributeUpdated"`
 /// and `"attributeDeleted"`" — so it is expanded here, at the single point
 /// the list is read, rather than at each comparison.
-fn triggers_of(sub: &Value) -> Vec<String> {
-    let mut triggers: Vec<String> = sub
+fn triggers_of(sub: &Value) -> Vec<&str> {
+    // Borrowed from the Subscription, not copied out of it: this runs once
+    // per candidate per change, and the default arm used to allocate a
+    // String for each of DEFAULT_TRIGGERS, which are already 'static.
+    let mut triggers: Vec<&str> = sub
         .get("notificationTrigger")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_else(|| DEFAULT_TRIGGERS.iter().map(|s| s.to_string()).collect());
-    if triggers.iter().any(|t| t == "entityUpdated") {
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_else(|| DEFAULT_TRIGGERS.to_vec());
+    if triggers.contains(&"entityUpdated") {
         for t in DEFAULT_TRIGGERS.iter().copied().chain(["attributeDeleted"]) {
-            if !triggers.iter().any(|s| s == t) {
-                triggers.push(t.to_owned());
+            if !triggers.contains(&t) {
+                triggers.push(t);
             }
         }
     }
@@ -964,7 +961,10 @@ const CHANGE_BATCH: usize = 256;
 /// One matched (subscription, entity) pair before delivery.
 struct Matched {
     tenant: TenantId,
-    sub: Value,
+    /// Shared with the mirror that holds it: a change is evaluated against
+    /// every candidate subscription, so owning a copy here made the cost of
+    /// a change scale with the size of those documents.
+    sub: Arc<Value>,
     ctx: Arc<Context>,
     data: Vec<Value>,
 }
@@ -1140,10 +1140,10 @@ async fn matches_for(
                 ChangeClass::Updated => "attributeUpdated",
                 ChangeClass::Deleted => "attributeDeleted",
             };
-            triggers.iter().any(|s| s == t)
+            triggers.contains(&t)
         });
-        let entity_trigger_fired = triggers.iter().any(|s| s == entity_trigger)
-            && (watched.is_none() || !relevant.is_empty());
+        let entity_trigger_fired =
+            triggers.contains(&entity_trigger) && (watched.is_none() || !relevant.is_empty());
         if !attr_trigger_fired && !entity_trigger_fired {
             continue;
         }
@@ -1157,7 +1157,7 @@ async fn matches_for(
         if throttled(&sub) {
             continue;
         }
-        let deleted: Vec<String> = if triggers.iter().any(|t| t == "attributeDeleted") {
+        let deleted: Vec<String> = if triggers.contains(&"attributeDeleted") {
             relevant
                 .iter()
                 .filter(|(_, c)| *c == ChangeClass::Deleted)
@@ -1166,7 +1166,7 @@ async fn matches_for(
         } else {
             Vec::new()
         };
-        let entity_deleted_fired = after.is_none() && triggers.iter().any(|t| t == "entityDeleted");
+        let entity_deleted_fired = after.is_none() && triggers.contains(&"entityDeleted");
         let now = now_iso();
         let data = build_data(
             st,
@@ -1395,7 +1395,10 @@ pub async fn interval_tick(st: &AppState) {
             (None, _) => read_or_warn(
                 st.store.list(&tenant, Kind::Subscription).await,
                 "the periodic Subscriptions",
-            ),
+            )
+            .into_iter()
+            .map(Arc::new)
+            .collect(),
         };
         for sub in subs {
             let Some(interval) = sub.get("timeInterval").and_then(Value::as_f64) else {
@@ -3183,16 +3186,18 @@ mod clause_5_2_12_triggers {
     /// \"attributeCreated\", \"attributeUpdated\" and \"attributeDeleted\"."
     #[test]
     fn entity_updated_expands_to_its_equivalent_attribute_triggers() {
-        let has = |v: &[String], t: &str| v.iter().any(|s| s == t);
+        let has = |v: &[&str], t: &str| v.contains(&t);
 
-        let default = triggers_of(&json!({}));
+        let empty = json!({});
+        let default = triggers_of(&empty);
         assert_eq!(default, vec!["attributeCreated", "attributeUpdated"]);
         assert!(
             !has(&default, "attributeDeleted"),
             "the default combination is two triggers, not three"
         );
 
-        let expanded = triggers_of(&json!({"notificationTrigger": ["entityUpdated"]}));
+        let updated = json!({"notificationTrigger": ["entityUpdated"]});
+        let expanded = triggers_of(&updated);
         for t in ["attributeCreated", "attributeUpdated", "attributeDeleted"] {
             assert!(has(&expanded, t), "entityUpdated must imply {t}");
         }
@@ -3204,14 +3209,16 @@ mod clause_5_2_12_triggers {
         // Only entityUpdated carries the equivalence: the other two entity
         // triggers must NOT gain attribute triggers.
         for t in ["entityCreated", "entityDeleted"] {
-            let only = triggers_of(&json!({ "notificationTrigger": [t] }));
-            assert_eq!(only, vec![t.to_owned()], "{t} is not an equivalence");
+            let one = json!({ "notificationTrigger": [t] });
+            let only = triggers_of(&one);
+            assert_eq!(only, vec![t], "{t} is not an equivalence");
         }
 
         // Idempotent: an explicit list that already spells the combination
         // out gains nothing, and the equivalent forms agree.
-        let literal = triggers_of(&json!({"notificationTrigger":
-            ["entityUpdated", "attributeCreated", "attributeUpdated", "attributeDeleted"]}));
+        let spelled = json!({"notificationTrigger":
+            ["entityUpdated", "attributeCreated", "attributeUpdated", "attributeDeleted"]});
+        let literal = triggers_of(&spelled);
         assert_eq!(literal.len(), 4, "no duplicates are appended");
         let mut a = expanded.clone();
         let mut b = literal.clone();

@@ -137,7 +137,8 @@ store write commits
    per-subscription order); every change in the batch is matched
    sequentially on that task
      match against SubMirror (in memory, per tenant; store list is the
-     never-wired fallback) → group per subscription → JoinSet under
+     never-wired fallback), candidates handed over as shared documents →
+     group per subscription → JoinSet under
      DELIVERY_SLOTS (ANTARES_DELIVERY_WIDTH, default 64)
  → deliver_as: one record_delivery per attempt (timesSent,
    lastNotification, lastSuccess, status), mirror updated from the document

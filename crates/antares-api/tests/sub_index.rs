@@ -25,7 +25,7 @@ fn watched_sub(id: &str, attr: &str) -> Value {
            "notification": {"endpoint": {"uri": "http://x/"}}})
 }
 
-fn ids(subs: &[Value]) -> Vec<&str> {
+fn ids(subs: &[std::sync::Arc<Value>]) -> Vec<&str> {
     let mut v: Vec<&str> = subs
         .iter()
         .filter_map(|s| s.get("id").and_then(Value::as_str))
