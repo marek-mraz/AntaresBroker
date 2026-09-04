@@ -18,11 +18,9 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-/// Ceiling on tracked destinations and registrations. Both maps are keyed by
-/// client-supplied strings, so they need a bound: at the ceiling the least
-/// recently recorded entry is dropped, which costs at most a forgotten failure
-/// count for a destination nobody has touched in a while.
-const MAX_TRACKED: usize = 4096;
+/// Ceiling on tracked destinations and registrations, held with the other
+/// published ceilings so `/q/health` reports it.
+use crate::bounds::MAX_TRACKED_DESTINATIONS as MAX_TRACKED;
 /// Consecutive failures before a destination is tripped.
 pub(crate) const TRIP_AFTER: u32 = 5;
 /// How long a tripped destination stays open-circuit before one probe.

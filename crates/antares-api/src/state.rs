@@ -68,7 +68,7 @@ static PROPAGATED: [axum::http::HeaderName; 3] = [
 
 tokio::task_local! {
     /// How many [`AppState::call`] frames this task is already inside, held
-    /// against [`crate::bounds::MAX_INPROCESS_CALL_DEPTH`]. Absent outside a
+    /// against [`crate::bounds::MAX_IN_PROCESS_CALL_DEPTH`]. Absent outside a
     /// façade call, which reads as zero.
     static INPROCESS_DEPTH: usize;
 }
@@ -579,11 +579,11 @@ impl AppState {
         // every frame builds a router. The chain is counted per task, so a
         // façade over a façade is served and a loop is not.
         let depth = INPROCESS_DEPTH.try_with(|d| *d).unwrap_or(0);
-        if depth >= crate::bounds::MAX_INPROCESS_CALL_DEPTH {
+        if depth >= crate::bounds::MAX_IN_PROCESS_CALL_DEPTH {
             return crate::negotiate::ApiError::from(antares_model::NgsiError::InternalError(
                 format!(
                     "in-process call depth exceeded {}",
-                    crate::bounds::MAX_INPROCESS_CALL_DEPTH
+                    crate::bounds::MAX_IN_PROCESS_CALL_DEPTH
                 ),
             ))
             .into_response();

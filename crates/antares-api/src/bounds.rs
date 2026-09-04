@@ -104,7 +104,7 @@ pub const MAX_PEER_WARNINGS: usize = 8;
 /// build. The count is per task — work a handler spawns starts a new chain,
 /// which is right, since a notification is not inside the request that
 /// caused it.
-pub const MAX_INPROCESS_CALL_DEPTH: usize = 8;
+pub const MAX_IN_PROCESS_CALL_DEPTH: usize = 8;
 
 pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
 /// → 400 BadRequestData. Documents one @context resolution may fetch, owned
@@ -137,6 +137,37 @@ pub static MAX_FOLD_DOCS: std::sync::LazyLock<usize> = std::sync::LazyLock::new(
         .unwrap_or(100_000)
 });
 
+/// The ceilings on the notification pipeline. Not input bounds: no request
+/// names them and none is rejected against them. They are published beside
+/// the input caps for the same reason the regex-cache caps above are — an
+/// operator reading `/q/health` has to be able to tell a ceiling from a
+/// coincidence, and reaching one of these is what a dropped change or a
+/// stalled fan-out looks like from outside.
+///
+/// Depth of the change→matcher ring, the same size the local bus uses. A
+/// full ring drops the batch and counts it
+/// (`antares_notification_changes_dropped_total`), so this number is the
+/// back-pressure a deployment has before delivery loss starts.
+pub const CHANGE_QUEUE: usize = 1024;
+/// Notifications in flight at once per drain: one serial POST at a time
+/// capped a 9-subscription fan-out at ~600 POST/s and overflowed the ring.
+pub const DELIVERY_WIDTH: usize = 64;
+/// Of that width, what one tenant may hold. A Subscription belongs to one
+/// tenant (5.2.12), and a delivery to an endpoint that accepts and never
+/// answers holds its slot for the endpoint's whole timeout — up to 30 s
+/// (Table 5.2.15-1). Sharing the width with no per-tenant bound, a single
+/// tenant with enough dead endpoints holds every slot and nothing leaves the
+/// broker for anyone else. The share is a fraction of the width and not a
+/// fair split of it: a tenant delivering alone still gets several slots, and
+/// eight of them is what a full width of 64 divides into before the
+/// per-tenant queue becomes the bottleneck for an ordinary fan-out.
+pub const DELIVERY_WIDTH_PER_TENANT: usize = 8;
+/// Destinations and registrations the egress breaker tracks. Both maps are
+/// keyed by client-supplied strings, so they need a bound: at the ceiling the
+/// least recently recorded entry is dropped, which costs at most a forgotten
+/// failure count for a destination nobody has touched in a while.
+pub const MAX_TRACKED_DESTINATIONS: usize = 4096;
+
 /// Rejection counters, exported by /q/health.
 #[derive(Default)]
 pub struct LimitStats {
@@ -158,7 +189,7 @@ impl LimitStats {
             "maxFedFanout": *MAX_FED_FANOUT,
             "maxFedInflight": *MAX_FED_INFLIGHT,
             "maxJoinLevel": MAX_JOIN_LEVEL,
-            "maxInProcessCallDepth": MAX_INPROCESS_CALL_DEPTH,
+            "maxInProcessCallDepth": MAX_IN_PROCESS_CALL_DEPTH,
             "maxPeerWarnings": MAX_PEER_WARNINGS,
             "maxContextFetches": MAX_CONTEXT_FETCHES,
             "maxQNodes": MAX_Q_NODES,
@@ -166,6 +197,10 @@ impl LimitStats {
             "maxRegexCache": MAX_REGEX_CACHE,
             "maxRegexCacheBytes": MAX_REGEX_CACHE_BYTES,
             "maxRegexProgramBytes": MAX_REGEX_PROGRAM_BYTES,
+            "changeQueue": CHANGE_QUEUE,
+            "deliveryWidth": DELIVERY_WIDTH,
+            "deliveryWidthPerTenant": DELIVERY_WIDTH_PER_TENANT,
+            "maxTrackedDestinations": MAX_TRACKED_DESTINATIONS,
             "rejectedUriTooLong": self.uri_too_long.load(Ordering::Relaxed),
             "rejectedBodyTooLarge": self.body_too_large.load(Ordering::Relaxed),
             "rejectedBodyTooDeep": self.body_too_deep.load(Ordering::Relaxed),
@@ -396,6 +431,9 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "changeQueue",
+                "deliveryWidth",
+                "deliveryWidthPerTenant",
                 "maxBatchItems",
                 "maxBodyBytes",
                 "maxContextFetches",
@@ -413,12 +451,13 @@ mod tests {
                 "maxRegexCache",
                 "maxRegexCacheBytes",
                 "maxRegexProgramBytes",
+                "maxTrackedDestinations",
                 "maxUriBytes",
                 "rejectedBodyTooDeep",
                 "rejectedBodyTooLarge",
                 "rejectedUriTooLong",
             ],
-            "no member beyond the caps and the counters"
+            "no member beyond the caps, the pipeline ceilings and the counters"
         );
         assert_eq!(snap["rejectedUriTooLong"], 3);
         assert!(
@@ -527,6 +566,59 @@ mod tests {
             .expect("resp");
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(st.limits.body_too_large.load(Ordering::Relaxed), 1);
+    }
+
+    /// Every cap this module declares is in the payload `/q/health` serves.
+    /// A cap an operator cannot read is one they cannot tell from a
+    /// coincidence when a request is refused or a change is dropped, so the
+    /// list is read out of this file's own source rather than kept by hand:
+    /// a cap added below without a member above fails here.
+    #[test]
+    fn every_declared_cap_is_published() {
+        let src = include_str!("bounds.rs");
+        let published = LimitStats::default().snapshot();
+        let published = published.as_object().expect("an object");
+        let mut missing = Vec::new();
+        for line in src.lines() {
+            let line = line.trim_start();
+            // `pub use` re-exports name their cap in another crate; the
+            // declarations here are the ones this file owns.
+            for kw in ["pub const ", "pub static "] {
+                let Some(rest) = line.strip_prefix(kw) else {
+                    continue;
+                };
+                let Some((name, ty)) = rest.split_once(':') else {
+                    continue;
+                };
+                let name = name.trim();
+                // A cap is a count; the semaphore built from one is not a
+                // second cap and has nothing of its own to publish.
+                if !ty.contains("usize") {
+                    continue;
+                }
+                // MAX_URI_BYTES → maxUriBytes
+                let mut camel = String::new();
+                for (i, word) in name.split('_').enumerate() {
+                    let lower = word.to_lowercase();
+                    if i == 0 {
+                        camel.push_str(&lower);
+                    } else {
+                        let mut c = lower.chars();
+                        if let Some(f) = c.next() {
+                            camel.extend(f.to_uppercase());
+                            camel.push_str(c.as_str());
+                        }
+                    }
+                }
+                if !published.contains_key(&camel) {
+                    missing.push(format!("{name} (expected {camel:?})"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "caps declared here and absent from /q/health: {missing:?}"
+        );
     }
 
     #[test]

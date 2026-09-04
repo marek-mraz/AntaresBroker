@@ -28,7 +28,8 @@ use std::sync::Arc;
 
 const DEFAULT_TRIGGERS: &[&str] = &["attributeCreated", "attributeUpdated"];
 /// Depth of the change→matcher queue, the same ring size the local bus uses.
-const CHANGE_QUEUE: usize = 1024;
+/// Held with the other published ceilings so `/q/health` reports it.
+use crate::bounds::{CHANGE_QUEUE, DELIVERY_WIDTH, DELIVERY_WIDTH_PER_TENANT};
 static CHANGES_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static TASK_PANICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Hand a batch to the matcher queue: counted as pending on acceptance,
@@ -1052,22 +1053,8 @@ fn note_drop() {
     }
 }
 
-/// Notifications in flight at once per drain: one serial POST at a time
-/// capped a 9-subscription fan-out at ~600 POST/s and overflowed the queue.
-const DELIVERY_WIDTH: usize = 64;
 #[cfg(not(target_arch = "wasm32"))]
 static DELIVERY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(DELIVERY_WIDTH);
-
-/// Of that width, what one tenant may hold. A Subscription belongs to one
-/// tenant (5.2.12), and a delivery to an endpoint that accepts and never
-/// answers holds its slot for the endpoint's whole timeout — up to 30 s
-/// (Table 5.2.15-1). Sharing the width with no per-tenant bound, a single
-/// tenant with enough dead endpoints holds every slot and nothing leaves
-/// the broker for anyone else. The share is a fraction of the width and not
-/// a fair split of it: a tenant delivering alone still gets several slots,
-/// and eight of them is what a full width of 64 divides into before the
-/// per-tenant queue becomes the bottleneck for an ordinary fan-out.
-const DELIVERY_WIDTH_PER_TENANT: usize = 8;
 
 #[cfg(not(target_arch = "wasm32"))]
 type TenantSlots = std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Semaphore>>>;

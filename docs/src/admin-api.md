@@ -43,6 +43,9 @@ progress). A memory-store broker answers:
   "policy": { "engine": "allow-all", "timeoutMs": 250 },
   "surfaces": { "admin": { "prefix": "/q", "routes": 8 } },
   "limits": {
+    "changeQueue": 1024,
+    "deliveryWidth": 64,
+    "deliveryWidthPerTenant": 8,
     "maxBatchItems": 1000,
     "maxBodyBytes": 4194304,
     "maxContextFetches": 32,
@@ -60,6 +63,7 @@ progress). A memory-store broker answers:
     "maxRegexCache": 1024,
     "maxRegexCacheBytes": 67108864,
     "maxRegexProgramBytes": 262144,
+    "maxTrackedDestinations": 4096,
     "maxUriBytes": 8192,
     "rejectedBodyTooDeep": 0,
     "rejectedBodyTooLarge": 0,
@@ -83,7 +87,7 @@ progress). A memory-store broker answers:
 | `temporalDrainErrors` | Post-response history writes that failed since start; the client's 2xx stands, the counter and a warning record the loss. |
 | `policy` | The policy engine this binary was started with (`ANTARES_POLICY`, `allow-all` unless a deployment registered another) and the deadline one decision gets (`ANTARES_POLICY_TIMEOUT_MS`). An engine that overruns it is a refusal, not a delay. |
 | `surfaces` | The mounted admin surfaces by name, each with its prefix and route count. |
-| `limits` | The bounds wall: every `max*` cap in force and the `rejected*` counters of requests refused by it. |
+| `limits` | The bounds wall: every `max*` cap in force and the `rejected*` counters of requests refused by it, plus the notification-pipeline ceilings (`changeQueue`, `deliveryWidth`, `deliveryWidthPerTenant`, `maxTrackedDestinations`). No request is rejected against those four — they are published because reaching one is what a dropped change or a stalled fan-out looks like from outside. |
 | `memory` | jemalloc live (`allocatedBytes`) and resident (`residentBytes`) bytes. |
 | `commitQueueDepth`, `commitQueuePeak` | Present only for a store with a single committer to queue behind (`file`, and the browser build over OPFS): writers queued now and at peak. |
 | `bus` | `ANTARES_BUS=nats` only: `{mode, connected, reconnects}`. |

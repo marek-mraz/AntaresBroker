@@ -379,14 +379,14 @@ async fn a_state_that_made_an_in_process_call_still_releases_its_store() {
 
 /// A façade cannot spend the broker's stack either: `AppState::call` counts
 /// the frames one request is already inside and refuses past
-/// `MAX_INPROCESS_CALL_DEPTH`. A chain shorter than the ceiling is served —
+/// `MAX_IN_PROCESS_CALL_DEPTH`. A chain shorter than the ceiling is served —
 /// a façade over a façade is a design the seam invites — and a route that
 /// keeps translating into itself is ended with the broker's own 500 rather
 /// than by the stack. The refusal names no path and no façade.
 #[tokio::test]
 async fn a_facade_that_calls_itself_is_ended_by_the_broker_not_by_the_stack() {
     let (st, _) = state();
-    let ceiling = antares_api::bounds::MAX_INPROCESS_CALL_DEPTH;
+    let ceiling = antares_api::bounds::MAX_IN_PROCESS_CALL_DEPTH;
 
     // One frame short of the ceiling: every hop is served.
     let (code, body) = send(&st, "GET", &format!("/x/f0/nest?left={}", ceiling - 2), &[]).await;
