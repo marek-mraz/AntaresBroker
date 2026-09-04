@@ -18,7 +18,14 @@ RLS belt on attr_instances; every other table keeps RLS in both modes.
 Consequences:
 - The "even tenant-less SQL returns zero foreign rows" guarantee has
   one named exception: attr_instances under timescale. The isolation test
-  pack asserts the explicit-predicate discipline for this table instead.
+  pack asserts the explicit-predicate discipline for this table instead:
+  `tests/attr_instances_tenant_predicate.rs` reads every SQL literal in the
+  Postgres store that selects, inserts into, updates or deletes from the
+  table, and requires each to compare `tenant_id` or to appear in a list of
+  cross-tenant statements with the reason it runs under the service role.
+  It needs no database, so it gates every cell and not only the timescale
+  one — the discipline it guards is what a statement written in plain mode
+  carries into timescale.
 - Migration 0003 orders DDL as: table → hypertable/partitions → indexes →
   (RLS | compression), because Timescale also rejects post-compression
   ALTERs — compression must be the LAST thing that touches the table.
