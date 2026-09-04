@@ -290,10 +290,16 @@ What the run says:
   source calls and a registry match over 10,000 rows; the direct row is one
   local read, so the two are not the same unit of work and the ratio is the
   price of federation, not a regression against a like-for-like baseline.
-  The broker side of that comparison is not available from this run: the
-  CPU sampler reports the broker at zero through the `shapes` windows,
-  which cannot be true of a process serving 912 req/s, so only the Postgres
-  column is quoted here.
+  The broker side of that comparison is not available from this run. The
+  sampler matched broker processes against the whole of the first broker's
+  `argv[0]`, and the `shapes`, `saturate` and `startup` stages start their
+  own brokers from the same binary by a different path form, so it counted
+  none of them and reported the idle first process instead — zero cores
+  through windows serving 912 req/s. `saturate.md` disagrees with `rss.csv`
+  for the same window (2.56 cores against zero) because that stage measures
+  the process it started itself. The sampler now matches on the last two
+  path components, so a later run carries a broker CPU column for every
+  stage; the rows above are left as they were measured.
 
 ## Measuring delivery without the rented runner
 

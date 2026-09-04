@@ -22,7 +22,14 @@ CSV="$OUT/rss.csv"; PIDFILE="$OUT/rss.pid"
 case "${1:-}" in
   start)
     BROKER=${2:?broker pid}; PG=${3:-}
+    # The last two path components, not argv[0] whole: the stages start their
+    # own brokers from the same binary by a different path form (`./target/...`
+    # against `target/...`), and a match on the leading form misses every one
+    # of them — the broker column then reports the idle first process while a
+    # stage's broker does the work. Two components rather than the bare name
+    # so a `psql` connecting to a database of the same name cannot match.
     BROKER_NAME=$(tr '\0' ' ' < "/proc/$BROKER/cmdline" | awk '{print $1}')
+    BROKER_NAME=$(printf '%s' "$BROKER_NAME" | awk -F/ '{ print (NF > 1 ? $(NF-1) "/" $NF : $NF) }')
     echo "t,broker_kib,postgres_kib,broker_cpu_pct,postgres_cpu_pct,host_busy_cores,host_cores,k6_kib,k6_cpu_pct,sink_kib,sink_cpu_pct,mqtt_kib,mqtt_cpu_pct,phase" > "$CSV"
     (
       # CPU % = jiffies burnt per wall second (utime+stime, all threads);
