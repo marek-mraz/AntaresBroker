@@ -1718,6 +1718,22 @@ pub(crate) async fn query_temporal_inner(
     headers: &HeaderMap,
     filter: &crate::policy::Filter,
 ) -> ApiResult<Response> {
+    query_temporal_collected(st, params, headers, filter, None).await
+}
+
+/// The same query, with the merged documents of each page handed to `merged`
+/// as well as rendered into the response. 5.16.1.4 fills a Snapshot from this
+/// query and has to STORE what it matched: for an Evolution held by a
+/// registered Context Source there is nothing else in this broker to store —
+/// the fan-out's answer is the only copy, and the response body is a
+/// presentation of it that compaction does not undo.
+pub(crate) async fn query_temporal_collected(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    filter: &crate::policy::Filter,
+    merged: Option<&mut Vec<Value>>,
+) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
     check_params(
         params,
@@ -2048,6 +2064,9 @@ pub(crate) async fn query_temporal_inner(
     } else {
         crate::paging::paginate(st, params, matches, "/ngsi-ld/v1/temporal/entities")?
     };
+    if let Some(sink) = merged {
+        sink.extend(page.iter().cloned());
+    }
     let core_only_pick = attrs_filter.as_ref().is_some_and(Vec::is_empty);
     let mut payload: Vec<Value> = Vec::new();
     let (mut g_trunc, mut g_min, mut g_maxts) = (false, None::<String>, None::<String>);

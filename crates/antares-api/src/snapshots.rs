@@ -727,11 +727,16 @@ async fn run_temporal_query(
         // the narrowing the creating subject was given is not in scope here
         // — a snapshot under a policy is P5's box (ADR-0020: a `Filter` on
         // a fill is a `Deny`, and the fill records whose it is).
-        let resp = crate::temporal::query_temporal_inner(
+        // The merged documents come back beside the response: an Evolution
+        // this broker holds is copied from the store below, whole, and one a
+        // registered Context Source holds exists only here.
+        let mut merged: Vec<Value> = Vec::new();
+        let resp = crate::temporal::query_temporal_collected(
             st,
             &vp,
             &headers,
             &crate::policy::Filter::default(),
+            Some(&mut merged),
         )
         .await
         .map_err(|e| match e {
@@ -764,15 +769,27 @@ async fn run_temporal_query(
             // insert-if-absent would find that stub and keep it, so the
             // snapshot would answer temporal reads with one instance of a
             // history the source has many of — and report the query a success.
-            if let Some(doc) = st
+            let held = st
                 .temporal
                 .get_temporal(
                     tenant,
                     eid,
                     &antares_store::filter::TemporalFilter::default(),
                 )
-                .await?
-            {
+                .await?;
+            // Nothing local means the Evolution came from a registered
+            // Context Source (5.7.4.4). The query's merged answer is every
+            // instance of it this broker was given, so it is what the
+            // snapshot keeps — a local copy is the source's whole history,
+            // a remote one is as much of it as the fan-out returned.
+            let doc = match held {
+                Some(doc) => Some(doc),
+                None => merged
+                    .iter()
+                    .find(|m| m.get("id").and_then(Value::as_str) == Some(eid))
+                    .cloned(),
+            };
+            if let Some(doc) = doc {
                 st.temporal.upsert(synth, eid, doc).await?;
                 n += 1;
             }

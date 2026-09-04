@@ -628,6 +628,106 @@ async fn clause_5_16_1_federated_fill() {
     assert_eq!(ids.len(), 2, "{list}");
 }
 
+/// 5.16.1.4 temporal, distributed: a temporal Snapshot query follows 5.7.4.4
+/// the way an Entity one follows 5.7.2.4, so an evolution served by a
+/// registered Context Source belongs in the snapshot too. The fill answers
+/// the query through the distributed path and then copies each matched id
+/// from the LOCAL temporal store — which a remote evolution is not in, so
+/// everything the fan-out brought back was counted and thrown away.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_16_1_temporal_federated_fill() {
+    allow_private();
+    let st = state().await;
+    let local = json!({"id": "urn:ngsi-ld:Vehicle:tfedlocal", "type": "Vehicle",
+        "speed": [{"type": "Property", "value": 70,
+                   "observedAt": "2026-05-01T00:00:00Z"}]})
+    .to_string();
+    let (status, b) = send(&st, "POST", "/ngsi-ld/v1/temporal/entities", Some(local)).await;
+    assert!(status.is_success(), "seed: {status} {b}");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let app = axum::Router::new().route(
+        "/ngsi-ld/v1/temporal/entities",
+        axum::routing::get(|| async {
+            axum::Json(json!([{
+            "id": "urn:ngsi-ld:Vehicle:tfedremote", "type": "Vehicle",
+            "speed": [
+                {"type": "Property", "value": 80,
+                 "observedAt": "2026-05-01T00:00:00Z"},
+                {"type": "Property", "value": 85,
+                 "observedAt": "2026-05-02T00:00:00Z"}
+            ]}]))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:snapfedtemporal",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "operations": ["queryTemporal"],
+        "endpoint": format!("http://{addr}"),
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(reg.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let snap = json!({"type": "Snapshot",
+        "snapshotTemporalQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}],
+            "temporalQ": {"timerel": "after", "timeAt": "2000-01-01T00:00:00Z"}}]})
+    .to_string();
+    let (_, h, _) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(snap), &[]).await;
+    let loc = h.get("Location").unwrap().to_str().unwrap().to_owned();
+    let ready = wait_ready(&st, &loc).await;
+    assert_eq!(ready["snapshotStatus"], "success", "{ready}");
+    let sid = ready["id"].as_str().expect("id");
+
+    let (status, _, list) = send_h(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/temporal/entities?type=Vehicle&timerel=after&timeAt=2000-01-01T00:00:00Z",
+        None,
+        &[("NGSILD-Snapshot", sid)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let mut ids: Vec<&str> = list
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|d| d["id"].as_str())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        vec![
+            "urn:ngsi-ld:Vehicle:tfedlocal",
+            "urn:ngsi-ld:Vehicle:tfedremote"
+        ],
+        "5.7.4.4: the remote evolution is part of the snapshot: {list}"
+    );
+    let remote = list
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|d| d["id"] == "urn:ngsi-ld:Vehicle:tfedremote")
+        .expect("the remote evolution");
+    assert_eq!(
+        remote["speed"].as_array().map(Vec::len),
+        Some(2),
+        "the whole evolution the source served is what was copied: {remote}"
+    );
+}
+
 /// 5.16.1.4: "If the size of the respective results require pagination,
 /// all pages are to be retrieved completely" — the temporal fill must page
 /// past the broker's max_limit.
