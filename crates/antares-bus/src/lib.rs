@@ -34,9 +34,13 @@ pub enum ChangeOp {
 }
 
 /// Claim-check reference: events whose payload exceeds
-/// [`CLAIM_CHECK_BYTES`] carry this instead of the inline body — consumers
-/// fetch the document from the store. NATS caps messages at ~1 MB and Antares
-/// never chunks.
+/// [`CLAIM_CHECK_BYTES`] carry this instead of the inline body. NATS caps
+/// messages at ~1 MB and Antares never chunks, so the body travels out of
+/// band: the publisher keeps the outbox row that holds the whole event, and
+/// the consumer reads it back by the event's `seq`. The store's current row
+/// is the after-image and can stand in for `payload` alone — a before-image
+/// is not derivable from it, which is why the reference is not a document
+/// lookup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayloadRef {
     pub entity_id: EntityId,
@@ -75,22 +79,34 @@ pub struct ChangeEvent {
     pub prev_payload_ref: Option<PayloadRef>,
 }
 
+/// A body's serialized size against the claim-check ceiling. An
+/// unserializable body counts as zero: it cannot be published either way, and
+/// treating it as oversized would retain a row nothing can resolve.
+fn over(v: &Option<serde_json::Value>, limit: usize) -> bool {
+    v.as_ref()
+        .is_some_and(|p| serde_json::to_vec(p).map(|b| b.len()).unwrap_or(0) > limit)
+}
+
 impl ChangeEvent {
+    /// True when [`ChangeEvent::claim_check`] would strip a body at `limit`.
+    /// The publisher asks before it publishes: a stripped body has to stay
+    /// readable somewhere the consumer can reach, and the drain is the last
+    /// holder of the whole event.
+    pub fn claim_checked_at(&self, limit: usize) -> bool {
+        over(&self.payload, limit) || over(&self.prev_payload, limit)
+    }
+
     /// Claim-check: replace any inline body over `limit` bytes with a
     /// reference. Oversized entities are rare; the common path is untouched.
     pub fn claim_check(mut self, limit: usize) -> Self {
-        let over = |v: &Option<serde_json::Value>| {
-            v.as_ref()
-                .is_some_and(|p| serde_json::to_vec(p).map(|b| b.len()).unwrap_or(0) > limit)
-        };
-        if over(&self.payload) {
+        if over(&self.payload, limit) {
             self.payload = None;
             self.payload_ref = Some(PayloadRef {
                 entity_id: self.entity_id.clone(),
                 version: self.version,
             });
         }
-        if over(&self.prev_payload) {
+        if over(&self.prev_payload, limit) {
             self.prev_payload = None;
             self.prev_payload_ref = Some(PayloadRef {
                 entity_id: self.entity_id.clone(),
@@ -175,6 +191,32 @@ mod tests {
             !checked.types.is_empty(),
             "types must survive — the publish subject is built from them"
         );
+    }
+
+    /// The publisher asks `claim_checked_at` BEFORE it publishes and keeps
+    /// the outbox row when the answer is yes. An answer that disagrees with
+    /// the strip either keeps every row (the outbox never drains) or keeps
+    /// none (the consumer resolves a reference to a row that is gone).
+    #[test]
+    fn claim_checked_at_answers_for_the_bodies_the_strip_takes() {
+        let mut fits = event(3);
+        fits.payload = Some(serde_json::json!({"small": true}));
+        fits.prev_payload = Some(serde_json::json!({"small": false}));
+        assert!(!fits.claim_checked_at(512));
+        assert!(fits.clone().claim_check(512).payload_ref.is_none());
+
+        let mut prev_only = fits.clone();
+        prev_only.prev_payload = Some(serde_json::Value::String("x".repeat(1024)));
+        assert!(
+            prev_only.claim_checked_at(512),
+            "a stripped before-image is the one the store cannot answer for"
+        );
+        assert!(prev_only.claim_check(512).prev_payload_ref.is_some());
+
+        let mut both = fits;
+        both.payload = Some(serde_json::Value::String("x".repeat(1024)));
+        both.prev_payload = Some(serde_json::Value::String("y".repeat(1024)));
+        assert!(both.claim_checked_at(512));
     }
 
     #[test]

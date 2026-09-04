@@ -378,11 +378,18 @@ pub async fn wire_nats(
                     // up-to-max delete loses a lower-seq row whose
                     // transaction commits between peek and ack.
                     let mut acked: Vec<i64> = Vec::new();
+                    // Rows whose bodies were too big for the bus: the message
+                    // carries a reference, and this row is the only copy of
+                    // what it references. Kept, not deleted, and taken out of
+                    // the next page by the same stamp.
+                    let mut retained: Vec<(TenantId, i64)> = Vec::new();
                     for (seq, _tenant, event) in rows {
                         match serde_json::from_value::<ChangeEvent>(event) {
                             Ok(mut ev) => {
                                 ev.seq = seq;
+                                let checked = ev.claim_checked_at(antares_bus::CLAIM_CHECK_BYTES);
                                 match bus_for_drain.publish(&ev).await {
+                                    Ok(()) if checked => retained.push((ev.tenant, seq)),
                                     Ok(()) => acked.push(seq),
                                     Err(e) => {
                                         tracing::warn!("outbox publish of seq {seq} failed: {e}");
@@ -395,6 +402,18 @@ pub async fn wire_nats(
                                 tracing::error!("outbox row {seq} undecodable ({e}) — skipped");
                                 acked.push(seq);
                             }
+                        }
+                    }
+                    // Retain BEFORE ack: both statements are separate
+                    // transactions, and a crash between them must leave a
+                    // claim-check row alive rather than published and gone.
+                    // One statement per row, under that row's tenant — the
+                    // outbox UPDATE takes no service escape (0005), and an
+                    // event over the bus ceiling is rare enough that grouping
+                    // the page by tenant would cost more code than statements.
+                    for (tenant, seq) in &retained {
+                        if let Err(e) = store.outbox_retain(tenant, &[*seq]).await {
+                            tracing::warn!("outbox retain of seq {seq} failed: {e}");
                         }
                     }
                     if !acked.is_empty() {
@@ -552,34 +571,62 @@ fn apply_delta(mirror: &dyn antares_api::mirror::Mirror, delta: &serde_json::Val
     mirror.apply(tenant, id, doc);
 }
 
-/// Resolve claim-check references: consumers fetch oversized bodies
-/// from the store. The current row may be newer than the referenced version —
-/// ordinary at-least-once reality; the matcher is ordering-tolerant.
+/// Resolve claim-check references: bodies the bus could not carry come back
+/// from the outbox row the drain kept, read by the event's own `seq`.
+///
+/// The store's current row is NOT that source. It answers with the entity as
+/// it stands now, which is the after-image: resolving `prev_payload_ref` from
+/// it hands the matcher two copies of the same document, `diff` finds nothing
+/// changed and the change reaches no subscriber. It stays the fallback for
+/// `payload_ref` alone, where being newer than the referenced version is the
+/// ordinary at-least-once reality the matcher already tolerates.
 async fn resolve_payloads(
     st: &AppState,
     ev: &ChangeEvent,
 ) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
-    async fn fetch(
-        st: &AppState,
-        ev: &ChangeEvent,
-        r: Option<&antares_bus::PayloadRef>,
-    ) -> Option<serde_json::Value> {
-        let r = r?;
-        st.store
-            .get(&ev.tenant, Kind::Entity, r.entity_id.as_str())
+    if ev.payload_ref.is_none() && ev.prev_payload_ref.is_none() {
+        return (ev.prev_payload.clone(), ev.payload.clone());
+    }
+    // 0 is the local bus, which never claim-checks: it hands the payloads to
+    // the matcher in process.
+    let kept = match ev.seq {
+        0 => None,
+        seq => st
+            .store
+            .outbox_event(seq, &ev.tenant)
             .await
             .ok()
             .flatten()
-    }
-    let before = match ev.prev_payload.clone() {
-        Some(v) => Some(v),
-        None => fetch(st, ev, ev.prev_payload_ref.as_ref()).await,
+            .and_then(|v| serde_json::from_value::<ChangeEvent>(v).ok()),
     };
+    if let Some(kept) = kept {
+        return (kept.prev_payload, kept.payload);
+    }
+    // Past the retention window, or a deployment whose store keeps no outbox.
+    // The after-image is still recoverable; the before-image is not, and a
+    // guess in its place is a notification that reports a change that did not
+    // happen.
     let after = match ev.payload.clone() {
         Some(v) => Some(v),
-        None => fetch(st, ev, ev.payload_ref.as_ref()).await,
+        None => match ev.payload_ref.as_ref() {
+            Some(r) => st
+                .store
+                .get(&ev.tenant, Kind::Entity, r.entity_id.as_str())
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        },
     };
-    (before, after)
+    if ev.prev_payload_ref.is_some() {
+        metrics::counter!("antares_claim_check_unresolved_total").increment(1);
+        tracing::warn!(
+            "claim-check row for seq {} is gone: the change to {} notifies nobody",
+            ev.seq,
+            ev.entity_id.as_str()
+        );
+    }
+    (ev.prev_payload.clone(), after)
 }
 
 #[cfg(test)]
@@ -809,6 +856,98 @@ mod tests {
             after, None,
             "a reference resolved another tenant's entity: {after:?}"
         );
+    }
+
+    /// A change whose bodies were both too big for the bus reaches the
+    /// matcher with the before-image the write actually replaced. Resolving
+    /// the reference against the store's current row instead hands back the
+    /// after-image twice, `diff` finds nothing and the change notifies
+    /// nobody. Skips without ANTARES_TEST_DATABASE_URL — the outbox is a
+    /// Postgres table, and the memory arm has none.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_retained_row_gives_the_matcher_the_before_image_the_write_replaced() {
+        let Ok(url) = std::env::var("ANTARES_TEST_DATABASE_URL") else {
+            eprintln!("SKIP: ANTARES_TEST_DATABASE_URL not set");
+            return;
+        };
+        let pool = antares_sql::store::pg::connect(&url, 5)
+            .await
+            .expect("connect");
+        let tenant = TenantId::new("claimcheck").expect("tenant");
+        antares_sql::store::pg::ensure_tenant(&pool, &tenant)
+            .await
+            .expect("tenant row");
+
+        let id = "urn:ngsi-ld:T:oversized";
+        let wide = |v: &str| {
+            json!({"id": id, "type": ["T"],
+                   "https://uri.etsi.org/ngsi-ld/default-context/note":
+                       [{"type": "Property", "value": format!("{v}{}", "x".repeat(300 * 1024))}]})
+        };
+        let before_doc = wide("before-");
+        let after_doc = wide("after-");
+
+        let mut ev = ChangeEvent {
+            tenant: tenant.clone(),
+            entity_id: EntityId::new(id).expect("id"),
+            types: vec!["T".into()],
+            op: ChangeOp::Update,
+            changed_attrs: vec![],
+            payload: Some(after_doc.clone()),
+            prev_payload: Some(before_doc.clone()),
+            version: 2,
+            incarnation: String::new(),
+            seq: 0,
+            payload_ref: None,
+            prev_payload_ref: None,
+        };
+        let mut tx = pool.begin().await.expect("tx");
+        antares_sql::store::pg::set_tenant(&mut tx, &tenant)
+            .await
+            .expect("set tenant");
+        let seq = antares_sql::store::pg::outbox::enqueue(
+            &mut tx,
+            &tenant,
+            &serde_json::to_value(&ev).expect("event json"),
+        )
+        .await
+        .expect("enqueue");
+        tx.commit().await.expect("commit");
+        antares_sql::store::pg::outbox::retain(&pool, &tenant, &[seq])
+            .await
+            .expect("retain");
+
+        let st = AppState::with_store(
+            "antares".into(),
+            std::sync::Arc::new(antares_sql::store::any::AnyStore::Pg(
+                antares_sql::store::any::PgBackend::new(pool.clone()),
+            )),
+            "postgres",
+        );
+        // The current row is the AFTER image — the document the old
+        // resolution handed back for both halves.
+        let _ = st.store.delete(&tenant, Kind::Entity, id).await;
+        st.store
+            .create(&tenant, Kind::Entity, id, after_doc.clone())
+            .await
+            .expect("seed current row");
+
+        ev.seq = seq;
+        let wire = ev.claim_check(antares_bus::CLAIM_CHECK_BYTES);
+        assert!(
+            wire.prev_payload_ref.is_some() && wire.payload_ref.is_some(),
+            "the fixture must be over the claim-check ceiling"
+        );
+        let (before, after) = resolve_payloads(&st, &wire).await;
+        assert_eq!(before.as_ref(), Some(&before_doc), "before-image lost");
+        assert_eq!(after.as_ref(), Some(&after_doc));
+        assert_ne!(
+            before, after,
+            "both halves resolved to the current row: the change notifies nobody"
+        );
+
+        let _ = st.store.delete(&tenant, Kind::Entity, id).await;
+        let _ = antares_sql::store::pg::outbox::reap_published(&pool, 0).await;
     }
 
     /// The outbox-drain switch is a config value like any other: the two

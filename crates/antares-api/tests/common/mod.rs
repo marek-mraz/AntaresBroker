@@ -439,6 +439,12 @@ impl CurrentStateDriver for Double {
     async fn outbox_ack(&self, seqs: &[i64]) -> Result<u64, NgsiError> {
         self.inner.outbox_ack(seqs).await
     }
+    async fn outbox_retain(&self, tenant: &TenantId, seqs: &[i64]) -> Result<u64, NgsiError> {
+        self.inner.outbox_retain(tenant, seqs).await
+    }
+    async fn outbox_event(&self, seq: i64, tenant: &TenantId) -> Result<Option<Value>, NgsiError> {
+        self.inner.outbox_event(seq, tenant).await
+    }
     fn version_info(&self) -> Value {
         self.inner.version_info()
     }

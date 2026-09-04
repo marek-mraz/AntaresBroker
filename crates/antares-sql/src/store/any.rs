@@ -274,6 +274,37 @@ impl AnyStore {
         }
     }
 
+    /// Outbox drain: keep the rows of events the bus could not carry whole.
+    /// The memory arm has no outbox, so nothing is ever retained there.
+    pub async fn outbox_retain(
+        &self,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] tenant: &TenantId,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] seqs: &[i64],
+    ) -> Result<u64, NgsiError> {
+        match self {
+            AnyStore::Mem(_) => Ok(0),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => super::pg::outbox::retain(p.docs.pool(), tenant, seqs)
+                .await
+                .map_err(db),
+        }
+    }
+
+    /// The whole event behind a claim-check reference, `None` once reaped.
+    pub async fn outbox_event(
+        &self,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] seq: i64,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] tenant: &TenantId,
+    ) -> Result<Option<Value>, NgsiError> {
+        match self {
+            AnyStore::Mem(_) => Ok(None),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => super::pg::outbox::event(p.docs.pool(), seq, tenant)
+                .await
+                .map_err(db),
+        }
+    }
+
     /// Create one document of `kind`; `false` when that id is already taken.
     pub async fn create(
         &self,
@@ -1319,6 +1350,12 @@ impl antares_store::CurrentStateDriver for AnyStore {
     }
     async fn outbox_ack(&self, seqs: &[i64]) -> Result<u64, NgsiError> {
         AnyStore::outbox_ack(self, seqs).await
+    }
+    async fn outbox_retain(&self, tenant: &TenantId, seqs: &[i64]) -> Result<u64, NgsiError> {
+        AnyStore::outbox_retain(self, tenant, seqs).await
+    }
+    async fn outbox_event(&self, seq: i64, tenant: &TenantId) -> Result<Option<Value>, NgsiError> {
+        AnyStore::outbox_event(self, seq, tenant).await
     }
     async fn create(
         &self,

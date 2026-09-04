@@ -100,6 +100,13 @@ pub async fn detect_temporal_backend(pool: &PgPool) -> Result<TemporalBackend, S
     }
 }
 
+/// How long a published claim-check row outlives its message. The changes
+/// stream keeps a message until every durable has acked it, so no bound is
+/// derivable from the bus — this is the operator-visible ceiling on how long
+/// a matcher may lag before an oversized change stops resolving.
+// ponytail: fixed window, an env knob if a deployment's matcher lag exceeds it
+const CLAIM_CHECK_HOURS: i64 = 24;
+
 /// One maintenance pass. Returns a short human-readable summary ("skipped"
 /// when another instance holds the claim). `retention_days = None` keeps
 /// history forever — retention is a deliberate deployment knob, never a
@@ -232,6 +239,15 @@ pub async fn temporal_maintenance(
         Ok(0) => {}
         Ok(n) => done.push(format!("reaped {n} expired attribute instances (4.22)")),
         Err(e) => done.push(format!("instance reap skipped ({e})")),
+    }
+    // Claim-check rows the drain kept because the bus could not carry their
+    // bodies. The consumer resolves them off the message, so the window has to
+    // outlive the message: reaping one early costs the notification it was
+    // carrying, keeping one costs a row.
+    match crate::store::pg::outbox::reap_published(pool, CLAIM_CHECK_HOURS).await {
+        Ok(0) => {}
+        Ok(n) => done.push(format!("reaped {n} published claim-check rows")),
+        Err(e) => done.push(format!("claim-check reap skipped ({e})")),
     }
     if done.is_empty() {
         done.push("nothing to do".into());

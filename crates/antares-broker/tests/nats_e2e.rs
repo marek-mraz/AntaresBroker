@@ -278,6 +278,90 @@ fn roles_split_across_two_instances_notifies_and_records() {
     });
 }
 
+/// A change whose bodies pass the bus claim-check ceiling still notifies.
+/// The published message carries references instead of the documents, and
+/// the matcher resolves them from the outbox row the drain kept — resolving
+/// them from the store hands it the current row twice, the diff comes out
+/// empty and the update reaches no subscriber. The first write is a create,
+/// which notifies on the after-image alone; the assertion is the UPDATE.
+#[test]
+fn an_update_over_the_claim_check_ceiling_still_notifies() {
+    let _serial = serial();
+    let (Ok(db), Ok(nats)) = (
+        std::env::var("ANTARES_TEST_DATABASE_URL"),
+        std::env::var("ANTARES_TEST_NATS_URL"),
+    ) else {
+        eprintln!("SKIP: ANTARES_TEST_DATABASE_URL / ANTARES_TEST_NATS_URL not set");
+        return;
+    };
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let tenant = format!("cc{run}");
+
+    let api_port = free_port();
+    let worker_port = free_port();
+    let _api = start(api_port, "api", &db, &nats);
+    let _worker = start(worker_port, "matcher,notifier", &db, &nats);
+    wait_healthy(api_port);
+    wait_healthy(worker_port);
+
+    let (rx_port, seen) = receiver();
+    let sub = format!(
+        r#"{{"id":"urn:ngsi-ld:Subscription:cc:{run}","type":"Subscription",
+            "entities":[{{"type":"Bulky"}}],
+            "notification":{{"endpoint":{{"uri":"http://127.0.0.1:{rx_port}/notify"}}}}}}"#
+    );
+    let resp = http(
+        api_port,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(&tenant),
+        Some(&sub),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "sub create: {resp}");
+
+    // Both the before- and the after-image are over the 256 KB ceiling, so
+    // the update's message carries two references and no body at all.
+    let eid = format!("urn:ngsi-ld:Bulky:{run}");
+    let bulky = |marker: &str| {
+        format!(
+            r#"{{"id":"{eid}","type":"Bulky","blob":{{"type":"Property","value":"{marker}{}"}}}}"#,
+            "x".repeat(300 * 1024)
+        )
+    };
+    let resp = http(
+        api_port,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(&tenant),
+        Some(&bulky("first")),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "entity create: {resp}");
+    wait_for("the create notification", 30, || {
+        seen.lock()
+            .expect("seen")
+            .iter()
+            .any(|b| b.contains("first"))
+    });
+
+    let resp = http(
+        api_port,
+        "PUT",
+        &format!("/ngsi-ld/v1/entities/{eid}"),
+        Some(&tenant),
+        Some(&bulky("second")),
+    );
+    assert!(resp.starts_with("HTTP/1.1 204"), "entity replace: {resp}");
+    wait_for("the oversized update notification", 30, || {
+        seen.lock()
+            .expect("seen")
+            .iter()
+            .any(|b| b.contains("second"))
+    });
+}
+
 /// N≥2 api pods + N≥2 worker pods. A subscription created through api-1
 /// matches an entity created through api-2 (any pod, one broker), and after
 /// one worker dies with SIGKILL the shared durable rebalances — notifications

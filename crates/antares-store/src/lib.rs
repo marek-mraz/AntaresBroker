@@ -330,6 +330,19 @@ pub trait CurrentStateDriver: Send + Sync {
         let _ = seqs;
         Ok(0)
     }
+    /// Outbox drain: keep the rows of events the bus could not carry whole
+    /// and take them out of the drain's page. The published message holds a
+    /// claim-check reference; the row holds the bodies it stands for.
+    async fn outbox_retain(&self, tenant: &TenantId, seqs: &[i64]) -> Result<u64, NgsiError> {
+        let _ = (tenant, seqs);
+        Ok(0)
+    }
+    /// The whole event behind a claim-check reference, or `None` once it has
+    /// been reaped. Scoped to the tenant that wrote it.
+    async fn outbox_event(&self, seq: i64, tenant: &TenantId) -> Result<Option<Value>, NgsiError> {
+        let _ = (seq, tenant);
+        Ok(None)
+    }
 
     /// Insert a document; `false` if the id already exists (nothing written).
     async fn create(

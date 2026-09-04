@@ -33,9 +33,9 @@ Current counts (`python3 dev/spec.py status`):
 
 ```text
 947 sections
-  implemented       476
+  implemented       477
   informative       468
-  partial             3
+  partial             2
   robot-tagged       193
 ```
 

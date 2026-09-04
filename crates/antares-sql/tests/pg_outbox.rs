@@ -174,3 +174,106 @@ async fn outbox_ack_never_deletes_an_unpublished_gap_row() {
     // cleanup: drain the survivor
     outbox::ack(&pool, &[seq_a]).await.expect("ack survivor");
 }
+
+/// A row the drain kept because the bus could not carry its bodies leaves the
+/// drain's page and stays readable by seq — that row is the only remaining
+/// copy of the before-image the published message dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retained_row_leaves_the_page_and_stays_readable_until_it_is_reaped() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let t = TenantId::new("pgretain").expect("tenant");
+    let other = TenantId::new("pgretainother").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    pg::ensure_tenant(&pool, &other).await.expect("tenant row");
+
+    let mut tx = pool.begin().await.expect("tx");
+    pg::set_tenant(&mut tx, &t).await.expect("set tenant");
+    let seq = outbox::enqueue(
+        &mut tx,
+        &t,
+        &serde_json::json!({"op": "update", "id": "urn:o:big", "prev_payload": {"was": "here"}}),
+    )
+    .await
+    .expect("enqueue");
+    tx.commit().await.expect("commit");
+
+    assert_eq!(outbox::retain(&pool, &t, &[seq]).await.expect("retain"), 1);
+    let page = outbox::peek(&pool, 1000).await.expect("peek");
+    assert!(
+        !page.iter().any(|(s, _, _)| *s == seq),
+        "a retained row must not be published a second time"
+    );
+    let kept = outbox::event(&pool, seq, &t)
+        .await
+        .expect("event")
+        .expect("the retained row");
+    assert_eq!(kept["prev_payload"]["was"], "here");
+    assert!(
+        outbox::event(&pool, seq, &other)
+            .await
+            .expect("event")
+            .is_none(),
+        "a claim-check reference must not resolve inside another tenant"
+    );
+
+    // Window 0 puts every stamped row past the horizon; a pending row carries
+    // no stamp, and `NULL < now()` is never true, so the drain's queue is
+    // untouched by the reap.
+    assert!(outbox::reap_published(&pool, 0).await.expect("reap") >= 1);
+    assert!(outbox::event(&pool, seq, &t)
+        .await
+        .expect("event")
+        .is_none());
+}
+
+/// The retain runs as the deployed role, not as a superuser. `outbox`
+/// carries FORCE ROW LEVEL SECURITY and its UPDATE policy takes no
+/// `antares.service` escape (0005 removed it: an escaped UPDATE can move a
+/// row into another tenant). A retain that armed the escape instead of the
+/// row's tenant updates nothing here — silently, because a no-op UPDATE is
+/// not an error — and the drain republishes that row on every page for as
+/// long as the broker runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn retain_and_read_back_hold_under_the_non_superuser_role() {
+    let url = require_db!();
+    let admin = pg::connect(&url, 5).await.expect("connect");
+    for stmt in [
+        "DO $$ BEGIN CREATE ROLE antares_app LOGIN PASSWORD 'app';
+         EXCEPTION WHEN duplicate_object THEN NULL; END $$",
+        "GRANT USAGE ON SCHEMA public TO antares_app",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO antares_app",
+    ] {
+        sqlx::query(stmt).execute(&admin).await.expect(stmt);
+    }
+    let app_url = url.replace("antares:antares@", "antares_app:app@");
+    assert_ne!(app_url, url, "test URL must embed antares:antares creds");
+    let app = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&app_url)
+        .await
+        .expect("app-role connect");
+
+    let t = TenantId::new("pgretainrls").expect("tenant");
+    pg::ensure_tenant(&admin, &t).await.expect("tenant row");
+    let mut tx = app.begin().await.expect("tx");
+    pg::set_tenant(&mut tx, &t).await.expect("set tenant");
+    let seq = outbox::enqueue(&mut tx, &t, &serde_json::json!({"id": "urn:o:rls"}))
+        .await
+        .expect("enqueue");
+    tx.commit().await.expect("commit");
+
+    assert_eq!(
+        outbox::retain(&app, &t, &[seq]).await.expect("retain"),
+        1,
+        "the retain updated no row: the drain will republish it forever"
+    );
+    assert_eq!(
+        outbox::event(&app, seq, &t)
+            .await
+            .expect("event")
+            .expect("the retained row")["id"],
+        "urn:o:rls"
+    );
+    outbox::reap_published(&app, 0).await.expect("reap");
+}

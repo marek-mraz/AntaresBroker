@@ -112,6 +112,7 @@ Prometheus text with the `antares_` prefix:
 | `antares_temporal_drain_errors_total` | Failed post-response history writes. |
 | `antares_notifications_sent_total`, `antares_notifications_retried_total`, `antares_notifications_failed_total` | Notification deliveries by outcome. |
 | `antares_notification_changes_dropped_total` | Change events the notifier dropped under back-pressure. |
+| `antares_claim_check_unresolved_total` | Changes too big for the bus whose kept outbox row was already reaped: the before-image is gone and the change notifies nobody. Non-zero means a matcher lagged past the retention window. |
 | `antares_notification_task_panics_total` | Delivery tasks that panicked (a bug, never expected). |
 | `antares_change_lag_seconds` | Age of the change a notifier is handling. |
 | `antares_policy_failures_total` | Decisions the policy seam had to make itself because the engine did not, by reason (`panic`, `timeout`). Always zero under the built-in `allow-all` engine. |

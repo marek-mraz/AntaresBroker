@@ -226,6 +226,15 @@ One sweep loop per process, every `ANTARES_SWEEP_SECS` (default 900):
 The outbox drainer (`ANTARES_OUTBOX_DRAIN`) is the other loop; it hands
 committed changes to the matcher and can be moved to a dedicated process.
 
+A change whose document exceeds the bus message ceiling (256 KB) travels as
+a claim-check reference, and its outbox row is kept instead of deleted: that
+row holds the bodies the message dropped, and the matcher reads them back by
+the event's sequence number. Such rows carry a `published_at` stamp, sit out
+of the drain's page, and the maintenance pass frees them 24 hours later. A
+matcher lagging further behind than that resolves nothing — the change is
+logged and counted on `antares_claim_check_unresolved_total`. A non-zero
+counter means the consumer side, not the store, needs attention.
+
 ## Egress breaker
 
 Every broker-initiated request (notification, forward, `@context` fetch)

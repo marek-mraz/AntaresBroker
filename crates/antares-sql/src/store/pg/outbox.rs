@@ -5,6 +5,12 @@
 //! publishes rows to the bus with `Nats-Msg-Id` = `seq` for dedup, then acks
 //! by deleting exactly the seqs it published — never a range, see [`ack`].
 //!
+//! A row whose event was too big for the bus is [`retain`]ed instead of
+//! deleted: the published message carries a claim-check reference, and this
+//! row is the only remaining copy of the bodies it dropped. The consumer
+//! reads it back with [`event`] and [`reap_published`] frees it once the bus
+//! can no longer be carrying the message.
+//!
 //! Producer wiring into the entity write paths lands WITH the drain:
 //! enqueuing events nothing consumes would only grow the table
 //! without bound.
@@ -19,8 +25,13 @@ use sqlx::Row;
 const ENQUEUE_SQL: &str = "INSERT INTO outbox (tenant_id, event) VALUES ($1, $2) RETURNING seq";
 const ENQUEUE_MANY_SQL: &str = "INSERT INTO outbox (tenant_id, event)
      SELECT $1, e FROM jsonb_array_elements($2::jsonb) AS e";
-const PEEK_SQL: &str = "SELECT seq, tenant_id, event FROM outbox ORDER BY seq LIMIT $1";
+const PEEK_SQL: &str =
+    "SELECT seq, tenant_id, event FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT $1";
 const ACK_SQL: &str = "DELETE FROM outbox WHERE seq = ANY($1)";
+const RETAIN_SQL: &str = "UPDATE outbox SET published_at = now() WHERE seq = ANY($1)";
+const EVENT_SQL: &str = "SELECT event FROM outbox WHERE seq = $1 AND tenant_id = $2";
+const REAP_SQL: &str =
+    "DELETE FROM outbox WHERE published_at < now() - make_interval(hours => $1::int)";
 
 /// Enqueue one event INSIDE the caller's transaction (same-tx INSERT).
 pub async fn enqueue(
@@ -87,6 +98,66 @@ pub async fn ack(pool: &PgPool, seqs: &[i64]) -> Result<u64, sqlx::Error> {
     crate::store::pg::set_service(&mut tx).await?;
     let n = sqlx::query(ACK_SQL)
         .bind(seqs)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(n)
+}
+
+/// Keep the rows of events the bus could not carry whole, and take them out
+/// of the drain's page. The published message holds only a claim-check
+/// reference; these rows hold the bodies that reference stands for, and the
+/// consumer resolves one by `seq`.
+///
+/// Under the ROW's tenant, never the `antares.service` escape: this is the
+/// only UPDATE any internal job issues against the outbox, and the escape is
+/// deliberately absent from the UPDATE policy (0005) because an escaped
+/// UPDATE can move a row into another tenant. The drain reads each row's
+/// tenant off the page it just peeked, so it has the one this needs.
+pub async fn retain(pool: &PgPool, tenant: &TenantId, seqs: &[i64]) -> Result<u64, sqlx::Error> {
+    if seqs.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    crate::store::pg::set_tenant(&mut tx, tenant).await?;
+    let n = sqlx::query(RETAIN_SQL)
+        .bind(seqs)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(n)
+}
+
+/// The whole event behind a claim-check reference. Read under the tenant the
+/// consumer decoded from the message and bound in the statement besides, so a
+/// reference can only ever resolve inside the tenant that wrote it.
+pub async fn event(
+    pool: &PgPool,
+    seq: i64,
+    tenant: &TenantId,
+) -> Result<Option<Value>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::store::pg::set_tenant(&mut tx, tenant).await?;
+    let row = sqlx::query(EVENT_SQL)
+        .bind(seq)
+        .bind(tenant.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(row.map(|r| r.get::<Value, _>(0)))
+}
+
+/// Free retained rows older than `hours`. The window is the consumer's, not
+/// the publisher's: the message is on the bus until every durable has acked
+/// it, and this row has to outlive that. Deleting it early costs the
+/// notification the reference was carrying.
+pub async fn reap_published(pool: &PgPool, hours: i64) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::store::pg::set_service(&mut tx).await?;
+    let n = sqlx::query(REAP_SQL)
+        .bind(hours)
         .execute(&mut *tx)
         .await?
         .rows_affected();

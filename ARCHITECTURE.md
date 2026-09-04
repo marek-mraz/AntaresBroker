@@ -49,7 +49,7 @@ broker nor a storage backend (`antares-api`, `antares-broker`,
 | `antares-bus` | 760 | `ChangeEvent`, the JetStream bus, subjects | decide who consumes |
 | `antares-notifier` | 1 700 | `NotificationSink` (schemes, `parse_endpoint`, `deliver`, `network`) chosen from `SinkRegistry` by endpoint scheme: http (`http.rs`), mqtt behind the feature, delivery policy, `Outbound` | match or store |
 | `antares-api` | 44 500 | the HTTP binding: routers, handlers, negotiation, federation, notification pipeline, snapshots, bounds | own a backend or a transport |
-| `antares-broker` | 3 500 | composition root: env → config, roles, bus wiring (`wiring.rs`), telemetry, shutdown | contain clause logic |
+| `antares-broker` | 3 800 | composition root: env → config, roles, bus wiring (`wiring.rs`), telemetry, shutdown | contain clause logic |
 | `antares-wasm` | 500 | the router under a Service Worker, OPFS-backed file store | diverge from the native router |
 
 ## 3. Module map of `antares-api/src`
@@ -149,7 +149,12 @@ With `ANTARES_BUS=nats` (`broker/src/wiring.rs`): the api role writes an
 outbox row in the same transaction, a drain publishes to the
 `ANTARES_CHANGES` stream with `Nats-Msg-Id` = outbox seq; matcher pods
 consume, subscriptions travel through a KV bucket to every mirror;
-interval firings are claimed through the store so one pod fires.
+interval firings are claimed through the store so one pod fires. A message
+over the 256 KB ceiling carries claim-check references instead of the
+bodies: the drain keeps that outbox row (stamped `published_at`, out of
+later pages) and the matcher reads the whole event back by its seq, because
+the store's current row is the after-image and holds no before-image to
+diff against. The maintenance pass frees stamped rows 24 hours on.
 
 ## 6. Storage
 
