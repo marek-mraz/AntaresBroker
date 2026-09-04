@@ -308,6 +308,225 @@ What the run says:
   path components, so a later run carries a broker CPU column for every
   stage; the rows above are left as they were measured.
 
+## How each measurement works
+
+No rig script is a unit test. Every one starts a real broker, drives it
+over HTTP, and folds what came back into one Markdown table. The pieces
+are the same in all of them:
+
+```text
+  dev/perf/<script>.sh
+        │
+        ├── starts ──► antares  (release binary, one store)  :9090
+        │                 │
+        │                 └── store: memory | file | postgres (docker)
+        │
+        ├── drives ───► k6 (a dev/perf/k6-*.js scenario)  or  python3
+        │                 └── constant-arrival-rate: offered load, not
+        │                     closed-loop, so a slow broker shows up as a
+        │                     growing queue instead of a slower client
+        │
+        ├── receives ─► dev/perf/sink.py  :9800
+        │                 ├── POST /…      one notification, counted
+        │                 └── GET  /csr/k  one forwarded query, answered []
+        │
+        └── samples ──► dev/perf/rss.sh    1 Hz → rss.csv
+                          reads /proc for broker, Postgres, k6, sink, host
+```
+
+`$OUT/phase` is the thread that ties them together: each script writes the
+stage name into it before it starts, and `rss.sh` copies that string into
+every sample it takes, so any row of `rss.csv` can be attributed to the
+stage that caused it.
+
+### `startup.sh` — how long a cold broker takes to answer
+
+Runs the binary, polls `GET /q/health` until the first `200`, records the
+elapsed time and reads `VmRSS` out of `/proc/<pid>/status` immediately
+after. Five times per store, median reported. Nothing else is running, so
+the number is the process itself: binary load, config parse, store open,
+listener bind.
+
+### `shapes.sh` — throughput per request shape
+
+Starts one broker, seeds 100 five-attribute entities through the API, then
+runs `k6-shapes.js` closed-loop at a fixed number of clients: a list query
+at 50 and 200, a single retrieve at 50. Three runs of five seconds, median
+reported, p99 from the same runs. Closed-loop on purpose — this table
+answers "how fast is one shape", not "where does it break".
+
+### `core-scale.sh` — does the broker use the cores it is given?
+
+Pins the broker to 1, 2, 4 and 8 physical cores with `taskset` (SMT
+siblings excluded) and keeps k6 on the cores left over, refusing any step
+where the two would share one. The in-memory store on purpose: the
+question is whether the broker's own work parallelises, so nothing waits
+on a database.
+
+### `saturate.sh` — where the knee is
+
+Open model. `k6-saturate.js` raises the arrival rate by 500 rps every
+stage and keeps going until p99 passes `P99_MS` or the error rate passes
+`ERR`. The knee is the last stage that held both. A run that never fails a
+stage reports `none reached`, which means the ladder is shorter than the
+box — the answer is more stages, not a bigger conclusion.
+
+### `load.sh` — building the dataset
+
+The only stage that does not go through k6:
+
+```text
+load.sh
+  ├─ sink.py 9800 8        one front door, eight worker processes behind it
+  │                        (one CPython process tops out near 5 000 req/s)
+  ├─ gen.py | bulk-load.sh entities, one COPY stream straight into Postgres,
+  │                        bypassing the broker: no notifications, no history
+  ├─ api-load.py subscriptions   through the API, eight filter classes
+  └─ api-load.py registrations   through the API, eight CSR classes
+```
+
+Entities bypass the broker because a hundred million of them through the
+API would measure the loader. Subscriptions and registrations do not: they
+have to pass validation and land in the matcher's index, which is what the
+later stages exercise.
+
+### `fire.sh` — do the subscriptions fire, and up to what rate
+
+```text
+k6-fire.js                broker :9090                    sink.py :9800
+    │                          │                                 │
+    │ PATCH …/attrs (update)   │                                 │
+    │ DELETE …/entities/{id}   │                                 │
+    ├─────────────────────────►│                                 │
+    │              204         │ 1. write the change              │
+    │◄─────────────────────────┤ 2. match it against this         │
+    │                          │    tenant's subscriptions        │
+    │                          │ 3. queue it (changeQueue, 1024)  │
+    │                          │ 4. deliver, deliveryWidth (64)   │
+    │                          │    in flight, 8 per tenant       │
+    │                          │                                  │
+    │                          │  POST /  {"data": [entity, …]}   │
+    │                          ├─────────────────────────────────►│
+    │                          │                          204     │
+    │                          │◄─────────────────────────────────┤
+    │                          │                                  │
+    └── k6 stops ──────────────┴── fire.sh polls /stats until the │
+                                   count stops moving for 5 s     │
+```
+
+The count due is not measured, it is derived: `k6-fire.js` knows which
+subscription classes each write should trigger and evaluates the same rule
+`api-load.py` used to create them, so `delivered / due` is a real ratio and
+not a guess. `quiet after` is how long the sink kept receiving once the
+stream stopped — the drain. `dropped by broker` comes from the broker's own
+`changesDropped` counter, read from `/q/health` before and after, so a
+delivery gap can be charged to the queue, to the delivery policy or to the
+receiver rather than left ambiguous.
+
+The limit is the last rate that delivered 99 % with no failed operation,
+and the ladder stops at the first rate that misses it.
+
+### `fed.sh` — federated queries over the registrations
+
+The registrations point at `sink.py`, which answers every forwarded query
+with an empty array. That is deliberate: an empty answer costs the broker
+the index lookup, the fan-out and the HTTP round trips and nothing else,
+so the row measures the federation machinery rather than a source.
+
+```text
+k6-fed.js                    broker :9090                        sink.py :9800
+    │                             │                                      │
+    │ GET /entities?type=Vehicle  │                                      │
+    │ NGSILD-Tenant: t42          │                                      │
+    ├────────────────────────────►│                                      │
+    │                             │ 1. expand the query against @context │
+    │                             │                                      │
+    │                             │ 2. csource_index lookup (5.12): one  │
+    │                             │    SQL query, narrowing on entity     │
+    │                             │    type and entity id alone. It may  │
+    │                             │    only REMOVE registrations the     │
+    │                             │    matcher would reject anyway, so   │
+    │                             │    a NULL dimension always survives  │
+    │                             │                                      │
+    │                             │ 3. the matcher decides the rest in   │
+    │                             │    Rust: geoQ, scopeQ, csf, the      │
+    │                             │    intervals, the idPattern regex,   │
+    │                             │    the Via chain                     │
+    │                             │                                      │
+    │                             │ 4. fold registrations naming the     │
+    │                             │    same source into one request      │
+    │                             │    (5.2.9: same endpoint, mode,      │
+    │                             │    tenant, alias, headers, localOnly)│
+    │                             │                                      │
+    │                             │ 5. narrow each forward to what its   │
+    │                             │    registration declares (4.3.6.1)   │
+    │                             │                                      │
+    │                             │ 6. fan out, ANTARES_FED_FANOUT (8)   │
+    │                             │    in flight, each bounded by the    │
+    │                             │    registration's timeout            │
+    │                             │                                      │
+    │                             │  GET /csr/17/entities?type=…&attrs=… │
+    │                             │  Via: 1.1 broker-a                   │
+    │                             ├─────────────────────────────────────►│
+    │                             │                        200  []       │
+    │                             │◄─────────────────────────────────────┤
+    │                             │      × N per query (`calls per       │
+    │                             │        query` in the table)          │
+    │                             │                                      │
+    │                             │ 7. book the outcome on each          │
+    │                             │    registration: timesSent,          │
+    │                             │    timesFailed, lastSuccess,         │
+    │                             │    lastFailure, status               │
+    │                             │    (Table 5.2.9-2)                   │
+    │                             │                                      │
+    │                             │ 8. merge the halves (4.5.5),         │
+    │                             │    paginate, answer                  │
+    │       200 + entity list     │                                      │
+    │◄────────────────────────────┤                                      │
+```
+
+`calls per query` is the number that matters: it is the fan-out the
+registry narrowing left behind, and it multiplies everything downstream. A
+query that reaches 34 sources costs 34 HTTP round trips, 34 timeout
+budgets and 34 bookkeeping writes.
+
+Step 7 is where the federated path meets the database, once per source
+call rather than once per query:
+
+```text
+one forwarded request
+      │
+      └─► note_forward (federation.rs)
+             └─► CurrentStateDriver::record_forward
+                    └─► record_forward_via_mutate (antares-store)
+                           └─► PgDocStore::mutate(Kind::Registration)
+                                  ├─ SELECT … FOR UPDATE   the row lock
+                                  ├─ UPDATE csource_registrations
+                                  └─ csource_index: rebuilt only when the
+                                     write moved a member the index is
+                                     built from — the counters are not
+```
+
+The `failed (conn/4xx/5xx)` and `with a source warning` columns are split
+because they are different faults: a failed query is the broker not
+answering, while a warning is the broker answering after a source did not
+(6.3.17), which is the documented outcome and not an error.
+
+### `rss.sh` — the CPU and memory column on every other table
+
+One background sampler for the whole run. It resolves the broker by the
+last two components of its `argv[0]`, the Postgres container by name, and
+k6, the sink and mosquitto by their own names, then writes RSS and CPU for
+each at 1 Hz along with whole-host busy cores. Every `fire.md` and `fed.md`
+row folds the samples that fall inside its own window, which is why a
+saturation claim can be checked against the phase that made it.
+
+### `report.py` — the artefacts
+
+Folds every table into `index.html`, `perf.json` and `report.pdf`, next to
+the raw CSVs, so a later run can be diffed against this one without
+rerunning anything.
+
 ## Measuring delivery without the rented runner
 
 `fire.sh` needs k6, so until now the notification pipeline could only be
