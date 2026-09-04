@@ -889,6 +889,15 @@ async fn run(
             "residentBytes": stats::resident::read().unwrap_or(0),
         })
     }));
+    // 5.8.1.4 consumer half, whichever bus carries the delivery. A
+    // distributed Subscription is served by an internal Context Source
+    // Registration Subscription that notifies to `urn:antares:distsub:…`,
+    // and the delivery path drops that notification unless this handler is
+    // installed — the Subscription is accepted and no copy is ever
+    // forwarded. `antares_api::wire` installs it with the in-process
+    // matcher; the role-split fleet wires its matcher through `wire_nats`
+    // and needs it installed here.
+    antares_api::install_csource_notification(&mut state);
     if bus_mode == "nats" {
         // Outbox producer + drain, KV/registry mirrors, durable
         // consumers per role, topology asserted before traffic.

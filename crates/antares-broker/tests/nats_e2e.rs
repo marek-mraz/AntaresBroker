@@ -1138,3 +1138,80 @@ fn cooldown_stamp_is_shared_across_api_pods() {
          stamp stayed per-process"
     );
 }
+
+/// 5.8.1.4: a distributed Subscription forwards a reduced copy to every
+/// Context Source Registration that matches it. The forward is not done by
+/// the create handler — that creates an internal Context Source
+/// Registration Subscription whose endpoint is `urn:antares:distsub:…`, and
+/// the copy is sent when THAT notification is delivered to the consumer
+/// handler. The handler is installed on the state, so a root that wires its
+/// matcher without installing it accepts the Subscription and forwards
+/// nothing, silently and forever.
+#[test]
+fn a_distributed_subscription_forwards_its_copy_under_the_split_fleet() {
+    let _serial = serial();
+    let (Ok(db), Ok(nats)) = (
+        std::env::var("ANTARES_TEST_DATABASE_URL"),
+        std::env::var("ANTARES_TEST_NATS_URL"),
+    ) else {
+        eprintln!("SKIP: ANTARES_TEST_DATABASE_URL / ANTARES_TEST_NATS_URL not set");
+        return;
+    };
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let tenant = format!("dsf{run}");
+
+    let api_port = free_port();
+    let worker_port = free_port();
+    let _api = start(api_port, "api", &db, &nats);
+    let _worker = start(worker_port, "matcher,notifier,temporal", &db, &nats);
+    wait_healthy(api_port);
+    wait_healthy(worker_port);
+
+    // The Context Source: it records the forwarded subscription create.
+    let (src_port, seen) = receiver();
+
+    // operations absent = federationOps (5.2.9), which carries createSubscription
+    let reg = format!(
+        r#"{{"id":"urn:ngsi-ld:ContextSourceRegistration:dsf:{run}",
+            "type":"ContextSourceRegistration",
+            "information":[{{"entities":[{{"type":"DistFwd"}}]}}],
+            "endpoint":"http://127.0.0.1:{src_port}"}}"#
+    );
+    let r = http(
+        api_port,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations/",
+        Some(&tenant),
+        Some(&reg),
+    );
+    assert!(r.starts_with("HTTP/1.1 201"), "registration create: {r}");
+
+    let sub = format!(
+        r#"{{"id":"urn:ngsi-ld:Subscription:dsf:{run}","type":"Subscription",
+            "entities":[{{"type":"DistFwd"}}],
+            "notification":{{"endpoint":{{"uri":"http://127.0.0.1:{src_port}/notify"}}}}}}"#
+    );
+    let r = http(
+        api_port,
+        "POST",
+        "/ngsi-ld/v1/subscriptions/",
+        Some(&tenant),
+        Some(&sub),
+    );
+    assert!(r.starts_with("HTTP/1.1 201"), "subscription create: {r}");
+
+    // The reduced copy is a POST to the source's own subscriptions endpoint.
+    wait_for(
+        "the forwarded subscription copy to reach the source",
+        30,
+        || {
+            seen.lock()
+                .expect("sink")
+                .iter()
+                .any(|b| b.starts_with("POST ") && b.contains("/subscriptions"))
+        },
+    );
+}

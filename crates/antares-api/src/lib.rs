@@ -255,6 +255,15 @@ impl ApiSurface for Admin {
 /// never names it. Every root that serves requests calls this once.
 pub async fn wire(state: &mut AppState) {
     notify::wire_matcher(state).await;
+    install_csource_notification(state);
+}
+
+/// The 5.8.1.4 consumer half on its own, for a root that wires its matcher
+/// some other way. A distributed Subscription forwards no copy until this
+/// handler exists: the internal Context Source Registration Subscription
+/// notifies to `urn:antares:distsub:…`, and the delivery path drops that
+/// notification when nothing is installed to take it.
+pub fn install_csource_notification(state: &mut AppState) {
     state.csource_notification = Some(std::sync::Arc::new(|st, tenant, own_id, reason, regs| {
         Box::pin(distsub::on_csource_notification(
             st, tenant, own_id, reason, regs,

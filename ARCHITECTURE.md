@@ -239,10 +239,14 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   crates that own them. The one call that pointed back up the pipeline —
   the delivery path handing a notification on the internal endpoint to
   `distsub` — is a seam: `AppState::csource_notification`, installed by
-  `antares_api::wire`, absent and therefore dropped on a state nobody
-  wired. `cargo modules`
-  does not show such a cycle because it records call edges and not field
-  types, so the source-level count is the one to measure: `dev/module-graph.py` prints
+  `antares_api::install_csource_notification`, absent and therefore dropped
+  on a state nobody wired. Every root installs it, and the broker does so
+  above its bus branch rather than inside one: `antares_api::wire` carries
+  the in-process matcher, the role-split fleet wires its matcher through
+  `wiring::wire_nats`, and a handler installed in only one of them leaves
+  the other accepting distributed Subscriptions that forward no copy.
+  `cargo modules` does not show such a cycle because it records call edges
+  and not field types, so the source-level count is the one to measure: `dev/module-graph.py` prints
   it per crate and `xray.yml` ratchets the largest component of every
   crate against `dev/module-baseline.json` (`antares-jsonld` holds a
   second one, `context` ↔ `loader`, of two).
