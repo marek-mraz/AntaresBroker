@@ -78,7 +78,13 @@ case "${1:-}" in
           'function d(x, y) { return x > y ? x - y : 0 } BEGIN { dt = t1 - t0; if (dt <= 0) dt = 1; printf "%.1f %.1f\n", d(bj,bj0)*100/tick/dt, d(pj,pj0)*100/tick/dt }')
         hc=$(awk -v hb="$hb" -v hb0="$hb0" -v ht="$ht" -v ht0="$ht0" -v cores="$cores" \
           'BEGIN { d = ht - ht0; if (d <= 0) d = 1; printf "%.2f", (hb - hb0) / d * cores }')
-        echo "$(date +%s),$b,$p,$bc,$pc,$hc,$cores,$k,$kc,$sk,$sc,$mk,$mc,$(cat "$OUT/phase" 2>/dev/null | tr -d ',\n')" >> "$CSV"
+        # The first pass has no earlier reading to difference against: every
+        # counter starts at 0, so its deltas are the whole since-boot total
+        # over a near-zero wall delta (a 34-core Postgres on an 8-core box).
+        # It primes the baselines and writes nothing.
+        if [ "$n" -gt 0 ]; then
+          echo "$(date +%s),$b,$p,$bc,$pc,$hc,$cores,$k,$kc,$sk,$sc,$mk,$mc,$(cat "$OUT/phase" 2>/dev/null | tr -d ',\n')" >> "$CSV"
+        fi
         bj0=$bj; pj0=$pj; t0=$t1; hb0=$hb; ht0=$ht; kj0=$kj; sj0=$sj; mj0=$mj
         n=$((n + 1))
         if [ -n "${METRICS_URL:-}" ] && [ $((n % 15)) -eq 1 ]; then
