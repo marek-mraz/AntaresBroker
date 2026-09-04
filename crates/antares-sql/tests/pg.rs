@@ -684,3 +684,113 @@ async fn an_internal_tenant_holds_a_row_and_is_left_out_of_the_inventory() {
         "the copy survived its teardown"
     );
 }
+
+/// A repeat write must not rewrite the Tenant row. `claim_tenant` runs in
+/// every document transaction, so an upsert that takes the exclusive row lock
+/// serialises every write in a Tenant behind every other and leaves one dead
+/// tuple per write on a table with one row per Tenant. The lock the purge
+/// waits on is still taken; only the row version is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeat_write_does_not_rewrite_the_tenant_row() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect+migrate");
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let t = TenantId::new(&format!("pgclaim{run}")).expect("tenant");
+
+    let xmin = |pool: sqlx::PgPool, t: TenantId| async move {
+        sqlx::query("SELECT xmin::text AS x FROM tenants WHERE tenant_id = $1")
+            .bind(t.as_str())
+            .fetch_one(&pool)
+            .await
+            .expect("xmin")
+            .get::<String, _>("x")
+    };
+    let claim = |pool: sqlx::PgPool, t: TenantId| async move {
+        let mut tx = pool.begin().await.expect("begin");
+        pg::set_tenant(&mut tx, &t).await.expect("set_tenant");
+        pg::claim_tenant(&mut tx, &t).await.expect("claim");
+        tx.commit().await.expect("commit");
+    };
+
+    claim(pool.clone(), t.clone()).await;
+    let first = xmin(pool.clone(), t.clone()).await;
+    claim(pool.clone(), t.clone()).await;
+    let second = xmin(pool.clone(), t.clone()).await;
+    assert_eq!(
+        first, second,
+        "the second write rewrote the tenant row (xmin moved), so every write \
+         in this tenant takes the exclusive row lock"
+    );
+
+    sqlx::query("DELETE FROM tenants WHERE tenant_id = $1")
+        .bind(t.as_str())
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+/// The invariant the row lock exists for: a purge must wait for a write that
+/// is already in flight in the same Tenant, so it cannot step over it and
+/// leave rows behind for a Tenant the inventory no longer names. The write
+/// holds a shared lock, the purge asks for `FOR UPDATE`, and the two
+/// conflict — proven here by giving the purge a deadline it must miss.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_purge_waits_for_an_in_flight_write_in_the_same_tenant() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect+migrate");
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let t = TenantId::new(&format!("pgrace{run}")).expect("tenant");
+
+    // the tenant exists before the race, so the purge has a row to lock
+    let mut seed = pool.begin().await.expect("begin");
+    pg::set_tenant(&mut seed, &t).await.expect("set_tenant");
+    pg::claim_tenant(&mut seed, &t).await.expect("claim");
+    seed.commit().await.expect("commit");
+
+    // a write in flight: claimed, not yet committed
+    let mut writing = pool.begin().await.expect("begin");
+    pg::set_tenant(&mut writing, &t).await.expect("set_tenant");
+    pg::claim_tenant(&mut writing, &t).await.expect("claim");
+
+    let mut purge = pool.begin().await.expect("begin");
+    sqlx::query("SET LOCAL lock_timeout = '750ms'")
+        .execute(&mut *purge)
+        .await
+        .expect("lock_timeout");
+    pg::set_tenant(&mut purge, &t).await.expect("set_tenant");
+    let blocked =
+        sqlx::query_scalar::<_, i32>("SELECT 1 FROM tenants WHERE tenant_id = $1 FOR UPDATE")
+            .bind(t.as_str())
+            .fetch_optional(&mut *purge)
+            .await;
+    assert!(
+        blocked.is_err(),
+        "the purge took the tenant row while a write held it, so it can step \
+         over an in-flight write"
+    );
+    drop(purge);
+
+    // once the write commits the purge gets the row
+    writing.commit().await.expect("commit");
+    let mut after = pool.begin().await.expect("begin");
+    pg::set_tenant(&mut after, &t).await.expect("set_tenant");
+    let got = sqlx::query_scalar::<_, i32>("SELECT 1 FROM tenants WHERE tenant_id = $1 FOR UPDATE")
+        .bind(t.as_str())
+        .fetch_optional(&mut *after)
+        .await
+        .expect("after the write commits the purge proceeds");
+    assert_eq!(got, Some(1));
+    after.commit().await.expect("commit");
+
+    sqlx::query("DELETE FROM tenants WHERE tenant_id = $1")
+        .bind(t.as_str())
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
