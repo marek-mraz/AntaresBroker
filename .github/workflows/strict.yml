@@ -141,7 +141,7 @@ jobs:
           rc=0
           cargo llvm-cov --locked --workspace --lib --bins --summary-only \
             --ignore-filename-regex 'antares-store/src/contract\.rs|antares-sql/src/store/pg/' \
-            --fail-under-lines 78 --fail-under-functions 76 > unit-cov.txt || rc=$?
+            --fail-under-lines 82 --fail-under-functions 79 > unit-cov.txt || rc=$?
           { echo "### Coverage floor — unit (lib + bins)"; echo '```'
             cat unit-cov.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           cargo llvm-cov report --lcov --output-path unit.lcov || true
@@ -156,7 +156,7 @@ jobs:
           rc=0
           cargo llvm-cov --locked -p antares-api -p antares-broker \
             -p antares-bus -p antares-sql --test '*' --summary-only \
-            --fail-under-lines 77 --fail-under-functions 76 > api-cov.txt || rc=$?
+            --fail-under-lines 78 --fail-under-functions 77 > api-cov.txt || rc=$?
           { echo "### Coverage floor — api (integration binaries)"; echo '```'
             cat api-cov.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           cargo llvm-cov report --lcov --output-path api.lcov || true
