@@ -348,6 +348,30 @@ shape at 1 000 changes per second, widths of 8, 64, 256 and 1 024 deliver
 change: the offered load is absorbed whole at every width, so the knob
 has nothing to arbitrate.
 
+The same ladder against PostgreSQL, which is what a deployment runs
+(`synchronous_commit=off`, 1 GiB of shared buffers, a pool of 50, the
+database sharing the box with the broker, the harness and the sink):
+
+| offered changes/s | achieved | matches/s | broker cores | changes dropped |
+|---|---|---|---|---|
+| 500 | 500 | 3 051 | 0.75 | 0 |
+| 1 000 | 1 000 | 6 062 | 1.25 | 0 |
+| 2 000 | 1 671 | 10 108 | 1.39 | 0 |
+| 4 000 | 1 140 | 6 927 | 1.26 | 0 |
+
+A change costs an entity update and a temporal-history insert here rather
+than a map write, so the knee arrives near 1 671 changes per second
+against the memory store's 7 800. Two things about that knee matter more
+than its position. The broker holds 1.39 cores at it while PostgreSQL
+holds 2.29 on average and peaks at 4.12, so the broker is not the
+component that runs out — which is why a criterion written as broker core
+utilization at saturation cannot be met on a rig that shares one box.
+And goodput goes backwards past the knee: offering 4 000 changes per
+second delivers less than offering 2 000, with broker CPU falling as it
+does, because nothing sheds write load before it drives the database past
+what it can commit. Neither is a property of the delivery path; both are
+the write path underneath it.
+
 ## Setting up the rented runner (two repository secrets)
 
 `perf-weekly` and `scale-weekly` rent a Hetzner Cloud server for the run

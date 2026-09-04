@@ -288,6 +288,15 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   nothing to arbitrate while the offered load is absorbed whole. Matching
   is still sequential on the single drain task above, which is where the
   next lever sits if a deployment ever offers more than this harness can.
+- Goodput goes backwards past the write knee, and nothing sheds load
+  before it. Against PostgreSQL the same ladder that delivers 1 671
+  changes per second when offered 2 000 delivers 1 140 when offered
+  4 000, with broker CPU falling from 1.39 cores to 1.26 as it does: the
+  writers keep arriving, the database is past what it can commit, and the
+  broker is starved rather than busy. The bounded matcher queue protects
+  the notification path, and nothing plays that role for writes. This
+  sits under the delivery path rather than in it — no change to matching
+  or delivery moves it.
 - Per-notification cost is one row update. The Postgres arm writes it as
   a single statement (`pg::doc::record_delivery`), so the row lock is held
   for the statement rather than across a round trip and the Rust closure —
