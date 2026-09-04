@@ -109,6 +109,10 @@ const KNOWN_KEYS: &[&str] = &[
     // Ceiling on concurrently served connections (default 10000);
     // connections accepted above it are dropped immediately.
     "ANTARES_MAX_CONNECTIONS",
+    // 5.8.6 delivery concurrency: notifications in flight at once for the
+    // whole broker, and the share of that width one tenant may hold.
+    "ANTARES_DELIVERY_WIDTH",
+    "ANTARES_DELIVERY_WIDTH_PER_TENANT",
     // 5.7.2.4 fan-out ceiling: how many matching registrations one
     // distributed operation may contact.
     "ANTARES_FED_FANOUT",

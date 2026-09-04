@@ -1036,7 +1036,7 @@ pub(crate) async fn process_changes(st: &AppState, changes: Vec<Change>) {
     {
         use futures_util::StreamExt;
         futures_util::stream::iter(groups)
-            .for_each_concurrent(DELIVERY_WIDTH, |g| async move {
+            .for_each_concurrent(*DELIVERY_WIDTH, |g| async move {
                 deliver(st, &g.tenant, &g.sub, g.data, &g.ctx).await;
             })
             .await;
@@ -1054,7 +1054,8 @@ fn note_drop() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-static DELIVERY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(DELIVERY_WIDTH);
+static DELIVERY_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(*DELIVERY_WIDTH));
 
 #[cfg(not(target_arch = "wasm32"))]
 type TenantSlots = std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Semaphore>>>;
@@ -1076,7 +1077,7 @@ fn tenant_slots(tenant: &TenantId) -> Arc<tokio::sync::Semaphore> {
         return Arc::clone(s);
     }
     map.retain(|_, s| Arc::strong_count(s) > 1);
-    let slots = Arc::new(tokio::sync::Semaphore::new(DELIVERY_WIDTH_PER_TENANT));
+    let slots = Arc::new(tokio::sync::Semaphore::new(*DELIVERY_WIDTH_PER_TENANT));
     map.insert(tenant.as_str().to_owned(), Arc::clone(&slots));
     slots
 }
@@ -5080,7 +5081,7 @@ mod delivery_share {
             .expect("seed entity");
         // more subscriptions than the whole width, so an unbounded tenant
         // would hold every slot
-        let subs = DELIVERY_WIDTH + DELIVERY_WIDTH_PER_TENANT;
+        let subs = *DELIVERY_WIDTH + *DELIVERY_WIDTH_PER_TENANT;
         for i in 0..subs {
             let id = format!("urn:ngsi-ld:Subscription:share-{i}");
             st.store
@@ -5115,8 +5116,9 @@ mod delivery_share {
         sweep.abort();
         assert!(in_flight > 0, "the sweep delivered nothing at all");
         assert!(
-            in_flight <= DELIVERY_WIDTH_PER_TENANT,
-            "one tenant held {in_flight} of the {DELIVERY_WIDTH} delivery slots"
+            in_flight <= *DELIVERY_WIDTH_PER_TENANT,
+            "one tenant held {in_flight} of the {} delivery slots",
+            *DELIVERY_WIDTH
         );
     }
 }

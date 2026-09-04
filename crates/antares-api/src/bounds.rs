@@ -151,7 +151,19 @@ pub static MAX_FOLD_DOCS: std::sync::LazyLock<usize> = std::sync::LazyLock::new(
 pub const CHANGE_QUEUE: usize = 1024;
 /// Notifications in flight at once per drain: one serial POST at a time
 /// capped a 9-subscription fan-out at ~600 POST/s and overflowed the ring.
-pub const DELIVERY_WIDTH: usize = 64;
+/// Deployment knob (ANTARES_DELIVERY_WIDTH): what a width is worth is a
+/// property of the subscribers, not of this broker — a slot is held for as
+/// long as the endpoint takes to answer, so a fleet of local sinks and a
+/// fleet of remote endpoints sitting at their 30 s timeout (Table 5.2.15-1)
+/// are served by different numbers, and the one that fits is measured
+/// against a deployment rather than compiled in. Read once at first use.
+pub static DELIVERY_WIDTH: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    count_from(
+        std::env::var("ANTARES_DELIVERY_WIDTH").ok().as_deref(),
+        64,
+        usize::MAX,
+    )
+});
 /// Of that width, what one tenant may hold. A Subscription belongs to one
 /// tenant (5.2.12), and a delivery to an endpoint that accepts and never
 /// answers holds its slot for the endpoint's whole timeout — up to 30 s
@@ -161,7 +173,30 @@ pub const DELIVERY_WIDTH: usize = 64;
 /// fair split of it: a tenant delivering alone still gets several slots, and
 /// eight of them is what a full width of 64 divides into before the
 /// per-tenant queue becomes the bottleneck for an ordinary fan-out.
-pub const DELIVERY_WIDTH_PER_TENANT: usize = 8;
+/// Deployment knob (ANTARES_DELIVERY_WIDTH_PER_TENANT), ceilinged at the
+/// width above: a share larger than the width is not a share, and
+/// publishing one would name a ceiling that can never fire. Read once at
+/// first use.
+pub static DELIVERY_WIDTH_PER_TENANT: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    count_from(
+        std::env::var("ANTARES_DELIVERY_WIDTH_PER_TENANT")
+            .ok()
+            .as_deref(),
+        8,
+        *DELIVERY_WIDTH,
+    )
+});
+
+/// One configured count: the default stands in for anything unset,
+/// unparseable or zero — a zero would mint a semaphore that admits nobody
+/// and stop delivery altogether — and the ceiling bounds what a deployment
+/// can ask for where a larger number would be meaningless.
+fn count_from(raw: Option<&str>, default: usize, ceiling: usize) -> usize {
+    raw.and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+        .min(ceiling)
+}
 /// Destinations and registrations the egress breaker tracks. Both maps are
 /// keyed by client-supplied strings, so they need a bound: at the ceiling the
 /// least recently recorded entry is dropped, which costs at most a forgotten
@@ -198,8 +233,8 @@ impl LimitStats {
             "maxRegexCacheBytes": MAX_REGEX_CACHE_BYTES,
             "maxRegexProgramBytes": MAX_REGEX_PROGRAM_BYTES,
             "changeQueue": CHANGE_QUEUE,
-            "deliveryWidth": DELIVERY_WIDTH,
-            "deliveryWidthPerTenant": DELIVERY_WIDTH_PER_TENANT,
+            "deliveryWidth": *DELIVERY_WIDTH,
+            "deliveryWidthPerTenant": *DELIVERY_WIDTH_PER_TENANT,
             "maxTrackedDestinations": MAX_TRACKED_DESTINATIONS,
             "rejectedUriTooLong": self.uri_too_long.load(Ordering::Relaxed),
             "rejectedBodyTooLarge": self.body_too_large.load(Ordering::Relaxed),
@@ -619,6 +654,49 @@ mod tests {
             missing.is_empty(),
             "caps declared here and absent from /q/health: {missing:?}"
         );
+    }
+
+    /// A configured count is read once and never re-read, so a value that
+    /// would stop delivery has no second chance to be corrected: zero mints
+    /// a semaphore that admits nobody, and a per-tenant share above the
+    /// width names a ceiling that can never fire. Both fall back rather
+    /// than take the number as given.
+    #[test]
+    fn a_configured_count_falls_back_rather_than_disabling_delivery() {
+        assert_eq!(count_from(None, 64, usize::MAX), 64, "unset is the default");
+        assert_eq!(count_from(Some("weeks"), 64, usize::MAX), 64);
+        assert_eq!(count_from(Some(""), 64, usize::MAX), 64);
+        assert_eq!(
+            count_from(Some("0"), 64, usize::MAX),
+            64,
+            "zero would admit nobody"
+        );
+        assert_eq!(count_from(Some("-8"), 64, usize::MAX), 64);
+        assert_eq!(count_from(Some("256"), 64, usize::MAX), 256);
+        assert_eq!(
+            count_from(Some("512"), 8, 64),
+            64,
+            "a share over the width is the width"
+        );
+        assert_eq!(
+            count_from(None, 8, 4),
+            4,
+            "the ceiling binds the default too"
+        );
+    }
+
+    /// A guard on the compiled defaults rather than on the clamp: both
+    /// counts are read once per process, so a test cannot set one without
+    /// racing every other test in the binary for the read. What it holds is
+    /// that the two numbers shipped stay a share and a total, and that
+    /// neither default is ever lowered to zero — which would admit nobody.
+    #[test]
+    fn the_published_tenant_share_fits_inside_the_published_width() {
+        let snap = LimitStats::default().snapshot();
+        let width = snap["deliveryWidth"].as_u64().expect("a number");
+        let share = snap["deliveryWidthPerTenant"].as_u64().expect("a number");
+        assert!(share <= width, "share {share} exceeds width {width}");
+        assert!(width > 0 && share > 0, "neither may be zero");
     }
 
     #[test]

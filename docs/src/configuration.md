@@ -65,6 +65,8 @@ here).
 | `ANTARES_NOTIFY_ATTEMPTS` | `1` | Delivery attempts per notification, first one included. `1` is 5.8.6 as written: one send, the outcome booked. Higher values retry on their own task with exponential backoff; the retries never move `timesSent` again. |
 | `ANTARES_NOTIFY_BACKOFF_MS` | `1000` | Delay before the first retry; doubles per retry (±20 % jitter, 60 s ceiling). |
 | `ANTARES_NOTIFY_MAX_AGE_SECS` | `300` | No retry starts later than this after the first attempt. When the attempts or the age run out the notification becomes a dead letter (`/q/dead-letters`, see [operations](operations.md#notification-delivery)). |
+| `ANTARES_DELIVERY_WIDTH` | `64` | Notifications in flight at once across the whole broker. A slot is held until the endpoint answers, so the number that fits depends on the subscribers: local sinks free a slot in milliseconds, a remote endpoint sitting at its 30 s timeout (Table 5.2.15-1) holds one for the whole timeout. Published as `deliveryWidth` in `/q/health`. |
+| `ANTARES_DELIVERY_WIDTH_PER_TENANT` | `8` | Of that width, what one tenant may hold, capped at the width. Without it a single tenant with enough dead endpoints holds every slot and nothing leaves the broker for anyone else. Published as `deliveryWidthPerTenant`. |
 
 ## Lifecycle & observability
 
