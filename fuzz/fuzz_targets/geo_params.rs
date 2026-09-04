@@ -16,5 +16,5 @@ fuzz_target!(|data: &[u8]| {
     if let Some(v) = parts.next() {
         params.insert("coordinates".into(), v.into());
     }
-    let _ = antares_api::geo::GeoQuery::from_params(&params);
+    let _ = antares_ql::geo::GeoQuery::from_params(&params);
 });

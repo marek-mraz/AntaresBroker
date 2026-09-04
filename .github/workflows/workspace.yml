@@ -143,6 +143,13 @@ jobs:
           SAMPLER=$!
           cargo clippy --locked --workspace --all-targets -- -D warnings
           kill $SAMPLER
+      # `fuzz/` is not a workspace member (its targets need libFuzzer's
+      # sanitizer flags to LINK), so the wall above never looks at it and a
+      # module move can leave it uncompilable until the scheduled fuzz gate
+      # trips weeks later. Type-checking it here costs one pass over already
+      # built dependencies and catches exactly that.
+      - name: The fuzz targets still compile
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
       - run: dev/unit-junit.sh default --workspace
       # nextest cannot execute doctests. They stay gated here (a broken doc
       # example is still a red build) but contribute no JUnit, which the
