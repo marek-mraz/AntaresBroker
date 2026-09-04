@@ -82,7 +82,7 @@ fn expired(meta: &Value) -> bool {
 /// The internal tenant holding the synth-tenant -> (owner, snapshot id)
 /// index docs (durable reverse lookup for 6.3.22 notification stamping).
 fn snap_index_tenant() -> Option<TenantId> {
-    TenantId::new("snap-index").ok()
+    TenantId::new_internal("snap-index").ok()
 }
 
 /// 5.2.41: a Snapshot's type is fixed to "Snapshot". The reverse-index
@@ -127,7 +127,10 @@ async fn snap_insert(
             "snapshot {id} already exists"
         )));
     }
-    // durable reverse index for snapshot_of_synth
+    // Durable reverse index for snapshot_of_synth. The marker carries the
+    // synthetic tenant as its `id` as well as its key: it is the only record
+    // that names that tenant once the Snapshot document is gone, and a
+    // document a listing cannot identify is one nothing can walk.
     if let (Some(synth), Some(idx)) = (
         meta.get("__tenant").and_then(Value::as_str),
         snap_index_tenant(),
@@ -138,7 +141,7 @@ async fn snap_insert(
                 &idx,
                 Kind::Snapshot,
                 synth,
-                json!({"tenant": tenant.as_str(), "snapshot": id}),
+                json!({"id": synth, "tenant": tenant.as_str(), "snapshot": id}),
             )
             .await;
     }
@@ -165,12 +168,6 @@ async fn snap_put(st: &AppState, tenant: &TenantId, meta: Value) {
 /// Remove a snapshot everywhere: doc, synth-tenant index, data purge.
 pub(crate) async fn snap_remove(st: &AppState, tenant: &TenantId, id: &str, meta: &Value) {
     let _ = st.store.delete(tenant, Kind::Snapshot, id).await;
-    if let (Some(synth), Some(idx)) = (
-        meta.get("__tenant").and_then(Value::as_str),
-        snap_index_tenant(),
-    ) {
-        let _ = st.store.delete(&idx, Kind::Snapshot, synth).await;
-    }
     purge_data_bg(st, meta);
 }
 
@@ -204,7 +201,7 @@ pub(crate) async fn sweep_expired_snapshots(st: &AppState, tenant: &TenantId) ->
 fn synth_tenant(meta: &Value) -> Option<TenantId> {
     meta.get("__tenant")
         .and_then(Value::as_str)
-        .and_then(|t| TenantId::new(t).ok())
+        .and_then(|t| TenantId::new_internal(t).ok())
 }
 
 /// Free the snapshot's isolated copy. 5.5.15 permits every Core and
@@ -225,6 +222,12 @@ async fn purge_synth(st: &AppState, synth: &TenantId) {
     let _ = st.store.purge_tenant(synth).await;
 }
 
+/// The teardown that outlives the request: the copy is dropped, and only
+/// then the reverse-index entry that named the synthetic tenant. That order
+/// is the recovery path — the Snapshot document is already gone, so the index
+/// entry is the last thing that says which tenant holds the copy, and a
+/// broker that stops mid-teardown leaves it pointing at data still there
+/// rather than data nothing names.
 fn purge_data_bg(st: &AppState, meta: &Value) {
     let Some(synth) = synth_tenant(meta) else {
         return;
@@ -232,6 +235,9 @@ fn purge_data_bg(st: &AppState, meta: &Value) {
     let st = st.clone();
     crate::spawn(async move {
         purge_synth(&st, &synth).await;
+        if let Some(idx) = snap_index_tenant() {
+            let _ = st.store.delete(&idx, Kind::Snapshot, synth.as_str()).await;
+        }
     });
 }
 
@@ -618,9 +624,6 @@ async fn fill_snapshot(st: &AppState, tenant: &TenantId, id: &str) {
     if fill_cancelled(st, tenant, id, &synth).await {
         return;
     }
-    if copied == 0 {
-        materialize_tenant(st, &synth).await;
-    }
     let status = if n_fail == 0 && n_empty == 0 && n_res > 0 {
         "success"
     } else if n_res > 0 {
@@ -849,22 +852,6 @@ async fn run_temporal_query(
         offset += st.max_limit;
     }
     Ok(n)
-}
-
-/// An empty snapshot still needs its synthetic tenant to exist, or scoped
-/// operations would answer NonexistentTenant instead of empty results.
-async fn materialize_tenant(st: &AppState, synth: &TenantId) {
-    let marker = "urn:antares:snapshot:marker";
-    let _ = st
-        .store
-        .create(
-            synth,
-            Kind::Entity,
-            marker,
-            json!({"id": marker, "type": ["urn:antares:Marker"]}),
-        )
-        .await;
-    let _ = st.store.delete(synth, Kind::Entity, marker).await;
 }
 
 async fn finish(
@@ -1186,7 +1173,6 @@ async fn clone_fill(st: &AppState, tenant: &TenantId, src_id: &str, new_id: &str
         return;
     };
     let mut failed = false;
-    let mut copied = 0usize;
     match st.store.list(&from, Kind::Entity).await {
         Ok(docs) => {
             for doc in docs {
@@ -1198,8 +1184,6 @@ async fn clone_fill(st: &AppState, tenant: &TenantId, src_id: &str, new_id: &str
                         .is_err()
                     {
                         failed = true;
-                    } else {
-                        copied += 1;
                     }
                 }
             }
@@ -1212,8 +1196,6 @@ async fn clone_fill(st: &AppState, tenant: &TenantId, src_id: &str, new_id: &str
                 if let Some(id) = doc.get("id").and_then(Value::as_str) {
                     if st.temporal.create(&to, id, doc.clone()).await.is_err() {
                         failed = true;
-                    } else {
-                        copied += 1;
                     }
                 }
             }
@@ -1222,9 +1204,6 @@ async fn clone_fill(st: &AppState, tenant: &TenantId, src_id: &str, new_id: &str
     }
     if fill_cancelled(st, tenant, new_id, &to).await {
         return;
-    }
-    if copied == 0 {
-        materialize_tenant(st, &to).await;
     }
     finish(
         st,
@@ -1379,7 +1358,7 @@ mod clause_5_16 {
     /// 5.16 with RFC 9110 §9.2.1: reading an expired Snapshot must not
     /// write. The meta row survives the read; the sweep is what frees it,
     /// its reverse-index entry and the synthetic tenant's data.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn an_expired_snapshot_is_refused_by_a_read_that_writes_nothing() {
         let st = state().await;
         let t = TenantId::default();
@@ -1395,7 +1374,7 @@ mod clause_5_16 {
             )
             .await
             .expect("seed");
-        let idx = TenantId::new("snap-index").expect("index tenant");
+        let idx = TenantId::new_internal("snap-index").expect("index tenant");
         st.store
             .create(&idx, Kind::Snapshot, synth, json!({"id": synth}))
             .await
@@ -1420,14 +1399,22 @@ mod clause_5_16 {
                 .is_none(),
             "the sweep left the meta behind"
         );
-        assert!(
-            st.store
+        // The teardown runs behind the sweep: the copy is dropped first and
+        // the entry that names it last, so a broker that stops in the middle
+        // leaves a pointer to data that is still there.
+        for _ in 0..100 {
+            if st
+                .store
                 .get(&idx, Kind::Snapshot, synth)
                 .await
                 .expect("store")
-                .is_none(),
-            "the sweep left the reverse-index entry behind"
-        );
+                .is_none()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the sweep left the reverse-index entry behind");
     }
 
     /// The sweep takes the expiry and nothing else: a live Snapshot and the
@@ -1787,7 +1774,7 @@ mod clause_5_16 {
     async fn clause_5_16_1_4_fill_stops_and_reaps_when_its_snapshot_is_gone() {
         let st = state().await;
         let tenant = TenantId::default();
-        let orphan = TenantId::new("snap-reap-test").expect("tenant");
+        let orphan = TenantId::new_internal("snap-reap-test").expect("tenant");
         let _ = st
             .store
             .create(

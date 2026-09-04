@@ -454,7 +454,9 @@ impl Store {
             .any(|k| Self::map(&inner, *k).contains_key(tenant.as_str()))
     }
 
-    /// Every tenant name, sorted; the default tenant is always present.
+    /// Every tenant name, sorted; the default tenant is always present, and
+    /// the tenants the broker minted for itself are not — `/q/tenants` is the
+    /// inventory of customer accounts, not of the broker's own bookkeeping.
     pub fn tenant_ids(&self) -> Vec<String> {
         let inner = self
             .inner
@@ -463,7 +465,12 @@ impl Store {
         let mut names: std::collections::BTreeSet<String> =
             std::iter::once(TenantId::DEFAULT.to_string()).collect();
         for kind in ALL_KINDS {
-            names.extend(Self::map(&inner, kind).keys().cloned());
+            names.extend(
+                Self::map(&inner, kind)
+                    .keys()
+                    .filter(|t| !TenantId::is_reserved_str(t))
+                    .cloned(),
+            );
         }
         names.into_iter().collect()
     }

@@ -954,6 +954,14 @@ impl AnyStore {
 
     /// 5.5.10: does the Tenant exist? The default Tenant "implicitly exists";
     /// others exist once implicitly created by a create operation.
+    ///
+    /// It answers for CLIENT tenants. A tenant the broker minted for itself is
+    /// not in the inventory (`claim_tenant` refuses to put it there), and
+    /// nothing asks this about one: the wall that asks sits outside the 6.3.22
+    /// snapshot scoping and reads the header the caller sent, which may not
+    /// name an internal tenant at all. What a Snapshot's synthetic tenant
+    /// holds is asserted by the Snapshot document, not by a row in the
+    /// customer-account table.
     pub async fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
         if tenant.as_str() == TenantId::DEFAULT {
             return Ok(true);
@@ -991,6 +999,10 @@ impl AnyStore {
                             .fetch_all(p.docs.pool())
                             .await
                             .map_err(db)?;
+                    // Rows written before internal tenants stopped claiming
+                    // one are still there; the inventory is what the operator
+                    // reads, so it is filtered on the way out as well.
+                    rows.retain(|t| !TenantId::is_reserved_str(t));
                     // 5.5.10: the default Tenant implicitly exists, whether or
                     // not a row was ever written for it.
                     if !rows.iter().any(|t| t == TenantId::DEFAULT) {

@@ -538,11 +538,14 @@ fn apply_delta(mirror: &dyn antares_api::mirror::Mirror, delta: &serde_json::Val
         return;
     };
     // Hydration validates the tenant before it touches the mirror; the delta
-    // path must agree. A tenant name no request could carry (the header is
-    // validated to the same character set) can only add entries that no
-    // lookup will ever hit, so an unvalidated one is unbounded growth keyed
-    // by whatever reached the bus.
-    if TenantId::new(tenant).is_err() {
+    // path must agree. A name outside the grammar can only add entries that no
+    // lookup will ever hit, so an unvalidated one is unbounded growth keyed by
+    // whatever reached the bus. The grammar is the whole check here: what
+    // arrives is a tenant a peer broker wrote, and a write inside a Snapshot
+    // (5.5.15) carries the synthetic tenant a client may not name — refusing
+    // that one would drop the mirror delta the snapshot-scoped subscription
+    // matches on.
+    if TenantId::new_internal(tenant).is_err() {
         return;
     }
     let doc = delta.get("doc").filter(|d| !d.is_null()).cloned();

@@ -194,7 +194,7 @@ impl NatsBus {
         tenant: &str,
         delta: &serde_json::Value,
     ) -> Result<(), BusError> {
-        let tenant = antares_model::TenantId::new(tenant).map_err(err)?;
+        let tenant = antares_model::TenantId::new_internal(tenant).map_err(err)?;
         let bytes = serde_json::to_vec(delta).map_err(err)?;
         self.js
             .publish(subjects::registry_subject(&tenant), bytes.into())

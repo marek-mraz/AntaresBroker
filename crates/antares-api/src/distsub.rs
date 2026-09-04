@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 
 fn ds_index_tenant() -> Option<TenantId> {
-    TenantId::new("distsub-index").ok()
+    TenantId::new_internal("distsub-index").ok()
 }
 
 async fn ds_get(st: &AppState, tenant: &TenantId, own_id: &str) -> Value {
@@ -886,7 +886,8 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
             "no distributed subscription maps {sid}"
         ))));
     };
-    let tenant = TenantId::new(&tenant)
+    // read back from the broker's own inbound index, not from the request
+    let tenant = TenantId::new_internal(&tenant)
         .map_err(|_| NgsiError::InternalError("stored tenant invalid".into()))?;
     let Some(sub) = st
         .store

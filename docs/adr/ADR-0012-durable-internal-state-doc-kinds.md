@@ -27,9 +27,12 @@ vanish, and EntityMap references stop resolving.
    (id = remote subscriptionId), and snapshot frozen data keeps its
    synthetic `snap-<uuid>` tenants (established with the Snapshot API).
    No HTTP route serves `Kind::DistSub` docs, so the reserved tenant is
-   not readable from the API; a real tenant literally named
-   `distsub-index` would share the namespace of that one unexposed kind —
-   accepted, documented here, not policed.
+   not readable from the API, and the reserved names are policed: they are
+   declared on `TenantId` (`RESERVED_PREFIXES`, `RESERVED_EXACT`) and the
+   constructor a client's tenant name goes through refuses them, so no
+   request can share the namespace the broker keeps this state in. The
+   broker's own paths — and decoding a Tenant this broker wrote — use
+   `TenantId::new_internal`, which checks the grammar and nothing else.
 
 ## Consequences
 
@@ -50,6 +53,14 @@ vanish, and EntityMap references stop resolving.
   under `distSubs`.
 - `tenant_exists` counts the new kinds, so a tenant that only owns an
   EntityMap or snapshot still passes the 5.5.10 gate after a restart.
+- A reserved tenant is not an account, and `GET /q/tenants` — the operator's
+  inventory — leaves it out on both store arms. The row itself stays: on
+  Postgres the `tenants` table is also the broker's tenant enumeration
+  (`subscription_tenants` reads it, because `subscriptions` is outside the
+  `antares.service` escape), and the mirror seed and the notification sweep
+  walk what it answers, so a Snapshot-scoped Subscription whose tenant lost
+  its row would stop being notified after a restart. The read is what
+  filters, not the write.
 
 ## Confirmation
 

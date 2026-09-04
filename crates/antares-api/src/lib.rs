@@ -272,6 +272,11 @@ pub async fn wire(state: &mut AppState) {
 /// Opportunistic by construction: a driver that cannot enumerate its
 /// tenants reaps nothing and the reads keep hiding what is left, and a
 /// tenant whose walk fails is skipped rather than failing the tick.
+///
+/// The walk is the client tenants. A Snapshot's frozen copy carries its own
+/// expiry on the Snapshot document, and expiring it drops the whole synthetic
+/// tenant (`snap_remove`), so there is nothing left inside for a per-document
+/// reaper to find.
 pub async fn sweep_expired_docs(st: &AppState) -> usize {
     let Ok(tenants) = st.store.tenant_ids().await else {
         return 0;
@@ -584,12 +589,11 @@ fn cors_layer() -> Option<tower_http::cors::CorsLayer> {
 /// internal and per-snapshot tenants share a prefix, the distributed
 /// subscription inbound index is a single fixed name. A client-supplied
 /// tenant may not name any of them — it would put request-shaped writes in
-/// the same keyspace the broker keeps its own state in.
-const INTERNAL_TENANT_PREFIX: &str = "snap-";
-const INTERNAL_TENANTS: &[&str] = &["distsub-index"];
-
+/// the same keyspace the broker keeps its own state in. The names live on
+/// `TenantId`, where the constructor a client's name goes through refuses
+/// them; the admin surfaces below ask by name, before any parse.
 fn reserved_tenant(raw: &str) -> bool {
-    raw.starts_with(INTERNAL_TENANT_PREFIX) || INTERNAL_TENANTS.contains(&raw)
+    TenantId::is_reserved_str(raw)
 }
 
 /// 5.5.10 Multi-Tenant Behaviour: Tenants are created implicitly by create
@@ -3017,7 +3021,7 @@ mod tests {
     async fn internal_tenant_namespace_is_reserved() {
         let state = AppState::new("antares-test".into());
         let app = router(state.clone());
-        let idx = antares_model::TenantId::new("snap-index").expect("tenant");
+        let idx = antares_model::TenantId::new_internal("snap-index").expect("tenant");
 
         // create (implicit tenant creation) must not mint the internal tenant
         let entity = serde_json::json!({"id": "urn:ngsi-ld:B:si", "type": "Building"});
@@ -3043,12 +3047,15 @@ mod tests {
             !state.store.tenant_exists(&idx).await.expect("store"),
             "refused request must not create the internal tenant"
         );
-        assert!(state
-            .store
-            .list(&idx, antares_store::Kind::Entity)
-            .await
-            .expect("store")
-            .is_empty());
+        assert!(
+            state
+                .store
+                .list(&idx, antares_store::Kind::Entity)
+                .await
+                .expect("store")
+                .is_empty(),
+            "refused request must not write into the internal tenant"
+        );
 
         // reads of the index are refused too, whatever the resource
         for path in [

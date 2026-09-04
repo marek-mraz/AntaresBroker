@@ -18,8 +18,53 @@ impl TenantId {
     /// The default tenant name, used when no `NGSILD-Tenant` header is sent.
     pub const DEFAULT: &'static str = "default";
 
-    /// Validates a tenant name: `[A-Za-z0-9_-]{1,64}`, else BadRequestData.
+    /// Tenant names the broker mints for its own bookkeeping: the snapshot
+    /// module's reverse index and one tenant per snapshot share a prefix, the
+    /// distributed-subscription inbound index is a fixed name.
+    pub const RESERVED_PREFIXES: &'static [&'static str] = &["snap-"];
+    /// The reserved names that are not a prefix family.
+    pub const RESERVED_EXACT: &'static [&'static str] = &["distsub-index"];
+
+    /// Whether `raw` names one of the broker's own tenants.
+    ///
+    /// Matched literally, never case-folded: a tenant name is a key in the
+    /// store and the value of `SET LOCAL antares.tenant`, both case-sensitive,
+    /// so `SNAP-index` shares a keyspace with nothing and is an ordinary
+    /// client tenant. A case-insensitive guard would take legal names away
+    /// from clients and protect nothing.
+    pub fn is_reserved_str(raw: &str) -> bool {
+        Self::RESERVED_PREFIXES.iter().any(|p| raw.starts_with(p))
+            || Self::RESERVED_EXACT.contains(&raw)
+    }
+
+    /// Whether this is one of the broker's own tenants rather than a client's.
+    /// Internal tenants stay out of the `tenants` inventory and out of
+    /// `/q/tenants`: that table is the list of customer accounts.
+    pub fn is_internal(&self) -> bool {
+        Self::is_reserved_str(&self.0)
+    }
+
+    /// Validates a CLIENT-supplied tenant name: `[A-Za-z0-9_-]{1,64}` and not
+    /// one the broker minted for itself, else BadRequestData. A request that
+    /// named an internal tenant would put request-shaped documents in the
+    /// keyspace the broker keeps its own state in, and read and delete
+    /// another tenant's snapshot bookkeeping (6.3.14).
     pub fn new(raw: &str) -> Result<Self, NgsiError> {
+        if Self::is_reserved_str(raw) {
+            return Err(NgsiError::BadRequestData(format!(
+                "invalid NGSILD-Tenant value: {raw:?}"
+            )));
+        }
+        Self::new_internal(raw)
+    }
+
+    /// The same grammar without the reserved-name refusal — for the broker's
+    /// own tenants, for the paths that legitimately carry one (the snapshot
+    /// scoping of 6.3.22 rewrites the request's Tenant to a synthetic one,
+    /// below the wall that refused the client from naming it), and for
+    /// decoding a Tenant the broker itself wrote (a bus event, a stored
+    /// marker). Never for a name a client supplied.
+    pub fn new_internal(raw: &str) -> Result<Self, NgsiError> {
         let ok = !raw.is_empty()
             && raw.len() <= 64
             && raw
@@ -48,8 +93,12 @@ impl Default for TenantId {
 
 impl TryFrom<String> for TenantId {
     type Error = NgsiError;
+    /// Decoding, not admission: what is decoded here was encoded by this
+    /// broker (a bus event carries the Tenant a write ran under, and a write
+    /// inside a Snapshot runs under a synthetic one). The client-facing
+    /// refusal is `new`.
     fn try_from(s: String) -> Result<Self, NgsiError> {
-        Self::new(&s)
+        Self::new_internal(&s)
     }
 }
 
@@ -201,6 +250,58 @@ mod tests {
         for bad in ["", "a.b", "a b", "ü", &"x".repeat(65)] {
             assert!(TenantId::new(bad).is_err(), "should reject {bad:?}");
         }
+    }
+
+    /// 6.3.14: the tenants the broker mints for itself are not names a
+    /// client may send. The refusal is on the constructor a client's name
+    /// goes through, so a path that forgets to ask cannot let one in; the
+    /// broker's own paths build the same names through `new_internal`.
+    #[test]
+    fn tenant_rejects_the_names_the_broker_minted_for_itself() {
+        for reserved in [
+            "snap-index",
+            "snap-0123456789abcdef0123456789abcdef",
+            "distsub-index",
+        ] {
+            assert!(
+                TenantId::new(reserved).is_err(),
+                "a client may not name {reserved:?}"
+            );
+            assert_eq!(
+                TenantId::new_internal(reserved)
+                    .expect("the broker's own constructor")
+                    .as_str(),
+                reserved
+            );
+            assert!(TenantId::is_reserved_str(reserved));
+            assert!(TenantId::new_internal(reserved)
+                .expect("internal")
+                .is_internal());
+        }
+        // The prefix and the exact names are matched literally: a tenant name
+        // is a case-sensitive key in the store and in `SET LOCAL
+        // antares.tenant`, so these share a keyspace with nothing and taking
+        // them from clients would protect nothing.
+        for ordinary in ["snap", "snapshot-data", "SNAP-index", "distsub-index-2"] {
+            assert!(
+                TenantId::new(ordinary).is_ok(),
+                "{ordinary:?} is an ordinary tenant"
+            );
+            assert!(!TenantId::is_reserved_str(ordinary));
+        }
+        // and the grammar still applies to the broker's own names
+        assert!(TenantId::new_internal("snap-a.b").is_err());
+    }
+
+    /// A Tenant decoded from what the broker itself wrote — a bus event
+    /// carries the Tenant a write ran under, and 5.5.15 lets a write run
+    /// inside a Snapshot — is not a client's name being admitted.
+    #[test]
+    fn a_serialized_internal_tenant_round_trips() {
+        let synth = TenantId::new_internal("snap-abc").expect("internal");
+        let json = serde_json::to_string(&synth).expect("serialize");
+        let back: TenantId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, synth);
     }
 
     #[test]

@@ -129,7 +129,10 @@ pub async fn seed_mirror(
     kind: Kind,
 ) -> Result<(), antares_model::NgsiError> {
     for tenant_str in store.subscription_tenants().await? {
-        let tenant = TenantId::new(&tenant_str)?;
+        // The store's own enumeration, so the grammar is all that is left to
+        // check: 5.5.15 permits a Subscription inside a Snapshot, and its
+        // tenant is the synthetic one no client may name.
+        let tenant = TenantId::new_internal(&tenant_str)?;
         let mut after: Option<String> = None;
         loop {
             let page = store
@@ -1107,7 +1110,9 @@ async fn matches_for(
     after: Option<Value>,
 ) -> Vec<Matched> {
     let mut out = Vec::new();
-    let Ok(tenant) = TenantId::new(tenant_str) else {
+    // The tenant of the write that fired the change hook — this broker's own
+    // value, and a write inside a Snapshot (5.5.15) carries the synthetic one.
+    let Ok(tenant) = TenantId::new_internal(tenant_str) else {
         return out;
     };
     let changes = diff(before.as_ref(), after.as_ref());
@@ -1391,7 +1396,7 @@ pub async fn interval_tick(st: &AppState) {
         st.store.subscription_tenants().await,
         "the tenants with subscriptions",
     ) {
-        let Ok(tenant) = TenantId::new(&tenant_str) else {
+        let Ok(tenant) = TenantId::new_internal(&tenant_str) else {
             continue;
         };
         // Same source the matcher reads: the indexed mirror, with the store

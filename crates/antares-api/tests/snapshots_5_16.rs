@@ -201,6 +201,21 @@ async fn clause_5_16_1_empty_result_yields_empty_status() {
         ready["snapshotQueriesDetails"][0]["resultStatus"], "empty",
         "{ready}"
     );
+    // 6.3.22 over an empty Snapshot: the frozen copy holds nothing, which is
+    // an empty result and not a Tenant that does not exist. The synthetic
+    // tenant it is served from was never written to the tenant inventory —
+    // a Snapshot's existence is its own document's to assert.
+    let sid = ready["id"].as_str().expect("id");
+    let (status, _, list) = send_h(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/entities?type=Nothing",
+        None,
+        &[("NGSILD-Snapshot", sid)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list, json!([]), "{list}");
 }
 
 /// 5.2.41 gates: at least one of snapshotQueries/snapshotTemporalQueries;
@@ -1116,7 +1131,7 @@ async fn clause_6_3_22_an_ambiguous_snapshot_header_is_refused() {
 /// How many snap-index reverse-lookup markers point at `sid`. The markers
 /// share Kind::Snapshot storage with the snapshot documents themselves.
 async fn index_markers(st: &AppState, sid: &str) -> usize {
-    let idx = antares_model::TenantId::new("snap-index").expect("tenant");
+    let idx = antares_model::TenantId::new_internal("snap-index").expect("tenant");
     st.store
         .list(&idx, antares_sql::store::Kind::Snapshot)
         .await

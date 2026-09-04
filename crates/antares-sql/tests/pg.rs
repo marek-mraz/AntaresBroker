@@ -610,3 +610,77 @@ async fn the_postgres_store_keeps_the_driver_contract() {
     antares_store::contract::run_current_state_contract(&store, &a, &b, &prefix).await;
     antares_store::contract::run_temporal_contract(&store, &a, &b, &prefix).await;
 }
+
+/// The tenants the broker mints for itself are not customer accounts, and
+/// `/q/tenants` reads this list. They still hold a row: on Postgres this table
+/// IS the broker's tenant enumeration — `subscription_tenants` reads it,
+/// because `subscriptions` sits outside the `antares.service` escape (a
+/// subscription document carries the credentials its notification is sent
+/// with), and the mirror seed and the notification sweep walk what it answers.
+/// So the row is written and the READ is what leaves it out.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_internal_tenant_holds_a_row_and_is_left_out_of_the_inventory() {
+    use antares_store::{CurrentStateDriver, Kind};
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect+migrate");
+    let store = antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(
+        pool.clone(),
+    ));
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let synth = TenantId::new_internal(&format!("snap-{run}")).expect("synthetic tenant");
+    assert!(synth.is_internal());
+    let id = "urn:ngsi-ld:Vehicle:frozen";
+    store
+        .create(
+            &synth,
+            Kind::Entity,
+            id,
+            serde_json::json!({"id": id, "type": ["urn:x:Vehicle"]}),
+        )
+        .await
+        .expect("write into the synthetic tenant");
+
+    let row: Option<i32> = sqlx::query_scalar("SELECT 1 FROM tenants WHERE tenant_id = $1")
+        .bind(synth.as_str())
+        .fetch_optional(&pool)
+        .await
+        .expect("inventory read");
+    assert!(
+        row.is_some(),
+        "{} lost the row the tenant enumeration reads",
+        synth.as_str()
+    );
+    assert!(
+        store
+            .subscription_tenants()
+            .await
+            .expect("enumeration")
+            .iter()
+            .any(|t| t == synth.as_str()),
+        "the notification pipeline cannot reach a tenant it cannot enumerate"
+    );
+
+    let inventory = store.tenant_ids().await.expect("inventory");
+    assert!(
+        !inventory.iter().any(|t| t == synth.as_str()),
+        "the broker's own tenant is listed as an account: {inventory:?}"
+    );
+
+    assert!(
+        CurrentStateDriver::purge_tenant(&store, &synth)
+            .await
+            .expect("purge"),
+        "the teardown purges the synthetic tenant"
+    );
+    assert!(
+        store
+            .list(&synth, Kind::Entity)
+            .await
+            .expect("list")
+            .is_empty(),
+        "the copy survived its teardown"
+    );
+}

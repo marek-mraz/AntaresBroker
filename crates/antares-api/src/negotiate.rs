@@ -198,7 +198,12 @@ pub(crate) fn single_header(headers: &HeaderMap, name: &str) -> ApiResult<Option
 pub fn tenant_from(headers: &HeaderMap) -> ApiResult<TenantId> {
     match single_header(headers, "NGSILD-Tenant")? {
         None => Ok(TenantId::default()),
-        Some(raw) => Ok(TenantId::new(&raw)?),
+        // Grammar only: a CLIENT naming one of the broker's own tenants is
+        // refused by the wall (`tenant_exists_layer`), which reads the header
+        // the caller sent. Below it the 6.3.22 snapshot scoping has replaced
+        // that header with the snapshot's synthetic tenant, and this parse
+        // has to accept the value the broker itself put there.
+        Some(raw) => Ok(TenantId::new_internal(&raw)?),
     }
 }
 

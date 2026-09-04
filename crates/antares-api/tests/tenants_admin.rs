@@ -125,22 +125,22 @@ async fn inventory_lists_the_tenant_names_and_nothing_else() {
     );
 }
 
-/// The inventory and the per-tenant routes answer two different questions,
-/// and the split is deliberate. The broker mints tenants for its own
-/// bookkeeping — `snap-<uuid>` per snapshot, `snap-index` for the
+/// The inventory is the list of customer accounts. The broker mints tenants
+/// for its own bookkeeping — `snap-<uuid>` per snapshot, `snap-index` for the
 /// synthetic-tenant reverse index, `distsub-index` for the distributed
-/// subscription inbound index. The INVENTORY shows them, because it is the
-/// operator's only way to see a synthetic tenant a deleted snapshot left
-/// behind; the per-tenant routes REFUSE them, because addressing one means
-/// reading or purging broker state out from under the resource that owns it.
-/// Neither half may drift into the other.
+/// subscription inbound index — and none of them is an account: on Postgres
+/// they are never written to the `tenants` table at all, and the memory arm,
+/// which derives the inventory from the data, filters them the same way, so
+/// one deployment's snapshot churn cannot bury the accounts an operator came
+/// to read. Showing them bought nothing either: the per-tenant routes REFUSE
+/// an internal name, so an operator who saw one could not act on it.
 #[tokio::test(flavor = "multi_thread")]
-async fn broker_tenants_are_visible_in_the_inventory_and_not_addressable() {
+async fn broker_tenants_are_not_in_the_inventory_and_not_addressable() {
     let st = state().await;
     seed(&st, "invreal", "urn:ngsi-ld:Room:9").await;
     let internal = ["snap-index", "snap-0000", "distsub-index"];
     for name in internal {
-        let t = TenantId::new(name).expect("a legal tenant name");
+        let t = TenantId::new_internal(name).expect("a legal tenant name");
         st.store
             .create(
                 &t,
@@ -156,8 +156,8 @@ async fn broker_tenants_are_visible_in_the_inventory_and_not_addressable() {
     assert!(listed(&list, "invreal"), "{list}");
     for name in internal {
         assert!(
-            listed(&list, name),
-            "a leaked {name} has to stay visible to an operator: {list}"
+            !listed(&list, name),
+            "the broker's own {name} is in the account inventory: {list}"
         );
         for method in ["GET", "DELETE"] {
             let (s, _) = send(&st, method, &format!("/q/tenants/{name}"), None, None).await;
@@ -289,17 +289,29 @@ async fn purge_removes_one_tenant_and_leaves_the_other() {
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
-/// The synthetic tenants a Snapshot's isolated copy lives under, as the
-/// inventory sees them. `snap-index` is the reverse index, not a copy.
+/// The synthetic tenants a Snapshot's isolated copy lives under, and what
+/// each still holds. They are not in `/q/tenants` — that is the inventory of
+/// customer accounts — so they are read from the reverse index that names
+/// them, which is also what a teardown removes last.
 async fn synth_tenants(st: &AppState) -> Vec<String> {
-    let (_, list) = send(st, "GET", "/q/tenants", None, None).await;
-    list.as_array()
-        .expect("array")
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|t| t.starts_with("snap-") && *t != "snap-index")
-        .map(str::to_owned)
-        .collect()
+    let idx = TenantId::new_internal("snap-index").expect("index tenant");
+    let mut out = Vec::new();
+    for doc in st.store.list(&idx, Kind::Snapshot).await.expect("index") {
+        let Some(name) = doc.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let t = TenantId::new_internal(name).expect("synthetic tenant");
+        if !st
+            .store
+            .list(&t, Kind::Entity)
+            .await
+            .expect("list")
+            .is_empty()
+        {
+            out.push(name.to_owned());
+        }
+    }
+    out
 }
 
 /// 5.2.41 + 4.14: `DELETE /q/tenants/{tenant}` answers 204, which asserts the

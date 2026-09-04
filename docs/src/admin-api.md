@@ -139,6 +139,10 @@ a list carrying per-kind counts would cost a count per kind per tenant on one
 request. `200` always; the route takes no parameters. Pick a name, then read
 its detail:
 
+The list is the customer accounts. The broker mints tenants of its own — one
+per Snapshot, plus the two indexes — and none of them appears here or is
+addressable through the routes below.
+
 ### GET /q/tenants/{tenant}
 
 ```text

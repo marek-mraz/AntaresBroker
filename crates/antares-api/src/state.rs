@@ -385,7 +385,7 @@ impl AppState {
                     // existed, which is the Tenant that lists, serves and deletes
                     // it.
                     let owner = antares_store::context_row_owner(&row)
-                        .and_then(|o| antares_model::TenantId::new(o).ok());
+                        .and_then(|o| antares_model::TenantId::new_internal(o).ok());
                     Some((owner, row["body"]["@context"].clone()))
                 })
             }));
