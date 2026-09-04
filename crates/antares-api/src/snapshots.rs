@@ -635,8 +635,8 @@ async fn fill_snapshot(st: &AppState, tenant: &TenantId, id: &str) {
 
 /// One 5.2.23 Query executed per the DISTRIBUTED query behaviour
 /// (5.16.1.4 -> 5.7.2.4): local content plus every matching Context
-/// Source; results are copied into the snapshot's synthetic tenant. The
-/// query runs unpaged ("all pages are to be retrieved completely") within
+/// Source; results are copied into the snapshot's synthetic tenant. Every
+/// page is retrieved ("all pages are to be retrieved completely") within
 /// `budget` documents — beyond it nothing is copied (5.5.6).
 async fn run_query(
     st: &AppState,
@@ -661,27 +661,76 @@ async fn run_query(
     } else {
         Vec::new()
     };
-    let docs = crate::entities::filter_entities_fed(st, tenant, &vp, ctx, fed)
+    // 5.16.1.4: "If the size of the respective results require pagination,
+    // all pages are to be retrieved completely." They are retrieved one at a
+    // time. A query wider than the budget is refused, and it has to be
+    // refused without first holding its whole match set in memory to measure
+    // it: the store's pre-LIMIT count is that measurement. The count is the
+    // match set's only while every predicate reached the store — an
+    // idPattern is applied after it (5.2.33), so with one present the
+    // documents that survive are counted instead.
+    let exact_total = !vp.contains_key("idPattern");
+    // Federated candidates are merged after the store answers (5.7.2.4), so
+    // that round takes no page and is the whole match set; only a local
+    // query walks on.
+    let mut fed = fed;
+    let mut n = 0usize;
+    let mut offset = 0usize;
+    loop {
+        // Only the first round asks the store to count: the pre-LIMIT total
+        // makes it visit the whole match set, and the budget needs that once.
+        // Later rounds carry the next-page hint in the same member, which is
+        // not a count and is not read as one.
+        let counted = offset == 0;
+        if counted {
+            vp.insert("count".into(), "true".into());
+        } else {
+            vp.remove("count");
+        }
+        let batch = crate::entities::filter_entities_paged(
+            st,
+            tenant,
+            &vp,
+            ctx,
+            std::mem::take(&mut fed),
+            Some((offset, st.max_limit)),
+            None,
+        )
         .await
         .map_err(|e| match e {
             ApiError::Ngsi(n) => n,
             other => opaque("query execution", &other),
         })?;
-    let n = docs.len();
-    if n > budget {
-        return Err(too_many(n, budget));
-    }
-    // A write the store refuses fails the query. What this returns is what
-    // the caller adds to `copied`, and `copied` decides both the budget left
-    // for the next query and whether the synthetic tenant is materialized —
-    // an empty snapshot has to read as empty rather than as a tenant that
-    // never existed. Counting a copy that never happened costs the snapshot
-    // both, and 5.2.41 would publish the query as a success besides.
-    for doc in docs {
-        if let Some(id) = doc.get("id").and_then(Value::as_str) {
-            st.store
-                .create(synth, Kind::Entity, id, doc.clone())
-                .await?;
+        if exact_total && counted {
+            if let Some(total) = batch.total.filter(|_| batch.paged) {
+                if total > budget {
+                    return Err(too_many(total, budget));
+                }
+            }
+        }
+        let rows = batch.rows;
+        let got = batch.docs.len();
+        if n + got > budget {
+            return Err(too_many(n + got, budget));
+        }
+        // A write the store refuses fails the query. What this returns is
+        // what the caller adds to `copied`, and `copied` decides both the
+        // budget left for the next query and whether the synthetic tenant is
+        // materialized — an empty snapshot has to read as empty rather than
+        // as a tenant that never existed. Counting a copy that never happened
+        // costs the snapshot both, and 5.2.41 would publish the query as a
+        // success besides.
+        for doc in batch.docs {
+            if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                st.store
+                    .create(synth, Kind::Entity, id, doc.clone())
+                    .await?;
+            }
+        }
+        n += got;
+        match crate::entities::next_scan_offset(offset, rows, 0, batch.paged, st.max_limit) {
+            Some(next) => offset = next,
+            None => break,
         }
     }
     Ok(n)

@@ -1424,19 +1424,20 @@ fn forwarded_purge_query(params: &HashMap<String, String>) -> Vec<(String, Strin
 /// applied in batches rather than materialized whole.
 const PURGE_CHUNK: usize = 500;
 
-/// Where the next Purge chunk starts, or None when the match set is
+/// Where the next chunk of a walked match set starts, or None when the set is
 /// exhausted. `rows` = documents the store returned for this chunk (not the
 /// subset that survived the evaluator: idPattern is applied after the store,
 /// so a full chunk can arrive narrowed or even empty and the walk must still
 /// go on — 5.6.21.4 deletes ALL matched Entities, not the first page of
-/// them). `left_the_set` = how many of those rows no longer match the purge
-/// query afterwards; the rows still in it have to be stepped over, or the
-/// walk re-reads them forever.
+/// them). `left_the_set` = how many of those rows no longer match the query
+/// afterwards: a Purge deletes or prunes them, a read leaves every row where
+/// it was. The rows still in the set have to be stepped over, or the walk
+/// re-reads them forever.
 ///
 /// Termination: every round either removes rows from the match set or
 /// advances the offset by a full chunk, and both are bounded by the number of
 /// stored Entities.
-fn purge_next_offset(
+pub(crate) fn next_scan_offset(
     offset: usize,
     rows: usize,
     left_the_set: usize,
@@ -1527,7 +1528,7 @@ async fn purge_locally(
             }
             gone
         };
-        match purge_next_offset(offset, rows, left_the_set, batch.paged, PURGE_CHUNK) {
+        match next_scan_offset(offset, rows, left_the_set, batch.paged, PURGE_CHUNK) {
             Some(next) => offset = next,
             None => return Ok(()),
         }
@@ -2422,18 +2423,36 @@ pub(crate) async fn build_query_map(
     } else {
         params.clone()
     };
-    // idPattern is invisible to the store, so a pushed page would slice the
-    // wrong set — there the ceiling below is the only bound.
-    let page = (!eff.contains_key("idPattern")).then_some((0, st.max_limit));
-    let mut local_docs = filter_entities_paged(st, tenant, &eff, ctx, Vec::new(), page, None)
-        .await?
-        .docs;
-    local_docs.truncate(st.max_limit);
+    // idPattern is invisible to the store, so a pushed page cannot BE the
+    // candidate set's page — it is still the window a walk steps through, and
+    // the literal the pattern forces has already narrowed the rows (5.2.33).
+    // Without the walk a tenant-wide pattern arrives as one allocation of
+    // every Entity the rest of the filter matched.
     let mut emap = Map::new();
-    for d in &local_docs {
-        if let Some(id) = d.get("id").and_then(Value::as_str) {
-            // "@none" refers to an Entity held locally (5.2.39)
-            emap.insert(id.to_owned(), json!(["@none"]));
+    let mut offset = 0usize;
+    while emap.len() < st.max_limit {
+        let batch = filter_entities_paged(
+            st,
+            tenant,
+            &eff,
+            ctx,
+            Vec::new(),
+            Some((offset, st.max_limit)),
+            None,
+        )
+        .await?;
+        for d in &batch.docs {
+            if emap.len() == st.max_limit {
+                break;
+            }
+            if let Some(id) = d.get("id").and_then(Value::as_str) {
+                // "@none" refers to an Entity held locally (5.2.39)
+                emap.insert(id.to_owned(), json!(["@none"]));
+            }
+        }
+        match next_scan_offset(offset, batch.rows, 0, batch.paged, st.max_limit) {
+            Some(next) => offset = next,
+            None => break,
         }
     }
     crate::entity_map::merge_and_store_map(st, tenant, headers, ctx, params, false, emap).await
@@ -3169,17 +3188,17 @@ mod clause_5_6_1_and_5_6_21 {
     #[test]
     fn purge_walks_on_the_rows_the_store_returned_not_the_narrowed_subset() {
         assert_eq!(
-            purge_next_offset(0, 500, 0, true, 500),
+            next_scan_offset(0, 500, 0, true, 500),
             Some(500),
             "a full chunk the pattern narrowed to nothing still has a successor"
         );
         assert_eq!(
-            purge_next_offset(500, 500, 120, true, 500),
+            next_scan_offset(500, 500, 120, true, 500),
             Some(880),
             "the 380 rows the round did not remove are stepped over"
         );
         assert_ne!(
-            purge_next_offset(0, 500, 0, true, 500),
+            next_scan_offset(0, 500, 0, true, 500),
             None,
             "stopping here leaves every match behind the first chunk alive"
         );
@@ -3277,17 +3296,17 @@ mod clause_5_6_1_and_5_6_21 {
     #[test]
     fn purge_stops_when_the_match_set_is_exhausted() {
         assert_eq!(
-            purge_next_offset(0, 500, 500, false, 500),
+            next_scan_offset(0, 500, 500, false, 500),
             None,
             "an unpaged answer is the whole match set"
         );
         assert_eq!(
-            purge_next_offset(0, 7, 7, true, 500),
+            next_scan_offset(0, 7, 7, true, 500),
             None,
             "a chunk shorter than the page size is the last one"
         );
         assert_eq!(
-            purge_next_offset(0, 500, 500, true, 500),
+            next_scan_offset(0, 500, 500, true, 500),
             Some(0),
             "everything deleted — the rest of the match set shifted to the front"
         );

@@ -29,6 +29,7 @@ pub struct Double {
     refuse_doc: Option<(Kind, String)>,
     refuse_create: Option<(Kind, String)>,
     overloaded: bool,
+    unpaged_queries: AtomicUsize,
 }
 
 impl Double {
@@ -46,6 +47,7 @@ impl Double {
             refuse_doc: None,
             refuse_create: None,
             overloaded: false,
+            unpaged_queries: AtomicUsize::new(0),
         }
     }
 
@@ -64,6 +66,7 @@ impl Double {
             refuse_doc: None,
             refuse_create: None,
             overloaded: true,
+            unpaged_queries: AtomicUsize::new(0),
         }
     }
 
@@ -82,6 +85,7 @@ impl Double {
             refuse_doc: None,
             refuse_create: None,
             overloaded: false,
+            unpaged_queries: AtomicUsize::new(0),
         }
     }
 
@@ -102,6 +106,7 @@ impl Double {
             refuse_doc: None,
             refuse_create: None,
             overloaded: false,
+            unpaged_queries: AtomicUsize::new(0),
         }
     }
 
@@ -134,6 +139,7 @@ impl Double {
             refuse_doc: None,
             refuse_create: None,
             overloaded: false,
+            unpaged_queries: AtomicUsize::new(0),
         }
     }
 
@@ -152,6 +158,7 @@ impl Double {
             refuse_doc: Some((kind, id.to_owned())),
             refuse_create: None,
             overloaded: false,
+            unpaged_queries: AtomicUsize::new(0),
         }
     }
 
@@ -170,7 +177,20 @@ impl Double {
             refuse_doc: None,
             refuse_create: Some((kind, id.to_owned())),
             overloaded: false,
+            unpaged_queries: AtomicUsize::new(0),
         }
+    }
+
+    /// Delegates everything. It still counts the reads below, which is what
+    /// a bound is asserted from.
+    pub fn passthrough(inner: Arc<dyn CurrentStateDriver>) -> Self {
+        Self::flaky_list(inner, 0)
+    }
+
+    /// How many `query_entities` calls arrived with no page — reads the store
+    /// was asked to answer whole, however many rows that is.
+    pub fn unpaged_queries(&self) -> usize {
+        self.unpaged_queries.load(Ordering::SeqCst)
     }
 
     fn refused_create(&self, kind: Kind, id: &str) -> Result<(), NgsiError> {
@@ -344,6 +364,9 @@ impl CurrentStateDriver for Double {
         f: &antares_store::filter::EntityFilter<'_>,
     ) -> Result<antares_store::filter::QueryOutcome, NgsiError> {
         self.pool_wall()?;
+        if f.page.is_none() {
+            self.unpaged_queries.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.query_entities(tenant, f).await
     }
     async fn mutate_boxed<'a>(
