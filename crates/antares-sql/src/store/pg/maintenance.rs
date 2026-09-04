@@ -251,12 +251,16 @@ async fn plain_retention(pool: &PgPool, days: i64) -> Result<Vec<String>, sqlx::
     let mut tx = pool.begin().await?;
     crate::store::pg::set_service(&mut tx).await?;
     let parts = sqlx::query(
+        // The parent is pinned to the schema the migrations built. Without
+        // it a same-named table in another schema contributes its children,
+        // and the DROP below would name them by bare relname.
         "SELECT c.relname,
                 pg_get_expr(c.relpartbound, c.oid) AS bound
          FROM pg_inherits i
          JOIN pg_class c ON c.oid = i.inhrelid
          JOIN pg_class p ON p.oid = i.inhparent
-         WHERE p.relname = 'attr_instances'",
+         WHERE p.relname = 'attr_instances'
+           AND p.relnamespace = 'public'::regnamespace",
     )
     .fetch_all(&mut *tx)
     .await?;
@@ -278,7 +282,7 @@ async fn plain_retention(pool: &PgPool, days: i64) -> Result<Vec<String>, sqlx::
                 .fetch_one(&mut *tx)
                 .await?;
         if expired {
-            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {name}")))
+            sqlx::query(sqlx::AssertSqlSafe(drop_partition_sql(&name)))
                 .execute(&mut *tx)
                 .await?;
             done.push(format!("dropped expired partition {name}"));
@@ -345,6 +349,18 @@ async fn reap_expired_entities(pool: &PgPool) -> Result<u64, sqlx::Error> {
     Ok(n)
 }
 
+/// Drop one partition, named the way the catalog row spells it. The name
+/// comes back from `pg_class.relname` as the identifier itself, not as SQL:
+/// unquoted it would be folded to lower case and would need to be a bare
+/// identifier to parse at all, so a partition whose name is neither — one
+/// created by hand, or by a migration that quoted it — is a partition
+/// retention fails on, every tick, for as long as it exists. Schema-
+/// qualified for the same reason the catalog query is: the row names a table
+/// in `public`, and `search_path` is not what should decide which one.
+fn drop_partition_sql(name: &str) -> String {
+    format!("DROP TABLE public.\"{}\"", name.replace('"', "\"\""))
+}
+
 /// One weekly partition, created directly under the parent. Fails while the
 /// DEFAULT partition still holds a row in `[lo, hi)`.
 fn create_partition_sql(suffix: &str, lo: &str, hi: &str) -> String {
@@ -404,6 +420,27 @@ mod tests {
 
     const LO: &str = "2026-08-17T00:00:00+00";
     const HI: &str = "2026-08-24T00:00:00+00";
+
+    /// The partition name is an identifier the catalog hands back, not SQL.
+    /// A bare interpolation drops any partition whose name needs quoting and
+    /// resolves through `search_path` instead of the schema the row is in.
+    #[test]
+    fn a_partition_is_dropped_by_the_name_the_catalog_spells() {
+        assert_eq!(
+            drop_partition_sql("attr_instances_2026w34"),
+            "DROP TABLE public.\"attr_instances_2026w34\""
+        );
+        assert_eq!(
+            drop_partition_sql("Weird Name"),
+            "DROP TABLE public.\"Weird Name\"",
+            "a name that is not a bare identifier still names one table"
+        );
+        assert_eq!(
+            drop_partition_sql("a\"b"),
+            "DROP TABLE public.\"a\"\"b\"",
+            "a quote in the name closes nothing"
+        );
+    }
 
     #[test]
     fn create_partition_covers_exactly_the_week() {
