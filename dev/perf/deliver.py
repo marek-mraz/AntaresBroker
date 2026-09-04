@@ -23,7 +23,7 @@ pipeline is doing the same amount of work.
 import argparse
 import http.client
 import json
-import threading
+import multiprocessing
 import time
 import urllib.request
 from urllib.parse import urlparse
@@ -106,8 +106,12 @@ def main():
 
     urllib.request.urlopen(urllib.request.Request(a.sink + "/stats", method="DELETE")).read()
     h0 = health(a.broker)
-    ok = [0] * a.writers
-    bad = [0] * a.writers
+    # Writers are processes, not threads: one interpreter's GIL caps the
+    # offered rate well below what the broker absorbs, so a threaded harness
+    # measures itself rather than the broker. Counters live in shared memory
+    # because a forked writer's own copy would die with it.
+    ok = multiprocessing.Array("l", a.writers)
+    bad = multiprocessing.Array("l", a.writers)
     stop = time.time() + a.duration
     # Paced open-loop: each writer owns rate/writers of the arrival rate and
     # keeps its own schedule, so a slow response delays that writer rather
@@ -144,11 +148,13 @@ def main():
                 c = conn(a.broker)
         c.close()
 
-    threads = [threading.Thread(target=writer, args=(w,)) for w in range(a.writers)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    writers = [
+        multiprocessing.Process(target=writer, args=(w,)) for w in range(a.writers)
+    ]
+    for w in writers:
+        w.start()
+    for w in writers:
+        w.join()
     t_end = time.time()
 
     # quiet = the sink's count unchanged for 5 s (cap 120 s)
