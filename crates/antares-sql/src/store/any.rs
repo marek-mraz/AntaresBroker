@@ -986,13 +986,14 @@ impl AnyStore {
     /// 5.5.10: does the Tenant exist? The default Tenant "implicitly exists";
     /// others exist once implicitly created by a create operation.
     ///
-    /// It answers for CLIENT tenants. A tenant the broker minted for itself is
-    /// not in the inventory (`claim_tenant` refuses to put it there), and
+    /// It answers for CLIENT tenants. A tenant the broker minted for itself
+    /// does hold a row — every write claims one, and that row is what keeps
+    /// the tenant enumerable to `subscription_tenants` across a restart — but
     /// nothing asks this about one: the wall that asks sits outside the 6.3.22
-    /// snapshot scoping and reads the header the caller sent, which may not
-    /// name an internal tenant at all. What a Snapshot's synthetic tenant
-    /// holds is asserted by the Snapshot document, not by a row in the
-    /// customer-account table.
+    /// snapshot scoping and reads the header the caller sent, which cannot
+    /// name an internal tenant. What a Snapshot's synthetic tenant holds is
+    /// asserted by the Snapshot document; the row only accounts for it, and
+    /// `tenant_ids` keeps it out of the customer-account listing.
     pub async fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
         if tenant.as_str() == TenantId::DEFAULT {
             return Ok(true);
@@ -1030,9 +1031,10 @@ impl AnyStore {
                             .fetch_all(p.docs.pool())
                             .await
                             .map_err(db)?;
-                    // Rows written before internal tenants stopped claiming
-                    // one are still there; the inventory is what the operator
-                    // reads, so it is filtered on the way out as well.
+                    // The broker's own tenants claim a row like any other
+                    // write, because that row is also the enumeration the
+                    // notification paths walk. The inventory is the list of
+                    // customer accounts, so they are filtered on the way out.
                     rows.retain(|t| !TenantId::is_reserved_str(t));
                     // 5.5.10: the default Tenant implicitly exists, whether or
                     // not a row was ever written for it.
