@@ -186,7 +186,7 @@ rented box:
 | per-class delivery | `fire.sh` → `fire-classes.md` | the subscriptions (10 000 by default, the `subs` dispatch input) fall into eight filter classes (type, q, watchedAttributes, idPattern, geoQ, scopeQ; `subs.md`) and every one is unique: p = k // tenants parametrises its q threshold, idPattern tail, polygon edge or scopeQ branch, and k6 evaluates the same rule, so due and delivered are reported per class |
 | federated queries | `fed.sh` | five query shapes (type, q, geoQ, scopeQ, idPattern) on random tenants over the registrations (10 000 by default, the `regs` input; each with its own idPattern, polygon or scope) of eight classes (`csr.md`: mode, operations, csf properties, headers, expiry, location, scopes); every source is the sink; the row shows queries, failures, queries with a source warning, p99, source calls and calls per query |
 | CPU and memory | `rss.sh` → `rss.csv`, `rss.md` | 1 Hz: broker and Postgres RSS, broker and Postgres CPU in cores, and whole-host busy cores against the core count — the saturation check; every fire.md / fed.md row carries the mean over its own window |
-| PDF | `report.py` → `report.pdf` | the same tables plus the RSS/CPU timeline and the delivery curve, next to `index.html` and `perf.json` in the downloadable results folder |
+| PDF | `pdf.py` → `report.pdf` | the narrated report (what was stored, who called, the conditions of each number) built by `dev/perf/pdf.py`, next to `index.html` and `perf.json` in the downloadable results folder |
 
 `dev/perf/sink.py` is the other end of every subscription and
 registration: it counts notifications and answers forwarded queries with
@@ -523,9 +523,10 @@ saturation claim can be checked against the phase that made it.
 
 ### `report.py` — the artefacts
 
-Folds every table into `index.html`, `perf.json` and `report.pdf`, next to
-the raw CSVs, so a later run can be diffed against this one without
-rerunning anything.
+Folds every table into `index.html`, `perf.json` and invokes `dev/perf/pdf.py`
+to build `report.pdf` (the narrated report explaining what was stored, who
+called, and the conditions of each measured number), next to the raw CSVs,
+so a later run can be diffed against this one without rerunning anything.
 
 ## Measuring delivery without the rented runner
 

@@ -143,7 +143,7 @@ jobs:
           # limited in any way
           N=$(nproc); printf '#!/bin/sh\nexec taskset -c %s-%s /usr/local/bin/k6.bin "$@"\n' "$((N/2))" "$((N-1))" > /usr/local/bin/k6
           chmod +x /usr/local/bin/k6
-          apt-get install -y -q postgresql-client python3-matplotlib
+          apt-get install -y -q postgresql-client python3-matplotlib python3-reportlab
       - name: PostgreSQL on the volume, mosquitto
         run: |
           # Sized from the box rather than from one server type: a wider
@@ -252,6 +252,7 @@ jobs:
             on drops, pool waits, breaker trips).
           - pg-stats.csv — pg_stat_user_tables/indexes, the 40 costliest statements (pg_stat_statements,
             constants normalised to $n), pg_stat_database/bgwriter, table sizes, non-default settings.
+          - report.pdf — narrated report (what was stored, who called, the conditions of each number) built by dev/perf/pdf.py.
           - perf.json + index.html — the folded report (report.py).
           EOF
       - name: Fold the tables into one report

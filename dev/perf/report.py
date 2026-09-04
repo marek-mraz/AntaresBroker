@@ -65,76 +65,6 @@ LEGEND = {
 }
 
 
-def pdf(out, record, sections):
-    """report.pdf: every table plus the RSS/CPU timeline and the delivery
-    curve, from rss.csv and fire.md. matplotlib only; absent → no PDF."""
-    try:
-        import csv
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_pdf import PdfPages
-    except ImportError:
-        print("matplotlib missing: no report.pdf")
-        return
-    with PdfPages(os.path.join(out, "report.pdf")) as pp:
-        fig = plt.figure(figsize=(8.27, 11.69))
-        fig.text(0.5, 0.9, "Antares performance run", ha="center", fontsize=20)
-        fig.text(0.5, 0.86, f"commit {record['commit']}, {record['host']}", ha="center", fontsize=11)
-        fig.text(0.1, 0.8, "\n".join(f"- {t}" for t, _ in sections), fontsize=10, va="top")
-        pp.savefig(fig); plt.close(fig)
-        rss = os.path.join(out, "rss.csv")
-        if os.path.exists(rss):
-            rows = list(csv.DictReader(open(rss)))
-            if rows:
-                t0 = int(rows[0]["t"]); t = [int(r["t"]) - t0 for r in rows]
-                f = lambda k: [float(r.get(k) or 0) for r in rows]
-                fig, ax = plt.subplots(3, 1, figsize=(8.27, 11.69), sharex=True)
-                ax[0].plot(t, [v / 1024 for v in f("broker_kib")], label="broker RSS (MiB)")
-                ax[0].plot(t, [v / 1024 for v in f("postgres_kib")], label="postgres RSS (MiB)")
-                ax[0].set_ylabel("MiB"); ax[0].legend(); ax[0].set_title("Resident set")
-                ax[1].plot(t, [v / 100 for v in f("broker_cpu_pct")], label="broker cores")
-                ax[1].plot(t, [v / 100 for v in f("postgres_cpu_pct")], label="postgres cores")
-                ax[1].set_ylabel("cores"); ax[1].legend(); ax[1].set_title("CPU per process (1 = one core)")
-                cores = float(rows[0].get("host_cores") or 0)
-                ax[2].plot(t, f("host_busy_cores"), label="host busy cores")
-                if cores:
-                    ax[2].axhline(cores, color="red", ls="--", label=f"{cores:.0f} cores = saturated")
-                ax[2].set_ylabel("cores"); ax[2].set_xlabel("seconds since the broker started"); ax[2].legend()
-                ax[2].set_title("Whole machine")
-                pp.savefig(fig); plt.close(fig)
-        fire = os.path.join(out, "fire.md")
-        if os.path.exists(fire):
-            rows = md_table(open(fire).read())
-            if len(rows) > 1:
-                head, data = rows[0], rows[1:]
-                col = lambda name: [r[head.index(name)] for r in data if name in head]
-                try:
-                    rates = [int(x) for x in col("rate (rps)")]
-                    pct = [float(x) for x in col("delivered %")]
-                    fig, ax = plt.subplots(figsize=(8.27, 5))
-                    ax.plot(rates, pct, marker="o"); ax.set_ylim(0, 105)
-                    ax.set_xlabel("update rate (rps)"); ax.set_ylabel("notifications delivered %")
-                    ax.set_title("Subscriptions under the update stream"); ax.grid(True)
-                    pp.savefig(fig); plt.close(fig)
-                except (ValueError, IndexError):
-                    pass
-        for title, text in sections:
-            rows = md_table(text)
-            fig = plt.figure(figsize=(11.69, 8.27))
-            fig.text(0.02, 0.96, title, fontsize=14, va="top")
-            if rows:
-                w = len(rows[0])
-                cells = [([c[:60] for c in r] + [""] * w)[:w] for r in rows[1:]] or [[""] * w]
-                tbl = fig.add_axes([0.02, 0.02, 0.96, 0.9]); tbl.axis("off")
-                tab = tbl.table(cellText=cells, colLabels=rows[0], loc="upper left", cellLoc="left")
-                tab.auto_set_font_size(False); tab.set_fontsize(6); tab.scale(1, 1.2)
-            else:
-                fig.text(0.02, 0.9, text[:4000], fontsize=7, va="top", family="monospace")
-            pp.savefig(fig); plt.close(fig)
-    print(f"{out}/report.pdf")
-
-
 def commit():
     try:
         return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
@@ -190,7 +120,12 @@ def main():
             "td,th{border:1px solid #ccc;padding:.3rem .6rem}</style>" + "".join(body))
     open(os.path.join(out, "index.html"), "w").write(page)
     print(f"{out}/index.html + perf.json: {len(sections)} sections")
-    pdf(out, record, sections)
+    sys.path.insert(0, os.path.dirname(__file__))
+    try:
+        import pdf
+        pdf.build(out, record)
+    except Exception as e:
+        print(f"pdf generation skipped: {e}")
 
 
 if __name__ == "__main__":
