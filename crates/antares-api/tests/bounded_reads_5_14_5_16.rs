@@ -148,11 +148,12 @@ mod paging_store {
     use antares_model::TenantId;
     use antares_store::Kind;
 
-    const TENANT: &str = "boundedwalk";
-
     /// A Postgres-backed state with an empty tenant and a page size small
-    /// enough that a handful of Entities spans several chunks.
-    async fn pg_state(chunk: usize) -> Option<(AppState, TenantId)> {
+    /// enough that a handful of Entities spans several chunks. The tenant is
+    /// the caller's own: these tests run in parallel against one database, and
+    /// a shared tenant would have each of them seeding and cleaning the other's
+    /// rows.
+    async fn pg_state(chunk: usize, tenant_name: &str) -> Option<(AppState, TenantId)> {
         let url = match std::env::var("ANTARES_TEST_DATABASE_URL") {
             Ok(u) => u,
             Err(_) => {
@@ -163,7 +164,7 @@ mod paging_store {
         let pool = antares_sql::store::pg::connect(&url, 5)
             .await
             .expect("connect");
-        let tenant = TenantId::new(TENANT).expect("tenant");
+        let tenant = TenantId::new(tenant_name).expect("tenant");
         antares_sql::store::pg::ensure_tenant(&pool, &tenant)
             .await
             .expect("tenant row");
@@ -204,6 +205,7 @@ mod paging_store {
 
     async fn send_t(
         st: &AppState,
+        tenant: &TenantId,
         method: &str,
         path: &str,
         body: Option<String>,
@@ -211,7 +213,7 @@ mod paging_store {
         let b = Request::builder()
             .method(method)
             .uri(path)
-            .header("NGSILD-Tenant", TENANT);
+            .header("NGSILD-Tenant", tenant.as_str());
         let req = match body {
             Some(body) => b
                 .header("Content-Type", "application/json")
@@ -242,7 +244,7 @@ mod paging_store {
     /// snapshot and reports the query a success over it.
     #[tokio::test(flavor = "multi_thread")]
     async fn clause_5_16_1_the_fill_copies_every_page() {
-        let Some((mut st, tenant)) = pg_state(3).await else {
+        let Some((mut st, tenant)) = pg_state(3, "boundedfill").await else {
             return;
         };
         seed(&st, &tenant, 9).await;
@@ -250,7 +252,7 @@ mod paging_store {
             "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})
         .to_string();
         let (status, headers, body) =
-            send_t(&st, "POST", "/ngsi-ld/v1/snapshots", Some(snap)).await;
+            send_t(&st, &tenant, "POST", "/ngsi-ld/v1/snapshots", Some(snap)).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         let loc = headers
             .get("Location")
@@ -259,7 +261,7 @@ mod paging_store {
             .to_owned();
         let mut ready = Value::Null;
         for _ in 0..200 * antares_api::state::slow_factor() {
-            let (status, _, body) = send_t(&st, "GET", &loc, None).await;
+            let (status, _, body) = send_t(&st, &tenant, "GET", &loc, None).await;
             assert_eq!(status, StatusCode::OK, "{body}");
             if body["snapshotStatus"] != "preparing" {
                 ready = body;
@@ -275,7 +277,7 @@ mod paging_store {
         let req = Request::builder()
             .method("GET")
             .uri("/ngsi-ld/v1/entities?type=Vehicle&limit=1000")
-            .header("NGSILD-Tenant", TENANT)
+            .header("NGSILD-Tenant", tenant.as_str())
             .header("NGSILD-Snapshot", &sid)
             .body(Body::empty())
             .expect("request");
@@ -309,12 +311,13 @@ mod paging_store {
     /// nothing in it while every match is still waiting behind it.
     #[tokio::test(flavor = "multi_thread")]
     async fn clause_5_14_4_the_candidate_walk_reaches_the_last_chunk() {
-        let Some((st, tenant)) = pg_state(3).await else {
+        let Some((st, tenant)) = pg_state(3, "boundedmap").await else {
             return;
         };
         seed(&st, &tenant, 9).await;
         let (status, _, body) = send_t(
             &st,
+            &tenant,
             "GET",
             "/ngsi-ld/v1/entityMaps?type=Vehicle&idPattern=w0%5B89%5D$",
             None,
