@@ -296,7 +296,12 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   broker is starved rather than busy. The bounded matcher queue protects
   the notification path, and nothing plays that role for writes. This
   sits under the delivery path rather than in it — no change to matching
-  or delivery moves it.
+  or delivery moves it. The rented rig shows the same shape from the
+  other side: at 500 rps offered, where the shape asks for about 8 900
+  notifications a second, the pipeline delivers 561 a second and sheds
+  26 398 changes, against the 3 251 a second the same build sustains at
+  200 rps. Past the queue's capacity the system delivers an order of
+  magnitude less than its own sustained rate rather than settling at it.
 - Per-notification cost is one row update. The Postgres arm writes it as
   a single statement (`pg::doc::record_delivery`), so the row lock is held
   for the statement rather than across a round trip and the Rust closure —
