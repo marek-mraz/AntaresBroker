@@ -253,6 +253,18 @@ Create Entity From JSON-LD Content
     Output    ${response}    Create Entity From JSON-LD Content
     RETURN    ${response}
 
+Merge Entity From JSON-LD Content
+    [Tags]    actor_context-producer
+    [Arguments]    ${entity_id}    ${content}
+    &{headers}=    Create Dictionary    Content-Type=application/ld+json
+    ${response}=    PATCH
+    ...    url=${url}/${ENTITIES_ENDPOINT_PATH}${entity_id}
+    ...    json=${content}
+    ...    headers=${headers}
+    ...    expected_status=any
+    Output    ${response}    Merge Entity From JSON-LD Content
+    RETURN    ${response}
+
 Delete Entity Attributes
     [Tags]    actor_context-producer
     [Arguments]    ${entityId}    ${attributeId}    ${datasetId}    ${deleteAll}    ${context}=${EMPTY}

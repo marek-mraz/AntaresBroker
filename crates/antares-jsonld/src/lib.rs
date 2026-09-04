@@ -17,8 +17,8 @@ pub use compact::{compact_entity, compact_entity_shallow, compact_types};
 pub use context::{Context, DEFAULT_VOCAB, NGSI_LD_BASE};
 pub use expand::{
     expand_attr_fragment, expand_attr_name, expand_entity, expand_types, expanded_id,
-    expanded_object, is_deletion_instance, is_ngsi_null, is_ngsi_null_langmap, parse_datetime,
-    reject_first_level_nulls, valid_scope_value, ExpandOpts, RESERVED_MEMBERS,
+    expanded_object, is_deletion_instance, is_ngsi_null, is_ngsi_null_langmap, is_ngsi_null_list,
+    parse_datetime, reject_first_level_nulls, valid_scope_value, ExpandOpts, RESERVED_MEMBERS,
 };
 pub use loader::{
     allow_private_egress, client_builder, core_context, http_interaction, install_crypto_provider,

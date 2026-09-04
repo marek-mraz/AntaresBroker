@@ -1983,8 +1983,18 @@ pub fn merge_into(doc: &mut Value, fragment: &Value, ts: &str) {
                 }
                 target.insert("type".into(), Value::Array(cur));
             }
+            // 5.5.12: "For each member of the Fragment, whose value is an
+            // NGSI-LD Null, contained by the target, the target member is
+            // removed." 4.18 admits the sentinel as a scope for exactly this
+            // reason, and expansion hands scopes over as an array, so the
+            // deletion arrives as its single entry. Storing it instead left
+            // the Entity scoped to a string no 4.18 grammar accepts.
             "scope" => {
-                target.insert("scope".into(), v.clone());
+                if antares_jsonld::is_ngsi_null_list(v) {
+                    target.remove("scope");
+                } else {
+                    target.insert("scope".into(), v.clone());
+                }
             }
             // 4.22: expiresAt is a settable Entity member (5.2.4, not in the
             // read-only Table 5.2.2-1) — merge updates the storage expiry;

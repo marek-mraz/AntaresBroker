@@ -254,6 +254,14 @@ pub fn expand_entity(
                 return Err(bad(&format!("invalid scope {s:?} (4.18 grammar)")));
             }
         }
+        // The sentinel deletes the whole scope member (5.5.12), so it is the
+        // whole value or it is not there. Mixed with real scopes it would be
+        // stored as one of them, and 4.18 has no scope that spells it.
+        if scopes.len() > 1 && scopes.iter().any(is_ngsi_null) {
+            return Err(bad(
+                "\"urn:ngsi-ld:null\" is the whole scope or none of it (4.18, 5.5.12)",
+            ));
+        }
         out.insert("scope".into(), Value::Array(scopes));
     }
 
@@ -2769,6 +2777,33 @@ mod clause_4_18 {
         assert!(
             expand(with_scope(json!(["/ok", "9bad"]))).is_err(),
             "one bad entry poisons the array"
+        );
+    }
+
+    /// 5.5.12 deletes a member whose value IS an NGSI-LD Null, so on the
+    /// inputs that admit one the sentinel is the whole scope. Beside a real
+    /// scope it would be stored as one, and 4.18 spells no such scope.
+    #[test]
+    fn a_null_scope_is_the_whole_value_or_none_of_it() {
+        let merge = |s: serde_json::Value| {
+            expand_entity(
+                with_scope(s).as_object().expect("obj"),
+                &Loader::new().core(),
+                ExpandOpts {
+                    allow_null: true,
+                    ..ExpandOpts::default()
+                },
+            )
+        };
+        let out = merge(json!("urn:ngsi-ld:null")).expect("the deletion form");
+        assert_eq!(out["scope"], json!(["urn:ngsi-ld:null"]));
+        assert_eq!(
+            merge(json!(["urn:ngsi-ld:null"])).expect("array form")["scope"],
+            json!(["urn:ngsi-ld:null"])
+        );
+        assert!(
+            merge(json!(["/Madrid", "urn:ngsi-ld:null"])).is_err(),
+            "a deletion mixed with a scope is neither"
         );
     }
 }
