@@ -267,15 +267,62 @@ What the run says:
   it holds 3 500 rps on 1.91 of 8 cores and at the write knee 1 000 rps on
   1.34; on the federated path it sits at 2.2 cores while Postgres takes 5.0
   and the host runs out at 7.9. Notification throughput peaks at 2 742
-  POSTs/s and then falls to 848 with 3.6 cores in hand and the sink at 0.18,
-  so the ceiling is inside the broker rather than in the receiver or the
-  box.
+  POSTs/s and then falls to 848. Over that ceiling window the sink holds
+  0.46 of 8 cores across its eight worker processes — 5.75 % of a core
+  each, which is a receiver waiting for work rather than one saturated —
+  so the ceiling is inside the broker. It is not spare capacity either:
+  by the 500 rps window the host is at 6.20 cores mean and 7.39 peak, and
+  the broker burns more CPU while delivering a third as much.
 - A federated query costs about seven times the Postgres work and twelve
   times the broker work of a direct query of the same shape (42.2 against
   5.8 mcores, 18.9 against 1.6). The fan-out is 34 source calls and a
   registry match over 10,000 rows; the direct row is one local read, so the
   two are not the same unit of work and the ratio is the price of
   federation, not a regression against a like-for-like baseline.
+
+## Measuring delivery without the rented runner
+
+`fire.sh` needs k6, so until now the notification pipeline could only be
+measured by dispatching `scale-weekly`. `dev/perf/deliver.py` drives the
+same path with the standard library alone, against a memory-store broker
+and `sink.py`:
+
+```bash
+ANTARES_STORE=memory ANTARES_EGRESS_ALLOW_PRIVATE=true antares &
+python3 dev/perf/sink.py 9800 8 &
+python3 dev/perf/deliver.py --seed --tenants 10 --entities 500
+python3 dev/perf/api-load.py subscriptions --count 240 --tenants 10 \
+  --sink-workers 8 --broker http://127.0.0.1:9090 --sink http://127.0.0.1:9800
+python3 dev/perf/deliver.py --tenants 10 --entities 500 --rate 2000
+```
+
+The number to read is `matches_per_second`. One match is one
+(subscription, entity) pair: it is what the matcher evaluates and what a
+notification carries, so it is the unit both halves of the pipeline scale
+with. `changes_per_second` divides that by how many subscriptions each
+change fires, so it moves whenever the subscription set changes even
+though the pipeline is doing identical work.
+
+What it measures, on twelve cores with a release build:
+
+| subscriptions over 10 tenants | changes/s | matches/s | broker cores |
+|---|---|---|---|
+| 60 | 2 002 | 2 201 | 0.86 |
+| 120 | 1 982 | 5 998 | 1.27 |
+| 240 | 1 159 | 6 983 | 1.19 |
+| 480 | 573 | 7 315 | 1.18 |
+| 960 | 288 | 7 734 | 1.17 |
+
+Changes per second halve each time the subscription count doubles while
+matches per second stay near 7 000 and the broker stays near 1.2 of 12
+cores. The pipeline is bounded by matches, and it reaches that bound with
+ten cores idle, because `process_changes` evaluates every change against
+its candidate subscriptions sequentially on the single task that drains
+the change queue. Raising `ANTARES_DELIVERY_WIDTH` does not move it: from
+a width of 8 to 1 024 — 128 times the concurrency — matches per second
+stay inside the run-to-run variance, in both a ten-tenant and a
+hundred-tenant shape. Delivery concurrency is downstream of a serial
+producer, so widening it widens nothing.
 
 ## Setting up the rented runner (two repository secrets)
 

@@ -132,10 +132,13 @@ store write commits
      buffer_change → per-request change buffer → change_flush at response
  → notify.rs::wire: bounded mpsc (CHANGE_QUEUE); a full queue drops and
    counts (antares_notification_changes_dropped_total, warn per thousand)
- → drain task: batch → process_changes
+ → drain task: ONE task, batch → process_changes, the next batch taken
+   only once this one's deliveries have all settled (which is what keeps
+   per-subscription order); every change in the batch is matched
+   sequentially on that task
      match against SubMirror (in memory, per tenant; store list is the
      never-wired fallback) → group per subscription → JoinSet under
-     DELIVERY_SLOTS (64)
+     DELIVERY_SLOTS (ANTARES_DELIVERY_WIDTH, default 64)
  → deliver_as: one record_delivery per attempt (timesSent,
    lastNotification, lastSuccess, status), mirror updated from the document
    it returns,
@@ -273,12 +276,22 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `deliver_as`. Split by member on touch.
 - Misplaced helpers: the error constructor `bad` lives in
   `snapshots.rs` and is used crate-wide.
+- The pipeline is bounded by matches, not by delivery concurrency. One
+  match is one (subscription, entity) pair. `dev/perf/deliver.py` holds
+  about 7 000 matches/s on twelve cores at 1.2 cores of broker, and the
+  number does not move when `ANTARES_DELIVERY_WIDTH` goes from 8 to 1 024
+  in either a ten-tenant or a hundred-tenant shape. The serial section is
+  the drain task above: `process_changes` awaits `matches_for` once per
+  change, so matching for the whole broker runs on one task while the
+  cores sit idle. Widening delivery widens nothing downstream of it.
 - Per-notification cost is one row update. The Postgres arm writes it as
   a single statement (`pg::doc::record_delivery`), so the row lock is held
   for the statement rather than across a round trip and the Rust closure —
   at fan-out that hold time is what serializes delivery on a hot
-  subscription. Batching several attempts into one statement is the next
-  lever and is unbuilt: `set_config` is the RLS context, so a batch is
+  subscription. Batching several attempts into one statement was recorded
+  here as the next lever; it is not, on the evidence above — it shortens a
+  per-delivery cost that sits downstream of the ceiling. It stays unbuilt,
+  and `set_config` being the RLS context still makes any such batch
   per tenant by construction.
 - Registration candidate selection reads on the order of a thousand
   rows per federated query on a 10 000-registration registry; the
