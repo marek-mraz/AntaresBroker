@@ -272,7 +272,12 @@ What the run says:
   each, which is a receiver waiting for work rather than one saturated —
   so the ceiling is inside the broker. It is not spare capacity either:
   by the 500 rps window the host is at 6.20 cores mean and 7.39 peak, and
-  the broker burns more CPU while delivering a third as much.
+  the broker burns more CPU while delivering a third as much. That ceiling
+  has since been found and removed — it was the `@context` resolution
+  matching ran once per candidate subscription per change, not delivery
+  concurrency — so the delivery figures earlier in this chapter are the
+  ones that describe the pipeline as it stands, and this row records the
+  run that exposed the collapse.
 - A federated query costs about seven times the Postgres work and twelve
   times the broker work of a direct query of the same shape (42.2 against
   5.8 mcores, 18.9 against 1.6). The fan-out is 34 source calls and a
@@ -303,26 +308,45 @@ with. `changes_per_second` divides that by how many subscriptions each
 change fires, so it moves whenever the subscription set changes even
 though the pipeline is doing identical work.
 
-What it measures, on twelve cores with a release build:
+What it measures, on twelve cores with a release build, at an offered
+2 000 changes per second over ten tenants and 500 entities:
 
-| subscriptions over 10 tenants | changes/s | matches/s | broker cores |
+| subscriptions over 10 tenants | matches/s | broker cores | changes dropped |
 |---|---|---|---|
-| 60 | 2 002 | 2 201 | 0.86 |
-| 120 | 1 982 | 5 998 | 1.27 |
-| 240 | 1 159 | 6 983 | 1.19 |
-| 480 | 573 | 7 315 | 1.18 |
-| 960 | 288 | 7 734 | 1.17 |
+| 60 | 2 201 | 0.91 | 0 |
+| 120 | 6 056 | 1.24 | 0 |
+| 240 | 11 781 | 1.28 | 0 |
+| 480 | 25 547 | 1.89 | 0 |
+| 960 | 44 818 | 1.90 | 1 191 |
 
-Changes per second halve each time the subscription count doubles while
-matches per second stay near 7 000 and the broker stays near 1.2 of 12
-cores. The pipeline is bounded by matches, and it reaches that bound with
-ten cores idle, because `process_changes` evaluates every change against
-its candidate subscriptions sequentially on the single task that drains
-the change queue. Raising `ANTARES_DELIVERY_WIDTH` does not move it: from
-a width of 8 to 1 024 — 128 times the concurrency — matches per second
-stay inside the run-to-run variance, in both a ten-tenant and a
-hundred-tenant shape. Delivery concurrency is downstream of a serial
-producer, so widening it widens nothing.
+Matches per second rise with the subscription count, because a change is
+evaluated against more subscriptions and fires more of them. The broker
+carries the whole offered change rate up to 480 subscriptions over ten
+tenants, and drops 0.15 per cent of it at 960.
+
+Holding the subscription count at 240 and raising the offered rate
+instead:
+
+| offered changes/s | achieved | matches/s | broker cores | changes dropped |
+|---|---|---|---|---|
+| 2 000 | 2 000 | 12 074 | 1.72 | 0 |
+| 3 000 | 3 001 | 17 998 | 2.18 | 0 |
+| 4 000 | 4 004 | 23 948 | 2.48 | 0 |
+| 6 000 | 5 131 | 30 683 | 2.74 | 0 |
+
+The last row measures the harness rather than the broker: `deliver.py`
+runs its writers as threads in one interpreter, and it cannot produce the
+6 000 changes per second it was asked for. The broker absorbed every
+change offered at every rate, dropped none of them, and held 2.74 of
+twelve cores, so the table gives a floor for the delivery bound rather
+than the bound itself. Reaching that bound needs the writers in separate
+processes.
+
+`ANTARES_DELIVERY_WIDTH` is not what governs this. Over a hundred-tenant
+shape at 1 000 changes per second, widths of 8, 64, 256 and 1 024 deliver
+7 026, 7 028, 7 026 and 7 028 matches per second, none of them dropping a
+change: the offered load is absorbed whole at every width, so the knob
+has nothing to arbitrate.
 
 ## Setting up the rented runner (two repository secrets)
 

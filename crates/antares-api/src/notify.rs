@@ -604,6 +604,43 @@ pub(crate) async fn sub_context(st: &AppState, tenant: &TenantId, sub: &Value) -
     }
 }
 
+/// A resolved `@context` per Tenant, then per the `@context` URL the
+/// Subscription names. Keyed by Tenant first: 5.5.10 scopes a resolution to
+/// one Tenant, so one Tenant's resolved context is never reachable under
+/// another's identifier even where both name the same URL.
+type CtxMemo = HashMap<String, HashMap<String, Arc<Context>>>;
+
+/// `sub_context` over one drain's memo. Resolving is a cache lookup per call,
+/// and this runs once per candidate subscription per change: a drain of
+/// `CHANGE_BATCH` changes resolves the same handful of `@context` URLs
+/// thousands of times over. The memo lives for the one drain that owns it, so
+/// an `@context` a request replaces or deletes meanwhile is picked up by the
+/// next drain. A Subscription naming an inline `@context` rather than a URL
+/// resolves as before — it has no cheap identity to key on.
+async fn sub_context_memo(
+    st: &AppState,
+    tenant: &TenantId,
+    tenant_str: &str,
+    sub: &Value,
+    memo: &mut CtxMemo,
+) -> Arc<Context> {
+    let url = sub
+        .get("jsonldContext")
+        .or_else(|| sub.get("__context"))
+        .and_then(Value::as_str);
+    let Some(url) = url else {
+        return sub_context(st, tenant, sub).await;
+    };
+    if let Some(hit) = memo.get(tenant_str).and_then(|by_url| by_url.get(url)) {
+        return Arc::clone(hit);
+    }
+    let ctx = sub_context(st, tenant, sub).await;
+    memo.entry(tenant_str.to_owned())
+        .or_default()
+        .insert(url.to_owned(), Arc::clone(&ctx));
+    ctx
+}
+
 /// Per-type NGSI-LD-null member and its showChanges previous-member (5.8.6).
 fn null_members(atype: &str) -> (&'static str, Value, &'static str) {
     let null = Value::String("urn:ngsi-ld:null".into());
@@ -991,8 +1028,9 @@ pub(crate) async fn process_changes(st: &AppState, changes: Vec<Change>) {
     // (100 000 subscriptions), on the notification hot path.
     let mut index: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
+    let mut ctx_memo = CtxMemo::new();
     for (tenant_str, before, after) in changes {
-        for m in matches_for(st, &tenant_str, before, after).await {
+        for m in matches_for(st, &tenant_str, before, after, &mut ctx_memo).await {
             let key = (
                 m.tenant.as_str().to_owned(),
                 m.sub
@@ -1096,6 +1134,7 @@ async fn matches_for(
     tenant_str: &str,
     before: Option<Value>,
     after: Option<Value>,
+    ctx_memo: &mut CtxMemo,
 ) -> Vec<Matched> {
     let mut out = Vec::new();
     // The tenant of the write that fired the change hook — this broker's own
@@ -1147,7 +1186,7 @@ async fn matches_for(
         if !attr_trigger_fired && !entity_trigger_fired {
             continue;
         }
-        let ctx = sub_context(st, &tenant, &sub).await;
+        let ctx = sub_context_memo(st, &tenant, tenant_str, &sub, ctx_memo).await;
         if !selector_match(&sub, eval_doc, &ctx) {
             continue;
         }
@@ -5127,5 +5166,90 @@ mod delivery_share {
             "one tenant held {in_flight} of the {} delivery slots",
             *DELIVERY_WIDTH
         );
+    }
+}
+
+/// The drain's memo of resolved `@contexts`.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod context_memo {
+    use super::*;
+
+    /// 5.5.10 scopes an `@context` resolution to one Tenant, so the drain's
+    /// memo is keyed by Tenant before URL: a resolution one Tenant reached is
+    /// not reachable under another Tenant naming the same URL.
+    #[tokio::test]
+    async fn one_tenants_memoised_context_is_not_served_to_another() {
+        let st = AppState::new("antares-ctx-memo-tenant".into());
+        let url = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld";
+        let sub = json!({"id": "urn:ngsi-ld:Subscription:1", "__context": url});
+        let planted = Arc::new(Context::default());
+        let mut memo = CtxMemo::new();
+        memo.entry("alpha".to_owned())
+            .or_default()
+            .insert(url.to_owned(), Arc::clone(&planted));
+
+        let beta = TenantId::new_internal("beta").expect("tenant");
+        let got = sub_context_memo(&st, &beta, "beta", &sub, &mut memo).await;
+
+        assert!(
+            !Arc::ptr_eq(&got, &planted),
+            "Tenant beta was served Tenant alpha's resolved @context"
+        );
+        assert!(
+            memo.get("alpha").and_then(|m| m.get(url)).is_some(),
+            "alpha's entry was overwritten by another Tenant's resolution"
+        );
+    }
+
+    /// The memo exists to spare the resolver a lookup per candidate: a second
+    /// candidate naming the same `@context` in the same drain reuses the
+    /// resolution the first one reached rather than resolving again.
+    #[tokio::test]
+    async fn a_second_candidate_reuses_the_resolution_of_the_first() {
+        let st = AppState::new("antares-ctx-memo-reuse".into());
+        let url = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld";
+        let tenant = TenantId::new_internal("alpha").expect("tenant");
+        let mut memo = CtxMemo::new();
+
+        let first = sub_context_memo(
+            &st,
+            &tenant,
+            "alpha",
+            &json!({"id": "urn:ngsi-ld:Subscription:1", "__context": url}),
+            &mut memo,
+        )
+        .await;
+        let second = sub_context_memo(
+            &st,
+            &tenant,
+            "alpha",
+            &json!({"id": "urn:ngsi-ld:Subscription:2", "__context": url}),
+            &mut memo,
+        )
+        .await;
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the second candidate resolved its @context again"
+        );
+    }
+
+    /// A Subscription carrying an inline `@context` rather than a URL has no
+    /// cheap identity to key on: it resolves as it did before the memo, and
+    /// leaves no entry behind that a later URL lookup could collide with.
+    #[tokio::test]
+    async fn an_inline_context_is_resolved_rather_than_memoised() {
+        let st = AppState::new("antares-ctx-memo-inline".into());
+        let tenant = TenantId::new_internal("alpha").expect("tenant");
+        let mut memo = CtxMemo::new();
+        let sub = json!({
+            "id": "urn:ngsi-ld:Subscription:1",
+            "__context": {"Vehicle": "https://example.org/Vehicle"},
+        });
+
+        let ctx = sub_context_memo(&st, &tenant, "alpha", &sub, &mut memo).await;
+
+        assert_eq!(ctx.expand_key("Vehicle"), "https://example.org/Vehicle");
+        assert!(memo.is_empty(), "an inline @context left a memo entry");
     }
 }

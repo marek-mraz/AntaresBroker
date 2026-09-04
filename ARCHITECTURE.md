@@ -137,8 +137,9 @@ store write commits
    per-subscription order); every change in the batch is matched
    sequentially on that task
      match against SubMirror (in memory, per tenant; store list is the
-     never-wired fallback), candidates handed over as shared documents →
-     group per subscription → JoinSet under
+     never-wired fallback), candidates handed over as shared documents and
+     each `@context` resolved once per drain and per tenant → group per
+     subscription → JoinSet under
      DELIVERY_SLOTS (ANTARES_DELIVERY_WIDTH, default 64)
  → deliver_as: one record_delivery per attempt (timesSent,
    lastNotification, lastSuccess, status), mirror updated from the document
@@ -279,12 +280,14 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `snapshots.rs` and is used crate-wide.
 - The pipeline is bounded by matches, not by delivery concurrency. One
   match is one (subscription, entity) pair. `dev/perf/deliver.py` holds
-  about 7 000 matches/s on twelve cores at 1.2 cores of broker, and the
-  number does not move when `ANTARES_DELIVERY_WIDTH` goes from 8 to 1 024
-  in either a ten-tenant or a hundred-tenant shape. The serial section is
-  the drain task above: `process_changes` awaits `matches_for` once per
-  change, so matching for the whole broker runs on one task while the
-  cores sit idle. Widening delivery widens nothing downstream of it.
+  above 30 000 matches/s on twelve cores at 2.7 cores of broker with
+  nothing dropped, and the harness runs out of load before the broker
+  does — its writers are threads in one interpreter. Delivery width does
+  not govern it either: over a hundred-tenant shape, widths of 8 to 1 024
+  deliver the same 7 027 matches/s and drop nothing, so the knob has
+  nothing to arbitrate while the offered load is absorbed whole. Matching
+  is still sequential on the single drain task above, which is where the
+  next lever sits if a deployment ever offers more than this harness can.
 - Per-notification cost is one row update. The Postgres arm writes it as
   a single statement (`pg::doc::record_delivery`), so the row lock is held
   for the statement rather than across a round trip and the Rust closure —

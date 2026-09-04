@@ -28,7 +28,7 @@ import time
 import urllib.request
 from urllib.parse import urlparse
 
-CTX = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+CTX = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
 LINK = f'<{CTX}>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"'
 
 
@@ -93,6 +93,10 @@ def main():
     ap.add_argument("--rate", type=float, default=0.0,
                     help="target PATCH/s over all writers; 0 saturates open-loop")
     ap.add_argument("--seed", action="store_true", help="create the entities and exit")
+    ap.add_argument("--speed-max", type=int, default=0,
+                    help="keep the written speed below this, so the q= classes of "
+                         "api-load.py evaluate and do not match: the matcher pays "
+                         "its full per-candidate cost and delivery pays almost none")
     a = ap.parse_args()
 
     if a.seed:
@@ -124,7 +128,10 @@ def main():
             t = w % a.tenants
             n = (v // 7) % a.entities
             v += 1
-            body = {"speed": {"type": "Property", "value": v}}
+            # every write must carry a NEW value or it is not a change and
+            # notifies nothing (5.8.6), so this walks a band instead of a point
+            val = (v % (a.speed_max - 1) + 1) if a.speed_max else v
+            body = {"speed": {"type": "Property", "value": val}}
             try:
                 st, _ = req(c, "PATCH",
                             f"/ngsi-ld/v1/entities/urn:ngsi-ld:Vehicle:t{t}:{n}/attrs",
