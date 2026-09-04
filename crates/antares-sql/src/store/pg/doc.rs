@@ -565,6 +565,10 @@ impl PgDocStore {
                 return Ok(None);
             };
             let mut doc: Value = row.get(0);
+            // The match rows are a pure function of the document, so the
+            // rows this write would produce can be compared with the ones
+            // already stored before deciding to touch them.
+            let index_before = matches!(kind, DocKind::Registration).then(|| index_rows(&doc));
             match f(&mut doc) {
                 Ok(t) => {
                     let context = doc
@@ -590,8 +594,14 @@ impl PgDocStore {
                     // 5.9.3 Update Registration: a patch may flip the mode,
                     // rewrite `information` or move the endpoint, so the
                     // extracted match rows have to be rebuilt with the doc —
-                    // in this transaction, under the same row lock.
-                    if matches!(kind, DocKind::Registration) {
+                    // in this transaction, under the same row lock. A write
+                    // that moves none of them rebuilds nothing: Table
+                    // 5.2.9-2's forward counters are booked on every
+                    // distributed operation, and the delete + re-insert
+                    // those would drag along rewrites the whole index of a
+                    // busy registration for a document the matcher reads
+                    // identically.
+                    if index_before.is_some_and(|before| before != index_rows(&doc)) {
                         rebuild_csource_index(&mut tx, tenant, id, &doc).await?;
                     }
                     tx.commit().await?;

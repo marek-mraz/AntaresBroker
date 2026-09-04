@@ -188,7 +188,11 @@ pair, one schema (`crates/antares-sql/migrations/`: `0001_init.sql`,
   (hypertable under timescale, no RLS there by columnstore constraint,
   ADR-0006); recording is synchronous in the write path (ADR-0007).
 - Registrations: candidate matching goes through `csource_index`, never
-  a scan of a tenant's registrations.
+  a scan of a tenant's registrations. Its rows are a pure function of the
+  registration document, rebuilt inside the transaction that writes it and
+  only when that write moved a member they are built from: the Table
+  5.2.9-2 forward counters move on every distributed operation and are not
+  among them.
 
 ## 7. Invariants (break one and the suite tells you)
 

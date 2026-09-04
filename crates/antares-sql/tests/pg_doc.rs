@@ -818,3 +818,116 @@ async fn record_delivery_returns_the_pre_image_it_actually_overwrote() {
     assert_eq!(doc["notification"]["timesSent"], json!(1));
     let _ = s.delete(&t, DocKind::Subscription, id).await;
 }
+
+/// A registration write that moves no member `csource_index` is built from
+/// must leave the index rows alone. `record_forward` books Table 5.2.9-2's
+/// counters on every forwarded operation, and rebuilding the match rows for
+/// each of them rewrites the whole index of a busy registration thousands of
+/// times over for a document the matcher reads identically.
+#[tokio::test(flavor = "multi_thread")]
+async fn bookkeeping_only_registration_writes_leave_the_index_rows_alone() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let t = TenantId::new("pgidxstable").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let s = PgDocStore::new(pool.clone());
+    let id = "urn:ngsi-ld:ContextSourceRegistration:stable";
+
+    let reg = json!({
+        "id": id, "type": "ContextSourceRegistration",
+        "endpoint": "http://cs1:9090",
+        "information": [{"entities": [{"type": "Vehicle"}],
+                         "propertyNames": ["speed", "heading"]}]
+    });
+    s.upsert(&t, DocKind::Registration, id, &reg)
+        .await
+        .expect("upsert");
+
+    // xmin is the transaction that wrote the row: a delete + re-insert gives
+    // every row a new one, so it is the direct evidence of a rebuild.
+    let stamps = |pool: &sqlx::PgPool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT xmin::text FROM csource_index
+                   WHERE tenant_id = 'pgidxstable' AND registration_id = $1
+                   ORDER BY property_name",
+            )
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .expect("xmin")
+        }
+    };
+    let before = stamps(&pool).await;
+    assert_eq!(before.len(), 2, "one row per propertyName");
+
+    // exactly what record_forward_via_mutate writes (Table 5.2.9-2)
+    for ok in [true, false] {
+        s.mutate::<(), ()>(&t, DocKind::Registration, id, |doc| {
+            let o = doc.as_object_mut().expect("object");
+            let sent = o
+                .get("timesSent")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            o.insert("timesSent".into(), json!(sent + 1));
+            if ok {
+                o.insert("lastSuccess".into(), json!("2026-01-01T00:00:00Z"));
+                o.insert("status".into(), json!("ok"));
+            } else {
+                o.insert("lastFailure".into(), json!("2026-01-02T00:00:00Z"));
+                o.insert("status".into(), json!("failed"));
+            }
+            Ok(())
+        })
+        .await
+        .expect("mutate")
+        .expect("registration present")
+        .expect("closure");
+    }
+
+    assert_eq!(
+        stamps(&pool).await,
+        before,
+        "forward bookkeeping must not rewrite the match rows"
+    );
+    let sent: i64 = sqlx::query_scalar(
+        "SELECT (registration->>'timesSent')::bigint FROM csource_registrations
+           WHERE tenant_id = 'pgidxstable' AND id = $1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .expect("timesSent");
+    assert_eq!(sent, 2, "the counter itself still moved");
+
+    // a write that DOES move an indexed member still rebuilds (5.9.3)
+    s.mutate::<(), ()>(&t, DocKind::Registration, id, |doc| {
+        doc.as_object_mut()
+            .expect("object")
+            .insert("endpoint".into(), json!("http://cs2:9090"));
+        Ok(())
+    })
+    .await
+    .expect("mutate")
+    .expect("registration present")
+    .expect("closure");
+    assert_ne!(
+        stamps(&pool).await,
+        before,
+        "a moved endpoint has to reach the match rows"
+    );
+    let endpoint: String = sqlx::query_scalar(
+        "SELECT endpoint FROM csource_index
+           WHERE tenant_id = 'pgidxstable' AND registration_id = $1 LIMIT 1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .expect("endpoint");
+    assert_eq!(endpoint, "http://cs2:9090");
+
+    s.delete(&t, DocKind::Registration, id)
+        .await
+        .expect("cleanup");
+}
