@@ -195,6 +195,88 @@ workflow. Bulk load bypasses the broker
 (no notifications, no history), which is the documented path for initial
 loads in [Operations](operations.md#bulk-load-postgres-timescale).
 
+### The measured run
+
+`scale-weekly` run `33835261405` on a ccx33, `SCALE=0.01` with the
+subscription and registration counts raised to 10,000 each: 1,000,000
+entities over 100 tenants. The load took 343 s for the entities (one COPY
+stream), 6 s for the subscriptions and 151 s for the registrations.
+
+| store | ready in (median of 5) | RSS after start |
+|---|---|---|
+| memory | 21 ms | 18 MiB |
+| file | 34 ms | 19 MiB |
+| postgres | 163 ms | 58 MiB |
+
+| store | shape | concurrency | req/s | p99 |
+|---|---|---|---|---|
+| memory | query | c50 | 9 954 | 18.88 ms |
+| memory | query | c200 | 10 134 | 64.81 ms |
+| memory | retrieve | c50 | 32 253 | 7.86 ms |
+| postgres | query | c50 | 868 | 68.78 ms |
+| postgres | query | c200 | 878 | 238.47 ms |
+| postgres | retrieve | c50 | 2 087 | 26.83 ms |
+
+| store | shape | knee (rps held) | p99 at knee | first failing stage | broker cores | peak threads |
+|---|---|---|---|---|---|---|
+| postgres | query | 3 500 | 15.3 ms | 4 000 | 1.91 | 13 |
+| postgres | write | 1 000 | 3.0 ms | 1 500 | 1.34 | 13 |
+
+Subscriptions firing, over 10,000 subscriptions on 101 tenants:
+
+| rate (rps) | due | delivered | delivered % | POSTs/s | dropped by broker | dead letters | PATCH p99 | broker cores | host busy |
+|---|---|---|---|---|---|---|---|---|---|
+| 100 | 96 432 | 96 432 | 100.0 | 1 635.9 | 0 | 0 | 16.1 ms | 1.5 | 3.0 |
+| 200 | 193 195 | 192 927 | 99.9 | 2 742.7 | 14 | 0 | 69.6 ms | 2.6 | 5.3 |
+| 500 | 482 481 | 61 160 | 12.7 | 847.9 | 25 359 | 0 | 645.7 ms | 4.1 | 7.0 |
+
+Federated queries, over 10,000 registrations, every source the sink:
+
+| rate (rps) | queries | failed (conn/4xx/5xx) | with a source warning | GET p99 | source calls | calls per query | broker cores | host busy |
+|---|---|---|---|---|---|---|---|---|
+| 50 | 1 500 | 0 (0/0/0) | 0 | 1 331.6 ms | 51 000 | 34.00 | 1.6 | 5.4 |
+| 100 | 2 449 | 0 (0/0/0) | 0 | 10 433.0 ms | 83 725 | 34.19 | 2.1 | 7.7 |
+| 200 | 3 554 | 0 (0/0/0) | 0 | 33 108.4 ms | 127 316 | 35.82 | 2.2 | 7.9 |
+| 500 | 1 776 | 0 (0/0/0) | 0 | 53 316.7 ms | 157 490 | 88.68 | 1.8 | 7.9 |
+
+Resident set and CPU over the whole run, 1 083 samples about 1.3 s apart:
+
+| measure | value | ceiling |
+|---|---|---|
+| broker RSS peak | 3 447 MiB | no ceiling set |
+| Postgres RSS peak | 11.95 GiB | no ceiling set |
+| broker CPU peak / mean | 5.1 / 1.0 cores | of 8 |
+| Postgres CPU peak / mean | 7.0 / 2.0 cores | of 8 |
+| host busy peak / mean | 8.0 / 4.3 cores | of 8: saturated when peak ≈ 8 |
+
+What the run says:
+
+- The registry narrowing holds. Each tenant carries 100 registrations and a
+  `type=Vehicle` query reaches 34 of them — the three Vehicle-typed classes
+  of the eight in `csr.md` — so the index decides the fan-out and the
+  forward path is not a broadcast. The ratio is flat from 50 to 200 rps.
+- The distributed path returns no 5xx and no `NGSILD-Warning` over 9 279
+  queries: every one of the 419 531 source calls was answered and folded in.
+- Notification delivery is exact to 200 rps of writes (99.9 % of 193 195
+  due, no failed operation) and collapses at 500, where the bounded matcher
+  queue refuses 25 359 changes. The refusal is the design: the queue is an
+  in-process ring of `CHANGE_QUEUE` entries and a full one drops and counts
+  (`antares_notification_changes_dropped_total`), which is what keeps the
+  resident set bounded instead of trading drops for growth.
+- Where the broker bends, it is not out of CPU. At the Postgres query knee
+  it holds 3 500 rps on 1.91 of 8 cores and at the write knee 1 000 rps on
+  1.34; on the federated path it sits at 2.2 cores while Postgres takes 5.0
+  and the host runs out at 7.9. Notification throughput peaks at 2 742
+  POSTs/s and then falls to 848 with 3.6 cores in hand and the sink at 0.18,
+  so the ceiling is inside the broker rather than in the receiver or the
+  box.
+- A federated query costs about seven times the Postgres work and twelve
+  times the broker work of a direct query of the same shape (42.2 against
+  5.8 mcores, 18.9 against 1.6). The fan-out is 34 source calls and a
+  registry match over 10,000 rows; the direct row is one local read, so the
+  two are not the same unit of work and the ratio is the price of
+  federation, not a regression against a like-for-like baseline.
+
 ## Setting up the rented runner (two repository secrets)
 
 `perf-weekly` and `scale-weekly` rent a Hetzner Cloud server for the run
