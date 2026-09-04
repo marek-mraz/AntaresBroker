@@ -11,7 +11,14 @@ with the raw CSVs next to the tables.
 | run | box | what it measures | cadence |
 |---|---|---|---|
 | `perf-weekly` | ccx33 (8 dedicated vCPU, 32 GB), one hour | the request shapes other brokers publish, on the in-memory store; dispatched with `store=postgres` it adds the same tables against a PostgreSQL container on the box, at pool 20 and 100 (`pg-pool<N>/`) | Saturday |
-| `scale-weekly` | ccx33 (8 dedicated vCPU, 32 GB) + volume, one hour | the design targets on PostgreSQL, at scale 0.01 | Sunday |
+| `scale-weekly` | ccx53 (32 dedicated vCPU, 128 GB) + volume, one hour | the design targets on PostgreSQL, at scale 0.01 | Sunday |
+
+`scale-weekly` sizes the database to the box it rents: `shared_buffers` a
+quarter of RAM, `maintenance_work_mem` a sixteenth, the shared memory
+segment an eighth, and the broker's connection pool eight per core with
+the eight-core value pinned to the 100 it was measured at. A number from
+one server type therefore does not compare with a number from another;
+the box is named next to every table.
 
 ## The shapes (`perf-weekly`)
 
@@ -391,7 +398,7 @@ the write path underneath it.
 ## Setting up the rented runner (two repository secrets)
 
 `perf-weekly` and `scale-weekly` rent a Hetzner Cloud server for the run
-(ccx33 for both; the design targets add a volume),
+(a ccx33 and a ccx53; the design targets add a volume),
 register it as an ephemeral GitHub runner, and delete it afterwards;
 `perf-janitor` sweeps anything past its `expiry` label. Until the two
 secrets below exist, both workflows stop at "Create server" with an empty
@@ -442,8 +449,9 @@ The names must match exactly; the workflows read them as
 
 ### 4. Limits on a fresh Hetzner project
 
-A new project starts with small quotas. Both runs ask for a ccx33 (8
-dedicated cores); `scale-weekly` at 1.0 would add a 500 GB volume, and Hetzner answers
+A new project starts with small quotas. `perf-weekly` asks for a ccx33
+(8 dedicated cores) and `scale-weekly` for a ccx53 (32);
+`scale-weekly` at 1.0 would add a 500 GB volume, and Hetzner answers
 `dedicated core limit exceeded` / `volumes size limit exceeded` until the
 limits are raised: Project → *Limits* → request more dedicated cores and
 volume storage (a short form, usually approved within a day). The 0.01

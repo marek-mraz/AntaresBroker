@@ -31,7 +31,7 @@ on:
         default: "10000"
       server_type:
         description: Hetzner server type (ccx33 = 8 dedicated vCPU / 32 GB, ccx43 = 16 / 64, ccx53 = 32 / 128)
-        default: ccx33
+        default: ccx53
 
 # The Hetzner credentials are the sensitive part of this run; the
 # GITHUB_TOKEN itself only has to read the checkout.
@@ -43,7 +43,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SERVER_TYPE: ${{ inputs.server_type || 'ccx33' }}
+  SERVER_TYPE: ${{ inputs.server_type || 'ccx53' }}
   SERVER_IMAGE: ubuntu-24.04
   SERVER_LOCATION: hel1
   # full-scale data volume; a fractional dispatch shrinks it in the create
@@ -146,11 +146,23 @@ jobs:
           apt-get install -y -q postgresql-client python3-matplotlib
       - name: PostgreSQL on the volume, mosquitto
         run: |
+          # Sized from the box rather than from one server type: a wider
+          # machine that keeps an 8-core box's buffer pool measures the
+          # storage, not the broker. shared_buffers is the usual quarter of
+          # RAM, the sort and maintenance budgets follow it, and the pool is
+          # a fixed width per core with the 8-core value pinned where it was
+          # measured. The connection ceiling leaves room above the pool for
+          # the loader and psql.
+          MEM_GB=$(awk '/MemTotal/ { print int($2 / 1048576) }' /proc/meminfo)
+          PG_POOL=$(( $(nproc) * 8 > 100 ? $(nproc) * 8 : 100 ))
+          echo "PG_POOL=$PG_POOL" >> "$GITHUB_ENV"
           docker run -d --name pg --network host -v /mnt/data/pg:/var/lib/postgresql/data \
             -e POSTGRES_USER=antares -e POSTGRES_PASSWORD=antares -e POSTGRES_DB=antares \
-            --shm-size=2g ghcr.io/baosystems/postgis:17-3.5 \
-            -c shared_buffers=4GB -c work_mem=64MB -c maintenance_work_mem=2GB \
-            -c max_wal_size=16GB -c checkpoint_timeout=30min -c synchronous_commit=off -c max_connections=300 \
+            --shm-size=$((MEM_GB / 8 > 1 ? MEM_GB / 8 : 1))g ghcr.io/baosystems/postgis:17-3.5 \
+            -c shared_buffers=$((MEM_GB / 4 > 1 ? MEM_GB / 4 : 1))GB -c work_mem=64MB \
+            -c maintenance_work_mem=$((MEM_GB / 16 > 1 ? MEM_GB / 16 : 1))GB \
+            -c max_wal_size=16GB -c checkpoint_timeout=30min -c synchronous_commit=off \
+            -c max_connections=$((PG_POOL + 200)) \
             -c shared_preload_libraries=pg_stat_statements
           docker run -d --name mqtt --network host eclipse-mosquitto:2.0.22 \
             sh -c 'printf "listener 1883\nallow_anonymous true\n" > /mosquitto/config/perf.conf && exec mosquitto -c /mosquitto/config/perf.conf'
@@ -163,10 +175,11 @@ jobs:
           # connection cap left at the default 10 000: the 200 pin refused
           # 60% of the 500-VU fire run before any handler ran
           mkdir -p "$OUT"
-          # pool 100 of Postgres' 300: the default 20 stalled 2-3 s per acquire
-          # under federated queries at 100 rps (10k subs / 10k regs run)
+          # eight connections per core, floored at 100: the default 20 stalled
+          # 2-3 s per acquire under federated queries at 100 rps (10k subs /
+          # 10k regs run), and 100 is what an 8-core box was measured with
           ANTARES_STORE=postgres ANTARES_DATABASE_URL="$DATABASE_URL" ANTARES_ALLOW_SHARED_LOCAL=1 \
-            ANTARES_EGRESS_ALLOW_PRIVATE=true ANTARES_HTTP_PORT=9090 ANTARES_PG_POOL=100 \
+            ANTARES_EGRESS_ALLOW_PRIVATE=true ANTARES_HTTP_PORT=9090 ANTARES_PG_POOL="$PG_POOL" \
             ANTARES_TELEMETRY=1 \
             nohup ./target/release/antares > "$OUT/broker.log" 2>&1 &
           echo $! > broker.pid
