@@ -610,11 +610,15 @@ async fn tenant_exists_layer(
     // (one per snapshot); a client naming one would read and delete another
     // tenant's snapshot bookkeeping. Rejected here, ahead of the snapshot
     // layer that legitimately rewrites the header to such a tenant.
-    if let Some(raw) = req
-        .headers()
-        .get("NGSILD-Tenant")
-        .and_then(|v| v.to_str().ok())
-    {
+    // Read once, and refuse a request that names two Tenants (or one in a
+    // form no header can carry): the guard below and the handler further in
+    // have to be deciding about the same value, or the wall inspects one
+    // name while the operation runs on another.
+    let named = match crate::negotiate::single_header(req.headers(), "NGSILD-Tenant") {
+        Ok(named) => named,
+        Err(e) => return e.into_response(),
+    };
+    if let Some(raw) = &named {
         if reserved_tenant(raw) {
             return crate::negotiate::ApiError::from(NgsiError::BadRequestData(format!(
                 "invalid NGSILD-Tenant value: {raw:?}"
@@ -642,10 +646,8 @@ async fn tenant_exists_layer(
     // by `contexts::row_visible` on every serve, list and delete.
     let tenant_free = path.starts_with("/info/") || path.starts_with("/jsonldContexts");
     if !implicit_create && !tenant_free {
-        if let Some(t) = req
-            .headers()
-            .get("NGSILD-Tenant")
-            .and_then(|v| v.to_str().ok())
+        if let Some(t) = named
+            .as_deref()
             .and_then(|s| antares_model::TenantId::new(s).ok())
         {
             match st.store.tenant_exists(&t).await {
@@ -679,11 +681,12 @@ async fn echo_tenant_layer(
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
-    let tenant = req
-        .headers()
-        .get("NGSILD-Tenant")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| TenantId::new(s).ok());
+    // A repeated header names no Tenant, so there is none to echo; the
+    // BadRequestData the wall answers says so on its own.
+    let tenant = crate::negotiate::single_header(req.headers(), "NGSILD-Tenant")
+        .ok()
+        .flatten()
+        .and_then(|s| TenantId::new(&s).ok());
     let mut resp = next.run(req).await;
     if let Some(t) = tenant {
         if !resp.headers().contains_key("NGSILD-Tenant") {
