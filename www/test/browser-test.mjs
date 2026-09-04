@@ -94,7 +94,7 @@ try {
   // Subscribe FIRST, then create — the create must produce an in-page
   // notification (endpoint http://page.local/ fans out to the page).
   const notif = await page.evaluate(async () => {
-    const CTX = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
+    const CTX = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld";
     const post = (path, body) =>
       window.brokerFetch(path, {
         method: "POST",
@@ -134,7 +134,7 @@ try {
   // space-b's entity, and local=true must not.
   const fed = await page.evaluate(async () => {
     const CTX =
-      "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
+      "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld";
     const api = (tenant, path, opts = {}) =>
       window.brokerFetch(path, {
         ...opts,

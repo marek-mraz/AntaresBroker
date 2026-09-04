@@ -186,7 +186,7 @@ fn request_for(method: &str, path: &str) -> Request<Body> {
         ),
         ("POST", "/jsonldContexts") => (
             "",
-            json!(["https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"]),
+            json!(["https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"]),
         ),
         ("POST", "/snapshots") => ("", json!({"type": "Snapshot"})),
         ("POST", p) if p.ends_with("/clone") => ("", json!({})),

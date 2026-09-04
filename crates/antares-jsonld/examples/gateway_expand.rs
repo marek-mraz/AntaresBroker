@@ -30,7 +30,7 @@ async fn main() {
         "id": "urn:ngsi-ld:Vehicle:A4567",
         "type": "Vehicle",
         "speed": {"type": "Property", "value": 80, "unitCode": "KMH"},
-        "@context": ["https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"]
+        "@context": ["https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"]
     });
     screen(&loader, body).await;
 

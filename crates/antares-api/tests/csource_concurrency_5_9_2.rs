@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-const CTX: &str = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
+const CTX: &str = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld";
 
 fn registration(tenant: &str, k: usize) -> String {
     format!(

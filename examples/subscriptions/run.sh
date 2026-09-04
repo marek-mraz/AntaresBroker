@@ -3,7 +3,7 @@
 set -euo pipefail
 URL="${BROKER_URL:-http://localhost:9090}/ngsi-ld/v1"
 RECEIVER="${RECEIVER_URL:-http://127.0.0.1:9491}"
-CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
 
 python3 "$(dirname "$0")/receiver.py" 9491 > notifications.log & rcv=$!
 trap 'kill $rcv 2>/dev/null' EXIT

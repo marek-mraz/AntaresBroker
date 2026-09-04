@@ -2,7 +2,7 @@
 // unit-testable without a broker or a DOM.
 
 export const CORE_CTX =
-  "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
+  "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld";
 // Mirror of public/loopback.js — the virtual host that routes a CSR's
 // endpoint back into the same in-browser broker (CIM 009 5.2.9 pattern).
 export const LOOPBACK = "http://self.antares.internal";

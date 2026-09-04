@@ -35,7 +35,7 @@ Suite Setup         Mint The Suite Ids
 
 
 *** Variables ***
-${core}                     https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld
+${core}                     https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld
 ${restricted_header}        Antares-Results-Restricted
 ${subject_header}           X-Subject
 

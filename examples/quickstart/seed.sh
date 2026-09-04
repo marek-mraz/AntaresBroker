@@ -2,7 +2,7 @@
 # Seed three entities and walk the basic queries.
 set -euo pipefail
 URL="${BROKER_URL:-http://localhost:9090}/ngsi-ld/v1"
-CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
 
 curl -sf -o /dev/null -X POST "$URL/entityOperations/create" \
   -H 'Content-Type: application/ld+json' -d '[

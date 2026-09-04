@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
-const CTX: &str = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
+const CTX: &str = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld";
 const SUBJECT: &str = "x-f0-subject";
 
 /// A façade in miniature: three routes that all reach the broker through the

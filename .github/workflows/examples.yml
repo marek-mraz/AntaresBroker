@@ -222,7 +222,7 @@ jobs:
           for i in $(seq 50); do curl -sf localhost:9090/q/health >/dev/null && break; sleep 0.2; done
           curl -sf -o /dev/null -w 'wasm create: %{http_code}\n' -X POST \
             localhost:9090/ngsi-ld/v1/entities -H 'Content-Type: application/ld+json' \
-            -d '{"id":"urn:ngsi-ld:Test:ci:1","type":"Test","@context":"https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"}'
+            -d '{"id":"urn:ngsi-ld:Test:ci:1","type":"Test","@context":"https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"}'
           kill $shim
 
       - name: File an issue on scheduled drift

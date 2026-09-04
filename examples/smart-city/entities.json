@@ -20,7 +20,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:001",
@@ -43,7 +43,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:002",
@@ -66,7 +66,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:003",
@@ -89,7 +89,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:004",
@@ -112,7 +112,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:005",
@@ -135,7 +135,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:006",
@@ -158,7 +158,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:007",
@@ -181,7 +181,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:008",
@@ -204,7 +204,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:009",
@@ -227,7 +227,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:010",
@@ -250,7 +250,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:011",
@@ -273,7 +273,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:012",
@@ -296,7 +296,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:013",
@@ -319,7 +319,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:014",
@@ -342,7 +342,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:015",
@@ -365,7 +365,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:016",
@@ -388,7 +388,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:017",
@@ -411,7 +411,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:018",
@@ -434,7 +434,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:ParkingSpot:bb:019",
@@ -457,7 +457,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:000",
@@ -480,7 +480,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:001",
@@ -503,7 +503,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:002",
@@ -526,7 +526,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:003",
@@ -549,7 +549,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:004",
@@ -572,7 +572,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:005",
@@ -595,7 +595,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:006",
@@ -618,7 +618,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:007",
@@ -641,7 +641,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:008",
@@ -664,7 +664,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:009",
@@ -687,7 +687,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:010",
@@ -710,7 +710,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:011",
@@ -733,7 +733,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:012",
@@ -756,7 +756,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:013",
@@ -779,7 +779,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:Streetlight:bb:014",
@@ -802,7 +802,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:AirQualityObserved:bb:000",
@@ -827,7 +827,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:AirQualityObserved:bb:001",
@@ -852,7 +852,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:AirQualityObserved:bb:002",
@@ -877,7 +877,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:AirQualityObserved:bb:003",
@@ -902,7 +902,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:AirQualityObserved:bb:004",
@@ -927,7 +927,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:AirQualityObserved:bb:005",
@@ -952,7 +952,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:AirQualityObserved:bb:006",
@@ -977,7 +977,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:AirQualityObserved:bb:007",
@@ -1002,7 +1002,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:WasteContainer:bb:000",
@@ -1021,7 +1021,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:WasteContainer:bb:001",
@@ -1040,7 +1040,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:WasteContainer:bb:002",
@@ -1059,7 +1059,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:WasteContainer:bb:003",
@@ -1078,7 +1078,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:WasteContainer:bb:004",
@@ -1097,7 +1097,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:WasteContainer:bb:005",
@@ -1116,7 +1116,7 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  },
  {
   "id": "urn:ngsi-ld:WasteContainer:bb:006",
@@ -1135,6 +1135,6 @@
     ]
    }
   },
-  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
  }
 ]

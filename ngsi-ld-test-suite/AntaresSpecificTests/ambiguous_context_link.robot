@@ -29,7 +29,7 @@ Resource            ${EXECDIR}/resources/AssertionUtils.resource
 
 *** Variables ***
 ${REL}                  rel="http://www.w3.org/ns/json-ld#context"
-${CORE_CONTEXT_URL}     https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld
+${CORE_CONTEXT_URL}     https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld
 ${OTHER_CONTEXT_URL}    https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.7.jsonld
 
 

@@ -23,7 +23,7 @@ const ENTITY: &str = r#"{
     "id": "urn:ngsi-ld:Vehicle:wasm-1",
     "type": "Vehicle",
     "speed": {"type": "Property", "value": 42},
-    "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+    "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
 }"#;
 
 #[tokio::test(flavor = "current_thread")]
@@ -120,7 +120,7 @@ async fn csr_tenant_federates_across_tenants_in_one_broker() {
         "id": "urn:ngsi-ld:FedCar:b-1",
         "type": "FedCar",
         "speed": {"type": "Property", "value": 88},
-        "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+        "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
     }"#;
     let resp = broker
         .handle(with_tenant(
@@ -149,7 +149,7 @@ async fn csr_tenant_federates_across_tenants_in_one_broker() {
             {{"key": "X-Echo", "value": "urn:ngsi-ld:request"}},
             {{"key": "NGSILD-Tenant", "value": "smuggled"}}
         ],
-        "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+        "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
     }}"#
     );
     let resp = broker
@@ -234,7 +234,7 @@ async fn csr_tenant_federates_across_tenants_in_one_broker() {
         "id": "urn:ngsi-ld:FedCar:a-1",
         "type": "FedCar",
         "speed": {"type": "Property", "value": 7},
-        "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+        "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
     }"#;
     let resp = broker
         .handle(with_tenant(

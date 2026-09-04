@@ -302,7 +302,7 @@ async fn jsonld_context_registration_skips_filter_pushdown() {
         &["queryEntity"],
         Some(serde_json::json!([{
             "key": "jsonldContext",
-            "value": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+            "value": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
         }])),
         None,
     )

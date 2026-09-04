@@ -244,7 +244,7 @@ async fn internal_context_fetch_does_not_count_as_serve_hit() {
             "notification": {"endpoint": {"uri": "http://example.org/sink"}},
             "@context": [
                 {"speed": "http://example.org/speed"},
-                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
             ]
         }),
     )

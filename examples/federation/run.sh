@@ -6,7 +6,7 @@ A="${BROKER_A:-http://localhost:9090}"
 B="${BROKER_B:-http://localhost:9091}"
 # B_FROM_A: how broker A reaches broker B (compose: the service name)
 B_FROM_A="${B_FROM_A:-http://broker-b:9090}"
-CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
 
 curl -sf -o /dev/null -X POST "$B/ngsi-ld/v1/entities" \
   -H 'Content-Type: application/ld+json' \

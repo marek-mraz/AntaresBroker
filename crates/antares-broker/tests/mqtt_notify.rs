@@ -64,7 +64,7 @@ fn wait_healthy(port: u16) {
 }
 
 const CTX: &str =
-    "\"@context\": [\"https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld\"]";
+    "\"@context\": [\"https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld\"]";
 
 #[test]
 fn mqtt_notification_carries_metadata_and_body() {

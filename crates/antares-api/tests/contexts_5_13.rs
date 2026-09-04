@@ -269,7 +269,7 @@ async fn clause_5_13_4_serve_errors() {
         "{body}"
     );
 
-    let core = "https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fv1%2Fngsi-ld-core-context-v1.8.jsonld";
+    let core = "https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fv1%2Fngsi-ld-core-context-v1.9.jsonld";
     let (status, _, body) = get(&st, &format!("/ngsi-ld/v1/jsonldContexts/{core}")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(
@@ -455,7 +455,7 @@ async fn clause_5_13_hosted_context_is_private_to_its_tenant() {
 
     // 5.13.1: Cached @contexts are broker-fetched copies of public documents
     // — the pinned core context stays visible to every tenant
-    let core = "https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fv1%2Fngsi-ld-core-context-v1.8.jsonld";
+    let core = "https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fv1%2Fngsi-ld-core-context-v1.9.jsonld";
     let (status, _, meta) = send(
         &st,
         tenant_req(

@@ -2,7 +2,7 @@
 # MQTT-notification variant (needs mqtt-compose.yml up + mosquitto_sub).
 set -euo pipefail
 URL="${BROKER_URL:-http://localhost:9090}/ngsi-ld/v1"
-CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
 mosquitto_sub -h "${MQTT_HOST:-localhost}" -t antares/door -C 1 > mqtt-notification.json & sub=$!
 sleep 0.3
 curl -sf -o /dev/null -X POST "$URL/entities" -H 'Content-Type: application/ld+json' \

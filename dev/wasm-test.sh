@@ -19,7 +19,7 @@ node -e "
 trap 'kill $SHIM $RECV 2>/dev/null || true' EXIT
 for _ in $(seq 1 50); do curl -sf "http://127.0.0.1:$PORT/q/health" >/dev/null && break; sleep 0.2; done
 
-CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/ngsi-ld/v1/entities" \
   -H 'Content-Type: application/ld+json' \
   -d "{\"id\":\"urn:ngsi-ld:Smoke:1\",\"type\":\"Smoke\",\"v\":{\"type\":\"Property\",\"value\":1},\"@context\":\"$CTX\"}")
