@@ -1579,6 +1579,101 @@ mod tests {
         assert_eq!(body_json(resp).await["status"], "NOT_READY");
     }
 
+    /// The operations of `docs/openapi/antares-admin.yaml`, read with a
+    /// line scan: an OpenAPI path is a two-space-indented key under
+    /// `paths:`, a method a four-space-indented HTTP verb under it. The
+    /// document is ours and hand-written, so its layout is fixed.
+    fn documented_operations() -> Vec<(String, Vec<&'static str>)> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/openapi/antares-admin.yaml"
+        );
+        let text = std::fs::read_to_string(path).expect("antares-admin.yaml beside the crates");
+        let mut ops: Vec<(String, Vec<&'static str>)> = Vec::new();
+        let mut in_paths = false;
+        for line in text.lines() {
+            if line == "paths:" {
+                in_paths = true;
+            } else if !line.starts_with(' ') && !line.is_empty() {
+                in_paths = false;
+            }
+            if !in_paths {
+                continue;
+            }
+            let key = line.trim_start();
+            let indent = line.len() - key.len();
+            let Some(key) = key.strip_suffix(':') else {
+                continue;
+            };
+            if indent == 2 && key.starts_with('/') {
+                ops.push((key.to_owned(), Vec::new()));
+            } else if indent == 4 {
+                if let Some(last) = ops.last_mut() {
+                    if let Some(m) = ["get", "post", "put", "patch", "delete"]
+                        .into_iter()
+                        .find(|m| *m == key)
+                    {
+                        last.1.push(m);
+                    }
+                }
+            }
+        }
+        ops
+    }
+
+    /// The operational OpenAPI document and the router describe the same
+    /// surface. Paths: the document lists exactly the admin surface plus
+    /// the 5.8.1.4 peer wire. Methods, proven from outside on the live
+    /// router: a documented method is never answered 405, and a method
+    /// the document omits always is. A route added on one side alone
+    /// fails here.
+    #[tokio::test]
+    async fn operational_openapi_matches_the_router() {
+        let ops = documented_operations();
+        let mut documented: Vec<&str> = ops.iter().map(|(p, _)| p.as_str()).collect();
+        documented.sort_unstable();
+        let mut mounted: Vec<String> = Admin::PATHS
+            .iter()
+            .map(|p| format!("{}{p}", Admin.prefix()))
+            .collect();
+        mounted.push("/ex/v1/remote-notify".into());
+        mounted.sort_unstable();
+        assert_eq!(
+            documented, mounted,
+            "paths in antares-admin.yaml vs the router"
+        );
+
+        let app = app();
+        for (path, methods) in &ops {
+            assert!(!methods.is_empty(), "{path} documents no method");
+            let concrete = path.replace("{tenant}", "default").replace("{id}", "x");
+            for m in ["get", "post", "put", "patch", "delete"] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        // an explicit zero length: the body layer answers
+                        // 411 to a length-less write before routing
+                        Request::builder()
+                            .method(m.to_ascii_uppercase().as_str())
+                            .uri(&concrete)
+                            .header(axum::http::header::CONTENT_LENGTH, "0")
+                            .body(Body::empty())
+                            .expect("req"),
+                    )
+                    .await
+                    .expect("resp");
+                let refused = resp.status() == StatusCode::METHOD_NOT_ALLOWED;
+                assert_eq!(
+                    refused,
+                    !methods.contains(&m),
+                    "{m} {path}: documented={} answered {}",
+                    methods.contains(&m),
+                    resp.status()
+                );
+            }
+        }
+    }
+
     /// A pod without the api role serves ops endpoints ONLY —
     /// the NGSI-LD surface must NOT be reachable on it.
     #[tokio::test]

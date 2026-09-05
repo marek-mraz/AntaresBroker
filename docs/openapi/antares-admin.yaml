@@ -1,0 +1,610 @@
+openapi: 3.1.0
+info:
+  title: Antares operational API
+  version: 0.1.0
+  description: |
+    Every route the broker serves outside the NGSI-LD API root
+    (`/ngsi-ld/v1`), which ETSI GS CIM 009 defines and whose OpenAPI
+    document is vendored beside this one (`ngsi-ld-api.yaml`).
+
+    `/q/` is the operator surface: liveness, readiness, Prometheus text,
+    the tenant inventory and purge, and the dead-letter admin. It carries
+    no NGSI-LD semantics, adds no authentication of its own and belongs
+    behind the gateway. A worker pod (`ANTARES_ROLES` without `api`)
+    serves these routes and nothing else.
+
+    `/ex/v1/` is the peer-facing wire between brokers (5.8.1.4), versioned
+    independently of the NGSI-LD API version (ADR-0019).
+
+    Deployment surfaces under `/x/` document themselves; the broker only
+    guarantees the mount rules.
+
+    Errors use the CIM 009 6.3.3 shape: `application/json` carrying the
+    RFC 7807 members `type`, `title`, `status`, `detail`.
+  license:
+    name: EUPL-1.2
+    url: https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12
+
+# Deliberately none: the broker takes no authentication decision of its own;
+# the gateway in front of it does (the policy seam only narrows).
+security: []
+
+servers:
+  - url: '{protocol}://{hostname}:{port}'
+    variables:
+      protocol:
+        enum: [http, https]
+        default: https
+      hostname:
+        default: localhost
+      port:
+        default: '443'
+
+tags:
+  - name: Health
+    description: Liveness, readiness and metrics for the orchestrator and the scraper.
+  - name: Tenants
+    description: The customer accounts the backends know. Snapshot tenants and the broker's indexes are internal and never listed.
+  - name: Dead letters
+    description: Notifications the delivery policy gave up on, kept for one more attempt or for disposal.
+  - name: Peer wire
+    description: What another broker posts to this one.
+
+paths:
+  /q/health:
+    get:
+      tags: [Health]
+      summary: Liveness and the process view
+      operationId: health
+      description: |
+        `200` with the process view, `503` while the instance drains so a
+        load balancer stops routing before the listener closes. Point the
+        liveness probe here.
+      responses:
+        '200':
+          description: The instance is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: The instance is draining; `status` is `DRAINING`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /q/ready:
+    get:
+      tags: [Health]
+      summary: Readiness for the load balancer
+      operationId: ready
+      description: |
+        `200` when the instance is not draining, the store answers a
+        trivial request (`SELECT 1` on Postgres) and, under `bus=nats`,
+        the bus is connected; `503` otherwise with the failing member
+        `false`. Point the readiness probe here: a restart does not cure a
+        lost database, so this is not liveness.
+      responses:
+        '200':
+          description: Ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ready'
+        '503':
+          description: Not ready; `status` is `NOT_READY`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ready'
+
+  /q/metrics:
+    get:
+      tags: [Health]
+      summary: Prometheus text
+      operationId: metrics
+      description: |
+        Prometheus exposition text with the `antares_` prefix. `404` until
+        the broker installs a recorder (`ANTARES_TELEMETRY`); the metric
+        names are listed in the Admin API chapter of the book.
+      responses:
+        '200':
+          description: Exposition text.
+          content:
+            text/plain; version=0.0.4:
+              schema:
+                type: string
+        '404':
+          description: No recorder installed in this build or configuration.
+
+  /q/tenants:
+    get:
+      tags: [Tenants]
+      summary: Tenant names
+      operationId: listTenants
+      description: |
+        The names, sorted, and nothing else: at the 10 000-tenant target a
+        list carrying per-kind counts would cost a count per kind per
+        tenant on one request. Pick a name and read its detail.
+      responses:
+        '200':
+          description: The tenant names.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+                examples:
+                  - ["default", "acme", "zoo"]
+
+  /q/tenants/{tenant}:
+    parameters:
+      - $ref: '#/components/parameters/tenantPath'
+    get:
+      tags: [Tenants]
+      summary: What one tenant holds
+      operationId: getTenant
+      description: |
+        `200` with the per-kind counts. The default tenant always exists
+        (CIM 009 5.5.10) and is readable even when empty. `createdAt` is
+        present on Postgres, where the `tenants` table records it. The
+        path names the tenant; an `NGSILD-Tenant` header is ignored.
+      responses:
+        '200':
+          description: The tenant and its counts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          $ref: '#/components/responses/BadTenant'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Tenants]
+      summary: Tenant purge
+      operationId: purgeTenant
+      description: |
+        Removes every document of the tenant from both backends,
+        snapshots and hosted `@context` documents included. The default
+        tenant is emptied and keeps existing. Deleted subscriptions and
+        registrations are announced to the bus mirrors the way an API
+        delete is.
+      responses:
+        '204':
+          description: Purged.
+        '400':
+          $ref: '#/components/responses/BadTenant'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            The tenant still holds a distributed subscription whose copy
+            lives at a Context Source. Delete that Subscription first
+            (5.8.5.4 removes the copy at its source); a purge never
+            orphans it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /q/dead-letters:
+    get:
+      tags: [Dead letters]
+      summary: Dead letters of one tenant
+      operationId: listDeadLetters
+      description: |
+        Newest first. Endpoint userinfo, `receiverInfo`, `notifierInfo`
+        and the rendered `headers` of an older letter are shown blanked;
+        the stored letter keeps them so a replay still authenticates.
+      parameters:
+        - $ref: '#/components/parameters/tenantQuery'
+        - name: subscription
+          in: query
+          description: Only the letters of this Subscription id.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Page size, a positive integer.
+          schema:
+            type: integer
+            minimum: 1
+            default: 100
+      responses:
+        '200':
+          description: The letters.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DeadLetter'
+        '400':
+          description: A `limit` that is not a positive integer, or a tenant outside the grammar.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /q/dead-letters/{id}:
+    parameters:
+      - $ref: '#/components/parameters/deadLetterId'
+      - $ref: '#/components/parameters/tenantQuery'
+    delete:
+      tags: [Dead letters]
+      summary: Drop a dead letter
+      operationId: deleteDeadLetter
+      description: |
+        The letter is the only copy of a notification the delivery policy
+        gave up on; this is the one route that discards it.
+      responses:
+        '204':
+          description: Dropped.
+        '400':
+          $ref: '#/components/responses/BadTenant'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /q/dead-letters/{id}/replay:
+    parameters:
+      - $ref: '#/components/parameters/deadLetterId'
+      - $ref: '#/components/parameters/tenantQuery'
+    post:
+      tags: [Dead letters]
+      summary: One more delivery attempt
+      operationId: replayDeadLetter
+      description: |
+        Re-sends the stored request once through the same binding, under
+        the egress policy of the moment. On success the letter is gone;
+        on failure it is kept with its attempt history extended.
+      responses:
+        '204':
+          description: Delivered; the letter is deleted.
+        '400':
+          $ref: '#/components/responses/BadTenant'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          description: The delivery failed again; the letter is kept.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, detail]
+                properties:
+                  id:
+                    type: string
+                  detail:
+                    type: string
+                    description: The failure text.
+
+  /ex/v1/remote-notify:
+    post:
+      tags: [Peer wire]
+      summary: Notification from a forwarded subscription copy
+      operationId: remoteNotify
+      description: |
+        Where a Context Source posts a notification for a distributed
+        subscription this broker created (CIM 009 5.8.1.4). The body is
+        an NGSI-LD Notification whose `subscriptionId` is a
+        broker-generated routing key, never the subscriber's own
+        Subscription id. The `NGSILD-Tenant` header is not read; the key
+        resolves to the tenant and the local subscription. The body limit
+        and the bounds wall apply as on every route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscriptionId]
+              properties:
+                subscriptionId:
+                  type: string
+                  description: The routing key the forwarded copy was created with.
+                data:
+                  type: array
+                  description: The notified Entities; at most `ANTARES_MAX_BATCH_ITEMS`.
+                  items:
+                    type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Accepted, including when the mapping resolves but nothing was left to deliver.
+        '400':
+          description: |
+            The body is not JSON, has no `subscriptionId`, or its `data`
+            carries more Entities than `ANTARES_MAX_BATCH_ITEMS`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '404':
+          description: No distributed subscription maps the key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+components:
+  parameters:
+    tenantPath:
+      name: tenant
+      in: path
+      required: true
+      description: A tenant name within the tenant grammar; the broker's internal names are refused.
+      schema:
+        type: string
+    tenantQuery:
+      name: tenant
+      in: query
+      description: The tenant the letters belong to; the default tenant when absent.
+      schema:
+        type: string
+    deadLetterId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        examples:
+          - urn:ngsi-ld:DeadLetter:6f1c2e7a-8e1b-4c1f-9d3a-2b6a0f5e7c11
+
+  responses:
+    BadTenant:
+      description: A name outside the tenant grammar, or one of the broker's internal names.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    NotFound:
+      description: The resource does not exist in that tenant.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+  schemas:
+    ProblemDetails:
+      type: object
+      description: CIM 009 5.5.3 error payload, served as `application/json` (6.3.3).
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          examples:
+            - https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+
+    Health:
+      type: object
+      required: [status, store, temporal, version, commit, policy, limits, surfaces, notificationSchemes, deadLetters, changesDropped, taskPanics, temporalDrainErrors]
+      properties:
+        status:
+          type: string
+          enum: [UP, DRAINING]
+        store:
+          type: string
+          description: The current-state backend.
+          enum: [memory, file, postgres, timescale]
+        temporal:
+          type: string
+          description: The history backend, or `none` when history is off.
+          enum: [memory, file, postgres, timescale, none]
+        storeInfo:
+          $ref: '#/components/schemas/DriverInfo'
+        temporalInfo:
+          $ref: '#/components/schemas/DriverInfo'
+        version:
+          type: string
+          description: Workspace version.
+        commit:
+          type: string
+          description: The git hash the binary was built from.
+        notificationSchemes:
+          type: array
+          description: Endpoint URI schemes this build can deliver notifications to.
+          items:
+            type: string
+        deadLetters:
+          type: integer
+          description: Dead letters this process wrote since start.
+        changesDropped:
+          type: integer
+          description: Changes the bounded matcher queue refused since start.
+        taskPanics:
+          type: integer
+          description: Panics absorbed at the notification-task boundary since start.
+        temporalDrainErrors:
+          type: integer
+          description: Post-response history writes that failed since start.
+        policy:
+          type: object
+          required: [engine, timeoutMs]
+          properties:
+            engine:
+              type: string
+              description: The policy engine this binary was started with; `allow-all` means none is attached.
+            timeoutMs:
+              type: integer
+        surfaces:
+          type: object
+          description: The mounted admin surfaces by name.
+          additionalProperties:
+            type: object
+            required: [prefix]
+            properties:
+              prefix:
+                type: string
+              routes:
+                type: integer
+            additionalProperties: true
+        limits:
+          type: object
+          description: Every `max*` cap in force, the `rejected*` counters of requests refused by it, and the notification-pipeline ceilings.
+          additionalProperties:
+            type: integer
+        memory:
+          type: object
+          description: jemalloc live and resident bytes.
+          properties:
+            allocatedBytes:
+              type: integer
+            residentBytes:
+              type: integer
+        commitQueueDepth:
+          type: integer
+          description: Writers queued behind a single committer (`file` store); absent otherwise.
+        commitQueuePeak:
+          type: integer
+        bus:
+          $ref: '#/components/schemas/BusStats'
+      additionalProperties: false
+
+    DriverInfo:
+      type: object
+      description: What a driver runs on; absent when it has nothing to add to its name.
+      properties:
+        engine:
+          type: string
+        poolSize:
+          type: integer
+        poolAcquireTimeoutSeconds:
+          type: integer
+        server:
+          type: string
+        postgis:
+          type: string
+        timescaledb:
+          type: string
+      additionalProperties: true
+
+    BusStats:
+      type: object
+      description: Present under `ANTARES_BUS=nats` only.
+      required: [mode, connected, reconnects]
+      properties:
+        mode:
+          type: string
+        connected:
+          type: boolean
+        reconnects:
+          type: integer
+
+    Ready:
+      type: object
+      required: [status, store]
+      properties:
+        status:
+          type: string
+          enum: [READY, NOT_READY]
+        store:
+          type: boolean
+          description: The store answered a trivial request.
+        bus:
+          $ref: '#/components/schemas/BusStats'
+      additionalProperties: false
+
+    Tenant:
+      type: object
+      required: [tenant, counts]
+      properties:
+        tenant:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          description: Postgres only.
+        counts:
+          type: object
+          required: [entities, subscriptions, csourceSubscriptions, registrations, snapshots, entityMaps, distSubs, attrInstances]
+          properties:
+            entities:
+              type: integer
+            subscriptions:
+              type: integer
+            csourceSubscriptions:
+              type: integer
+            registrations:
+              type: integer
+            snapshots:
+              type: integer
+            entityMaps:
+              type: integer
+            distSubs:
+              type: integer
+            attrInstances:
+              type: integer
+              description: Temporal attribute instances held for the tenant.
+          additionalProperties: false
+      additionalProperties: false
+
+    DeadLetter:
+      type: object
+      description: Everything a replay needs to send the same request again, plus the attempt history. Credential-bearing members are blanked on the way out.
+      required: [id, type, subscriptionId, uri, timeoutMs, attempts, firstError, lastError, firstAt, lastAt, binding, payload]
+      properties:
+        id:
+          type: string
+          examples:
+            - urn:ngsi-ld:DeadLetter:6f1c2e7a-8e1b-4c1f-9d3a-2b6a0f5e7c11
+        type:
+          type: string
+          const: DeadLetter
+        subscriptionId:
+          type: string
+        uri:
+          type: string
+          format: uri
+          description: The notification endpoint, userinfo redacted.
+        binding:
+          type: string
+          description: The endpoint scheme the letter is replayed through.
+        timeoutMs:
+          type: integer
+        attempts:
+          type: integer
+        firstError:
+          type: string
+        lastError:
+          type: string
+        firstAt:
+          type: string
+          format: date-time
+        lastAt:
+          type: string
+          format: date-time
+        payload:
+          description: The notification body as it was sent.
+        accept:
+          type: string
+        link:
+          type: string
+        receiverInfo:
+          $ref: '#/components/schemas/KeyValuePairs'
+        notifierInfo:
+          $ref: '#/components/schemas/KeyValuePairs'
+        headers:
+          $ref: '#/components/schemas/KeyValuePairs'
+          description: Present on a letter written before the bindings moved behind the registry.
+      additionalProperties: true
+
+    KeyValuePairs:
+      type: array
+      description: CIM 009 5.2.22 KeyValuePair entries, each rendered as a `[key, value]` pair; every value reads `[redacted]` here.
+      items:
+        type: array
+        prefixItems:
+          - type: string
+          - type: string
+        minItems: 2
+        maxItems: 2

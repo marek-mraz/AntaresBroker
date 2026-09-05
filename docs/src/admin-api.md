@@ -10,6 +10,11 @@ deployment mounted. Everything else the broker answers is CIM 009, and the
 pod (`ANTARES_ROLES` without `api`) serves only these routes. Errors use the
 same problem-details shape as the NGSI-LD API.
 
+The same routes as an OpenAPI document, with every status code and response
+schema: `docs/openapi/antares-admin.yaml`, rendered at
+<https://antares-ngsi-ld-demo.marek-mraz.com/docs/admin-api.html> (see the
+[API reference](api.md)).
+
 | Route | Purpose |
 |---|---|
 | `GET /q/health` | Liveness and the process view |

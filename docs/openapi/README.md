@@ -30,3 +30,14 @@ so moving the pin has to move both.
 CI: a PR that touches this file runs `oasdiff breaking` against the
 version on the base branch. Rendering: ReDoc (the CIM 047 Annex B
 recommendation) builds `api.html` beside the book in the Pages deploy.
+
+## The broker's own routes
+
+`antares-admin.yaml` describes every route outside the NGSI-LD API root:
+the `/q/` operator surface and the `/ex/v1/` peer wire. This one IS ours,
+hand-written from the handlers, because no standard fixes that contract.
+It is held to the code by a unit test in `antares-api` (`Admin` in
+`lib.rs`): every path and method the document lists must be mounted, and
+every mounted one must be listed, so a route added to the router without
+its documentation fails the build. The same `oasdiff breaking` gate and
+the same ReDoc render (`admin-api.html`) apply to it.

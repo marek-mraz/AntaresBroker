@@ -88,14 +88,18 @@ jobs:
           curl -sL https://github.com/rust-lang/mdBook/releases/download/v0.4.44/mdbook-v0.4.44-x86_64-unknown-linux-musl.tar.gz | tar xz
           ./mdbook build -d site/docs
 
-      # The vendored ETSI OpenAPI rendered with ReDoc (the CIM 047 Annex B
-      # recommendation) as one standalone page next to the book.
-      - name: Render the API spec with ReDoc
+      # The vendored ETSI OpenAPI and the broker's own operational API,
+      # each rendered with ReDoc (the CIM 047 Annex B recommendation) as a
+      # standalone page next to the book.
+      - name: Render the API specs with ReDoc
         # fail-soft: a renderer hiccup must not take the whole report deploy
         # down with it — the page then says so instead of 404ing
         run: |
-          npx --yes @redocly/cli@2.49.0 build-docs docs/openapi/ngsi-ld-api.yaml -o site/docs/api.html \
-            || echo '<!doctype html><title>NGSI-LD API</title><p>ReDoc render failed this deploy — see docs/openapi/ngsi-ld-api.yaml in the repo.' > site/docs/api.html
+          for pair in "ngsi-ld-api:api:NGSI-LD API" "antares-admin:admin-api:Antares operational API"; do
+            IFS=: read -r src page title <<< "$pair"
+            npx --yes @redocly/cli@2.49.0 build-docs "docs/openapi/$src.yaml" -o "site/docs/$page.html" \
+              || echo "<!doctype html><title>$title</title><p>ReDoc render failed this deploy — see docs/openapi/$src.yaml in the repo." > "site/docs/$page.html"
+          done
 
       # API reference beside the book: book at /docs, rustdoc at /api.
       - uses: dtolnay/rust-toolchain@stable
