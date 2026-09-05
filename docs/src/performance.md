@@ -176,7 +176,10 @@ per scenario. `MODE=check` runs the conformance assertions of
 `dev/perf/scenario-check.py` against a memory-store fleet in seconds;
 `MODE=load` runs the same assertions first and then a k6 rate ladder whose
 every number comes from k6's summary or the sink's counters. A verdict is
-computed from those numbers and its note names the failing assertion.
+computed from those numbers and its note names the failing assertion. The
+fleet notifies a single-process `sink.py` of its own on port 9810: the load
+rig's sink on 9800 runs multi-process, and its front door only folds the
+workers' counters.
 
 ```bash
 MODE=check STORE=memory   ./dev/perf/scenarios.sh              # all nine

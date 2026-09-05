@@ -42,19 +42,25 @@ case "${1:-}" in
     export ANTARES_HOST_ALIAS="${ANTARES_HOST_ALIAS:-$NAME}"
 
     BUS_NATS=0
+    DB_URL_GIVEN=0
     for kv in "$@"; do
       case "$kv" in
         ANTARES_BUS=nats) BUS_NATS=1 ;;
+        ANTARES_DATABASE_URL=*) DB_URL_GIVEN=1 ;;
       esac
       export "$kv"
     done
 
     if [ "$STORE" = "postgres" ]; then
-      PG_BASE="${PG_URL_BASE:-postgresql://antares:antares@127.0.0.1:5432}"
-      DB_NAME="antares_${NAME//-/_}"
-      export ANTARES_DATABASE_URL="$PG_BASE/$DB_NAME"
-      if [ -n "${PG_ADMIN_URL:-}" ]; then
-        psql "$PG_ADMIN_URL" -c "CREATE DATABASE \"$DB_NAME\";" >/dev/null 2>&1 || true
+      # one database per broker unless the caller names one: pods of an
+      # HA pair share theirs
+      if [ "$DB_URL_GIVEN" -eq 0 ]; then
+        PG_BASE="${PG_URL_BASE:-postgresql://antares:antares@127.0.0.1:5432}"
+        DB_NAME="antares_${NAME//-/_}"
+        export ANTARES_DATABASE_URL="$PG_BASE/$DB_NAME"
+        if [ -n "${PG_ADMIN_URL:-}" ]; then
+          psql "$PG_ADMIN_URL" -c "CREATE DATABASE \"$DB_NAME\";" >/dev/null 2>&1 || true
+        fi
       fi
       if [ "$BUS_NATS" -eq 0 ]; then
         export ANTARES_ALLOW_SHARED_LOCAL=1

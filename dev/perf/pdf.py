@@ -285,7 +285,7 @@ def diagram_scenario_world(scen_name: str) -> Drawing:
         d.add(make_box(20, 16, 120, 38, "Antares Broker", ":9101-:9104", bg="#ebf8ff", stroke="#90cdf4"))
         d.add(make_cylinder(175, 16, 80, 38, "Storage"))
         d.add(make_arrow(140, 35, 175, 35, "read/write"))
-        d.add(make_box(345, 16, 130, 38, "Notification Sink", ":9800", bg="#fefcbf", stroke="#ecc94b"))
+        d.add(make_box(345, 16, 130, 38, "Notification Sink", ":9810", bg="#fefcbf", stroke="#ecc94b"))
         d.add(make_arrow(140, 45, 345, 45, "push notifications"))
     elif scen_name in ("hub-sources", "collision"):
         d.add(make_box(15, 16, 100, 38, "Hub Broker", ":9105 / :9108", bg="#ebf8ff", stroke="#90cdf4"))
@@ -305,7 +305,7 @@ def diagram_scenario_world(scen_name: str) -> Drawing:
         d.add(make_box(15, 16, 95, 38, "Hub Broker", ":9112", bg="#ebf8ff", stroke="#90cdf4"))
         d.add(make_cloud(165, 16, 115, 38, "Source A (:9113)"))
         d.add(make_arrow(110, 35, 165, 35, "forward sub"))
-        d.add(make_box(355, 16, 115, 38, "Hub Sink", ":9800", bg="#fefcbf", stroke="#ecc94b"))
+        d.add(make_box(355, 16, 115, 38, "Hub Sink", ":9810", bg="#fefcbf", stroke="#ecc94b"))
         d.add(make_arrow(280, 35, 355, 35, "notification"))
     elif scen_name == "ha-pair":
         d.add(make_box(20, 16, 85, 38, "Pod 1", ":9114", bg="#ebf8ff", stroke="#90cdf4"))

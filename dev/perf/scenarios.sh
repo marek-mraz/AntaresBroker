@@ -16,20 +16,23 @@ BIN="${BIN:-target/release/antares}"
 SCEN_DIR="$OUT/scenarios"
 mkdir -p "$SCEN_DIR"
 
-SINK_PORT=9800
+# The scenarios' own single-process sink. The load rig's sink on 9800 runs
+# multi-process: its front door only folds /stats and answers a POST with
+# 501, so a notification sent there is counted nowhere.
+SINK_PORT=9810
 SINK_URL="http://127.0.0.1:$SINK_PORT"
 FLEET="bash dev/perf/fleet.sh"
 CHECK="python3 dev/perf/scenario-check.py"
 CTX="https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
 
-# Start sink if not alive
+SINK_PID=""
 if ! curl -sf "$SINK_URL/stats" >/dev/null; then
-  python3 dev/perf/sink.py "$SINK_PORT" > "$OUT/sink.log" 2>&1 &
-  echo $! > "$OUT/sink.pid"
+  python3 dev/perf/sink.py "$SINK_PORT" > "$SCEN_DIR/sink.log" 2>&1 &
+  SINK_PID=$!
   sleep 1
 fi
 
-trap '$FLEET stop-all' EXIT
+trap '$FLEET stop-all; kill "${SINK_PID:-}" 2>/dev/null || true' EXIT
 
 record_verdict() {
   local scen=$1 verd=$2 num=$3 note=$4
@@ -726,7 +729,7 @@ scenario_distributed_subscription() {
     fi
   else
     if ! $CHECK distributed-subscription --broker "http://127.0.0.1:$ph" --source "http://127.0.0.1:$pa" --sink "$SINK_URL"; then
-      record_verdict "distributed-subscription" "FAIL" "check failed" "remote change notified to hub subscriber"
+      record_verdict "distributed-subscription" "FAIL" "check failed" "remote change did not notify the hub subscriber"
       $FLEET stop s8-hub; $FLEET stop s8-srca
       return 1
     fi
@@ -817,7 +820,7 @@ scenario_ha_pair() {
     fi
   else
     if ! $CHECK ha-pair --broker "http://127.0.0.1:$p1" --source "http://127.0.0.1:$p2" --sink "$SINK_URL"; then
-      record_verdict "ha-pair" "FAIL" "check failed" "writes across both pods delivered without duplicates"
+      record_verdict "ha-pair" "FAIL" "check failed" "writes across both pods were not delivered exactly once"
       $FLEET stop s9-pod1; $FLEET stop s9-pod2
       return 1
     fi

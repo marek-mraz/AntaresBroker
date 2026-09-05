@@ -43,6 +43,15 @@ class TestScenarioHelpers(unittest.TestCase):
                 if line.startswith('      echo "- '):
                     self.assertIn("$", line, f"Line {idx} in scenarios.sh claims a result it did not measure: {line.strip()}")
 
+    def test_scenario_sink_is_not_the_load_rigs_front_door(self):
+        # load.sh leaves a multi-process sink on 9800 whose front door takes no POST;
+        # a scenario sink on that port counts no notification
+        scenarios_path = os.path.join(os.path.dirname(__file__), "scenarios.sh")
+        with open(scenarios_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertNotIn("SINK_PORT=9800", content)
+        self.assertIn("SINK_PORT=9810", content)
+
     def test_every_scenario_calls_check_in_both_modes(self):
         scenarios_path = os.path.join(os.path.dirname(__file__), "scenarios.sh")
         with open(scenarios_path, "r", encoding="utf-8") as f:
