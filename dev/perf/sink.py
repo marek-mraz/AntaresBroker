@@ -24,6 +24,7 @@ lock = threading.Lock()
 stats = {"posts": 0, "entities": 0, "bytes": 0, "gets": 0, "first": None, "last": None}
 subscriptions = set()
 by_sub = {}   # subscriptionId -> entities delivered (fire.sh folds per class)
+by_entity = {}  # entityId -> delivery count across notifications
 csr_gets = {}  # /csr/<k> -> calls (the federated-query stage)
 
 
@@ -41,21 +42,39 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _check_slow(self):
+        if self.path.startswith("/slow/"):
+            parts = self.path[6:].split("/", 1)
+            try:
+                ms = float(parts[0])
+                time.sleep(ms / 1000.0)
+            except Exception:
+                pass
+            self.path = "/" + parts[1] if len(parts) > 1 else "/"
+
     def do_POST(self):
+        self._check_slow()
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n)
         now = time.time()
         sid, items = None, 0
+        eids = []
         try:
             doc = json.loads(body)
             sid = doc.get("subscriptionId")
-            items = len(doc.get("data") or [])
+            data_arr = doc.get("data") or []
+            items = len(data_arr)
+            for item in data_arr:
+                if isinstance(item, dict) and "id" in item:
+                    eids.append(item["id"])
         except Exception:
             pass
         with lock:
             if sid:
                 subscriptions.add(sid)
                 by_sub[sid] = by_sub.get(sid, 0) + items
+            for eid in eids:
+                by_entity[eid] = by_entity.get(eid, 0) + 1
             stats["posts"] += 1
             stats["entities"] += items
             stats["bytes"] += n
@@ -66,11 +85,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        self._check_slow()
         if self.path == "/stats":
             with lock:
                 s = dict(stats)
                 s["subscriptions"] = len(subscriptions)
                 s["by_sub"] = dict(by_sub)
+                s["by_entity"] = dict(by_entity)
                 s["csr_gets"] = dict(csr_gets)
             span = (s["last"] - s["first"]) if s["first"] and s["last"] and s["last"] > s["first"] else 0
             s["posts_per_second"] = round(s["posts"] / span, 1) if span else None
@@ -87,6 +108,7 @@ class Handler(BaseHTTPRequestHandler):
             stats.update(posts=0, entities=0, bytes=0, gets=0, first=None, last=None)
             subscriptions.clear()
             by_sub.clear()
+            by_entity.clear()
             csr_gets.clear()
         self.send_response(204)
         self.send_header("Content-Length", "0")
@@ -108,14 +130,14 @@ class Aggregate(BaseHTTPRequestHandler):
         if self.path != "/stats":
             self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers(); return
         tot = {"posts": 0, "entities": 0, "bytes": 0, "gets": 0, "first": None, "last": None,
-               "subscriptions": 0, "by_sub": {}, "csr_gets": {}}
+               "subscriptions": 0, "by_sub": {}, "by_entity": {}, "csr_gets": {}}
         for p in self.ports:
             s = json.load(urllib.request.urlopen(f"http://127.0.0.1:{p}/stats"))
             for k in ("posts", "entities", "bytes", "gets", "subscriptions"):
-                tot[k] += s[k]
-            for k in ("by_sub", "csr_gets"):
-                for sid, n in s[k].items():
-                    tot[k][sid] = tot[k].get(sid, 0) + n
+                tot[k] += s.get(k, 0)
+            for k in ("by_sub", "by_entity", "csr_gets"):
+                for key, n in s.get(k, {}).items():
+                    tot[k][key] = tot[k].get(key, 0) + n
             if s["first"]:
                 tot["first"] = min(tot["first"] or s["first"], s["first"])
             if s["last"]:

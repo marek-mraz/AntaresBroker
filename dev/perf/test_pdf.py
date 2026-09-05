@@ -149,8 +149,30 @@ Rig: broker, postgres, mosquitto, sink, k6.
 - shapes.md — req/s + p99 per request shape
 - fire.md — subscriptions under update stream
 - fed.md — federated queries
+- scenarios/ — edge and topology scenario tables
 - report.pdf — narrated report
 - perf.json + index.html — folded report
+"""
+
+SAMPLE_VERDICTS = """| scenario | verdict | limit or key number | note |
+|---|---|---|---|
+| hot-entity | PASS | 1000 rps | 5.6.3 multi-instance datasetId updates preserved |
+| noisy-tenant | PASS | 500 rps | quiet tenant unaffected by loud flood |
+| slow-subscriber | PASS | 200 rps | deliveryWidthPerTenant isolated slow endpoint |
+| fan-in | PASS | 100 rps | 50 000 notifs/s delivered |
+| hub-sources | PASS | 200 rps | federated reads and merges complete |
+| collision | PASS | 409 Conflict | 4.3.6.2 aux local-wins and 5.9.2.4 conflicts |
+| loop | PASS | 508 Loop Detected | 6.3.17 loop cut by Via header |
+| distributed-subscription | PASS | 100 rps | 5.8.1.4 remote changes notified to hub |
+| ha-pair | PASS | zero duplicates | writes across pods notified exactly once |
+"""
+
+SAMPLE_HOT_ENTITY = """Contention on 1 hot entity vs spread over 1000 entities.
+
+| rate | spread | req/s | p99 | 409/5xx | notes |
+|---|---|---|---|---|---|
+| 100 | 1 hot entity | 100 | 2.1 ms | 0 | row lock contention |
+| 200 | 1 hot entity | 200 | 3.5 ms | 0 | row lock contention |
 """
 
 SAMPLE_HEALTH = """{"changesDropped":38068,"commit":"799f38b","deadLetters":0,"limits":{"changeQueue":1024,"deliveryWidth":64,"maxBatchItems":1000,"maxBodyBytes":4194304,"maxUriBytes":8192},"memory":{"allocatedBytes":119026344,"residentBytes":3189354496},"status":"UP","store":"postgres","version":"0.1.0"}
@@ -185,6 +207,11 @@ class TestPdfReport(unittest.TestCase):
             (p / "health-final.json").write_text(SAMPLE_HEALTH)
             (p / "rss.csv").write_text(generate_rss_csv())
 
+            scen_dir = p / "scenarios"
+            scen_dir.mkdir(parents=True, exist_ok=True)
+            (scen_dir / "verdicts.md").write_text(SAMPLE_VERDICTS)
+            (scen_dir / "hot-entity.md").write_text(SAMPLE_HOT_ENTITY)
+
             record = {
                 "commit": "799f38b",
                 "host": "x86_64 32 cpus (ccx53)",
@@ -198,6 +225,8 @@ class TestPdfReport(unittest.TestCase):
                     "fire": pdf.md_table(SAMPLE_FIRE),
                     "fire-classes": pdf.md_table(SAMPLE_FIRE_CLASSES),
                     "fed": pdf.md_table(SAMPLE_FED),
+                    "verdicts": pdf.md_table(SAMPLE_VERDICTS),
+                    "hot-entity": pdf.md_table(SAMPLE_HOT_ENTITY),
                 }
             }
 

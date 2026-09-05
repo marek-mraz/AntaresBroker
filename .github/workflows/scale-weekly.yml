@@ -32,6 +32,9 @@ on:
       server_type:
         description: Hetzner server type (ccx33 = 8 dedicated vCPU / 32 GB, ccx43 = 16 / 64, ccx53 = 32 / 128)
         default: ccx53
+      scenarios:
+        description: deployment scenarios to run (all, none, or space-separated names)
+        default: "all"
 
 # The Hetzner credentials are the sensitive part of this run; the
 # GITHUB_TOKEN itself only has to read the checkout.
@@ -166,8 +169,10 @@ jobs:
             -c shared_preload_libraries=pg_stat_statements
           docker run -d --name mqtt --network host eclipse-mosquitto:2.0.22 \
             sh -c 'printf "listener 1883\nallow_anonymous true\n" > /mosquitto/config/perf.conf && exec mosquitto -c /mosquitto/config/perf.conf'
+          docker run -d --name nats --network host nats:2.10-alpine -js
           until docker exec pg pg_isready -q; do sleep 1; done
           until (exec 3<>/dev/tcp/127.0.0.1/1883) 2>/dev/null; do sleep 1; done
+          until (exec 3<>/dev/tcp/127.0.0.1/4222) 2>/dev/null; do sleep 1; done
       - name: Build the release broker
         run: cargo build --release --locked -p antares-broker
       - name: Start the broker under the resident-set sampler
@@ -206,6 +211,17 @@ jobs:
           TENANTS=$TENANTS SUBS=$SUBS ENTITIES=$ENTITIES MQTT=1 BROKER_URL=http://127.0.0.1:9090 ./dev/perf/fire.sh
           # federated queries across the loaded registrations (all at the sink)
           TENANTS=$TENANTS BROKER_URL=http://127.0.0.1:9090 ./dev/perf/fed.sh
+      - name: Deployment scenarios
+        if: always()
+        run: |
+          SCEN="${{ inputs.scenarios || 'all' }}"
+          if [ "$SCEN" != "none" ]; then
+            MODE=load STORE=postgres BIN=target/release/antares \
+              NATS_URL=nats://127.0.0.1:4222 \
+              PG_URL_BASE=postgresql://antares:antares@127.0.0.1:5432 \
+              PG_ADMIN_URL="$DATABASE_URL" \
+              ./dev/perf/scenarios.sh "$SCEN"
+          fi
       - name: Resident set verdict
         if: always()
         run: ./dev/perf/rss.sh stop
@@ -248,6 +264,7 @@ jobs:
           - shapes.md — req/s + p99 per request shape; saturate-*.csv/.jsonl + saturate.md — the knee.
           - fire-<rate>.json + fire.md — subscriptions under the update stream: due vs delivered, drops.
           - fed-<rate>.json + fed.md — federated queries over the registrations.
+          - scenarios/ — edge and topology scenario tables (verdicts.md, hot-entity, noisy-tenant, etc.).
           - sink-stats.json — what the sink received; sink.log; broker.log — broker stderr (warnings
             on drops, pool waits, breaker trips).
           - pg-stats.csv — pg_stat_user_tables/indexes, the 40 costliest statements (pg_stat_statements,
@@ -259,7 +276,14 @@ jobs:
         if: always()
         run: |
           python3 dev/perf/report.py "$OUT"
-          { echo "## Scale run (scale $SCALE, ${{ env.SERVER_TYPE }})"; python3 dev/perf/report.py "$OUT" --readme; } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Scale run (scale $SCALE, ${{ env.SERVER_TYPE }})"
+            python3 dev/perf/report.py "$OUT" --readme
+            if [ -f "$OUT/scenarios/verdicts.md" ]; then
+              echo "### Deployment scenario verdicts"
+              cat "$OUT/scenarios/verdicts.md"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

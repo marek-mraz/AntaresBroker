@@ -30,6 +30,16 @@ TABLES = [
     ("fire.md", "Subscriptions under an update stream"),
     ("fire-classes.md", "Notifications due and delivered per subscription class"),
     ("fed.md", "Federated queries over the registrations"),
+    ("scenarios/verdicts.md", "Deployment scenario verdicts"),
+    ("scenarios/hot-entity.md", "Scenario: hot-entity"),
+    ("scenarios/noisy-tenant.md", "Scenario: noisy-tenant"),
+    ("scenarios/slow-subscriber.md", "Scenario: slow-subscriber"),
+    ("scenarios/fan-in.md", "Scenario: fan-in"),
+    ("scenarios/hub-sources.md", "Scenario: hub-sources"),
+    ("scenarios/collision.md", "Scenario: collision"),
+    ("scenarios/loop.md", "Scenario: loop"),
+    ("scenarios/distributed-subscription.md", "Scenario: distributed-subscription"),
+    ("scenarios/ha-pair.md", "Scenario: ha-pair"),
     ("noise-profile.txt", "Noise profile"),
 ]
 

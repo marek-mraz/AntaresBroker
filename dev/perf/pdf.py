@@ -249,6 +249,75 @@ def diagram_dataset() -> Drawing:
     return d
 
 
+def diagram_topology_worlds() -> Drawing:
+    d = Drawing(CONTENT_WIDTH, 110)
+    d.add(Rect(0, 0, CONTENT_WIDTH, 110, rx=5, ry=5, fillColor=HexColor("#f8fafc"), strokeColor=HexColor("#e2e8f0"), strokeWidth=0.8))
+    # World 1: single broker
+    d.add(make_box(10, 50, 90, 38, "Single Broker", "one process", bg="#ebf8ff", stroke="#90cdf4"))
+    d.add(make_cylinder(25, 10, 60, 30, "Database"))
+    d.add(make_arrow(55, 50, 55, 40))
+    d.add(String(55, 96, "World 1: Single Node", textAnchor="middle", fontName="Helvetica-Bold", fontSize=7.5, fillColor=HexColor("#4a5568")))
+
+    # World 2: hub + sources
+    d.add(make_box(155, 60, 70, 28, "Hub Broker", ":9101", bg="#ebf8ff", stroke="#90cdf4"))
+    d.add(make_cloud(250, 75, 65, 24, "Source A"))
+    d.add(make_cloud(250, 45, 65, 24, "Source B"))
+    d.add(make_arrow(225, 78, 250, 85))
+    d.add(make_arrow(225, 70, 250, 55))
+    d.add(String(215, 15, "World 2: Federated Hub + Sources", textAnchor="middle", fontName="Helvetica-Bold", fontSize=7.5, fillColor=HexColor("#4a5568")))
+
+    # World 3: HA Pair on NATS
+    d.add(make_box(355, 62, 60, 26, "Pod 1", ":9114", bg="#ebf8ff", stroke="#90cdf4"))
+    d.add(make_box(440, 62, 60, 26, "Pod 2", ":9115", bg="#ebf8ff", stroke="#90cdf4"))
+    d.add(make_box(395, 34, 65, 20, "NATS Bus", "events", bg="#feebc8", stroke="#fbd38d"))
+    d.add(make_cylinder(395, 4, 65, 24, "Shared PG"))
+    d.add(make_arrow(385, 62, 400, 54))
+    d.add(make_arrow(470, 62, 455, 54))
+    d.add(make_arrow(427, 34, 427, 28))
+    d.add(String(427, 96, "World 3: HA Multi-Pod", textAnchor="middle", fontName="Helvetica-Bold", fontSize=7.5, fillColor=HexColor("#4a5568")))
+    return d
+
+
+def diagram_scenario_world(scen_name: str) -> Drawing:
+    d = Drawing(CONTENT_WIDTH, 70)
+    d.add(Rect(0, 0, CONTENT_WIDTH, 70, rx=4, ry=4, fillColor=HexColor("#f8fafc"), strokeColor=HexColor("#e2e8f0"), strokeWidth=0.8))
+    if scen_name in ("hot-entity", "noisy-tenant", "slow-subscriber", "fan-in"):
+        d.add(make_box(20, 16, 120, 38, "Antares Broker", ":9101-:9104", bg="#ebf8ff", stroke="#90cdf4"))
+        d.add(make_cylinder(175, 16, 80, 38, "Storage"))
+        d.add(make_arrow(140, 35, 175, 35, "read/write"))
+        d.add(make_box(345, 16, 130, 38, "Notification Sink", ":9800", bg="#fefcbf", stroke="#ecc94b"))
+        d.add(make_arrow(140, 45, 345, 45, "push notifications"))
+    elif scen_name in ("hub-sources", "collision"):
+        d.add(make_box(15, 16, 100, 38, "Hub Broker", ":9105 / :9108", bg="#ebf8ff", stroke="#90cdf4"))
+        d.add(make_cloud(170, 38, 115, 24, "Source A (:9106 / :9109)"))
+        d.add(make_cloud(170, 8, 115, 24, "Source B (:9107)"))
+        d.add(make_arrow(115, 42, 170, 50, "forward"))
+        d.add(make_arrow(115, 28, 170, 20, "forward"))
+        d.add(make_box(360, 16, 115, 38, "Merged Result", "assembled", bg="#e2e8f0", stroke="#cbd5e0"))
+        d.add(make_arrow(285, 48, 360, 40))
+        d.add(make_arrow(285, 20, 360, 30))
+    elif scen_name == "loop":
+        d.add(make_box(30, 16, 110, 38, "Broker A", ":9110 (antares_a)", bg="#ebf8ff", stroke="#90cdf4"))
+        d.add(make_box(300, 16, 110, 38, "Broker B", ":9111 (antares_b)", bg="#e6fffa", stroke="#81e6d9"))
+        d.add(make_arrow(140, 42, 300, 42, "forward (Via: antares_a)"))
+        d.add(make_arrow(300, 25, 140, 25, "508 Loop Detected"))
+    elif scen_name == "distributed-subscription":
+        d.add(make_box(15, 16, 95, 38, "Hub Broker", ":9112", bg="#ebf8ff", stroke="#90cdf4"))
+        d.add(make_cloud(165, 16, 115, 38, "Source A (:9113)"))
+        d.add(make_arrow(110, 35, 165, 35, "forward sub"))
+        d.add(make_box(355, 16, 115, 38, "Hub Sink", ":9800", bg="#fefcbf", stroke="#ecc94b"))
+        d.add(make_arrow(280, 35, 355, 35, "notification"))
+    elif scen_name == "ha-pair":
+        d.add(make_box(20, 16, 85, 38, "Pod 1", ":9114", bg="#ebf8ff", stroke="#90cdf4"))
+        d.add(make_box(145, 16, 85, 38, "Pod 2", ":9115", bg="#ebf8ff", stroke="#90cdf4"))
+        d.add(make_box(270, 20, 85, 30, "NATS Bus", "events", bg="#feebc8", stroke="#fbd38d"))
+        d.add(make_cylinder(390, 16, 85, 38, "PostgreSQL"))
+        d.add(make_arrow(105, 35, 145, 35))
+        d.add(make_arrow(230, 35, 270, 35))
+        d.add(make_arrow(355, 35, 390, 35))
+    return d
+
+
 def diagram_shapes() -> Drawing:
     d = Drawing(CONTENT_WIDTH, 70)
     d.add(Rect(0, 0, CONTENT_WIDTH, 70, rx=5, ry=5, fillColor=HexColor("#f8fafc"), strokeColor=HexColor("#e2e8f0"), strokeWidth=0.8))
@@ -642,6 +711,39 @@ def build(out: str, record: dict) -> str | None:
 
     toc_marker_idx = len(story)
 
+    # SECTION: EXECUTIVE VERDICTS PAGE (Page 2)
+    story.append(PageBreak())
+    add_section_header("Executive Summary: Measured Verdicts", "sec_verdicts")
+    story.append(Paragraph(
+        "Overall verification verdicts across the standard benchmark stages and deployment scenarios. "
+        "A PASS indicates conformance and uncompromised operation; LIMIT names the maximum measured throughput meeting quality thresholds.",
+        body
+    ))
+    verdict_rows = [["Area / Scenario", "Target / Question", "Verdict", "Result", "Failure / Limit"]]
+
+    # Standard stages
+    if safe_rate is not None:
+        verdict_rows.append(["Notification Delivery", "99% delivery with 0 errors", "LIMIT", f"{fmt_int(safe_rate)} updates/s", f"{first_bad_rate} updates/s" if first_bad_rate else "none reached"])
+    else:
+        verdict_rows.append(["Notification Delivery", "99% delivery with 0 errors", "PASS", "Operational", "—"])
+    if q_rps_pg is not None:
+        verdict_rows.append(["PostgreSQL Query", "Throughput at c50 concurrency", "MEASURED", f"{fmt_int(q_rps_pg)} req/s", "—"])
+    if q_rps_mem is not None:
+        verdict_rows.append(["Memory Store", "Throughput at c50 concurrency", "MEASURED", f"{fmt_int(q_rps_mem)} req/s", "—"])
+    if b_rss is not None:
+        verdict_rows.append(["Broker Memory", "Physical RAM footprint peak", "MEASURED", str(b_rss), "—"])
+
+    # Load scenarios verdicts from scenarios/verdicts.md or tables
+    scen_verdicts_file = out_path / "scenarios" / "verdicts.md"
+    scen_rows = md_table(open(scen_verdicts_file).read())[1:] if scen_verdicts_file.exists() else tables.get("verdicts", [])[1:]
+    for r in scen_rows:
+        if len(r) >= 4:
+            scen_name, verd, key_num, note = r[0], r[1], r[2], r[3]
+            verdict_rows.append([f"Scenario: {scen_name}", note, verd, key_num, key_num if verd == "FAIL" else "—"])
+
+    story.append(build_table(verdict_rows, col_widths=[110, 155, 55, 95, 55]))
+    story.append(Spacer(1, 10))
+
     # SECTION 1: HOW TO READ THIS REPORT
     sec1_story = [PageBreak()]
     sec1_story.append(Bookmark("sec_intro", "1. How to Read This Report"))
@@ -664,6 +766,9 @@ def build(out: str, record: dict) -> str | None:
     sec1_story.append(Spacer(1, 3))
     sec1_story.append(diagram_system())
     sec1_story.append(Paragraph("Figure 1.1: Rig topology and inter-service communication.", caption))
+    sec1_story.append(Spacer(1, 3))
+    sec1_story.append(diagram_topology_worlds())
+    sec1_story.append(Paragraph("Figure 1.2: The three deployment topologies verified in this report.", caption))
     sec1_story.append(Paragraph("<b>Core Benchmarking Terminology</b>", h3))
     glossary = [
         ["req/s (Throughput)", "Requests completed per second by the broker."],
@@ -724,20 +829,60 @@ def build(out: str, record: dict) -> str | None:
 
         if subs_rows and len(subs_rows) > 1:
             story.append(Paragraph("<b>Subscription Classes</b>", h3))
-            plain_subs = [["Class", "Watched Entities", "Filter Rule", "Trigger Condition", "Count"]]
+            plain_subs = [["Class", "Watched Type", "Filter Condition", "Count"]]
             for r in subs_rows[1:]:
                 if len(r) >= 5:
-                    plain_subs.append([r[0], r[1], r[2], r[3], r[4]])
-            story.append(build_table(plain_subs, col_widths=[90, 90, 120, 125, 45]))
+                    # Clean prose representation avoiding raw JSON
+                    cls_name = r[0]
+                    cnt = r[4]
+                    if "vehicle-any" in cls_name:
+                        plain_subs.append([cls_name, "Vehicle", "speed > 100+p (all updates fire)", cnt])
+                    elif "cold-attr" in cls_name:
+                        plain_subs.append([cls_name, "Vehicle", "watchedAttributes: [brand] (never fires on speed)", cnt])
+                    elif "high-speed" in cls_name:
+                        plain_subs.append([cls_name, "Vehicle", "speed > 5e8 (approx half fire)", cnt])
+                    elif "id-tail" in cls_name:
+                        plain_subs.append([cls_name, "Vehicle", "id ending in p % 10 (1 in 10 fires)", cnt])
+                    elif "building" in cls_name:
+                        plain_subs.append([cls_name, "Building", "temperature > 20+p (all fire)", cnt])
+                    elif "sensor" in cls_name:
+                        plain_subs.append([cls_name, "Sensor", "value > p (all fire)", cnt])
+                    elif "geo-west" in cls_name:
+                        plain_subs.append([cls_name, "Vehicle", "georel: within western boundary polygon", cnt])
+                    elif "scope" in cls_name:
+                        plain_subs.append([cls_name, "Any", "scopeQ matching regional hierarchy", cnt])
+                    else:
+                        plain_subs.append([cls_name, "Configured", "Standard rule", cnt])
+            story.append(build_table(plain_subs, col_widths=[110, 95, 205, 60]))
             story.append(Spacer(1, 4))
 
         if csr_rows and len(csr_rows) > 1:
             story.append(Paragraph("<b>Context Source Registration Classes</b>", h3))
-            plain_csr = [["Class", "Type", "Mode and Operations", "Parameters", "Count"]]
+            plain_csr = [["Class", "Type", "Mode & Operations", "Constraint", "Count"]]
             for r in csr_rows[1:]:
                 if len(r) >= 5:
-                    plain_csr.append([r[0], r[1], r[2], r[3], r[4]])
-            story.append(build_table(plain_csr, col_widths=[95, 60, 135, 135, 45]))
+                    cls_name = r[0]
+                    etype = r[1]
+                    cnt = r[4]
+                    if "inclusive" in cls_name:
+                        plain_csr.append([cls_name, etype, "inclusive, federationOps", "idPattern matched", cnt])
+                    elif "exclusive" in cls_name:
+                        plain_csr.append([cls_name, etype, "exclusive, retrieveOps", "explicit id and attributes", cnt])
+                    elif "redirect" in cls_name:
+                        plain_csr.append([cls_name, etype, "redirect, query+retrieve", "remote proxy", cnt])
+                    elif "auxiliary" in cls_name:
+                        plain_csr.append([cls_name, etype, "auxiliary, queryEntity", "sourceType archive", cnt])
+                    elif "headers" in cls_name:
+                        plain_csr.append([cls_name, etype, "inclusive, queryEntity", "observation interval", cnt])
+                    elif "expiring" in cls_name:
+                        plain_csr.append([cls_name, etype, "inclusive, queryEntity", "expiresAt future date", cnt])
+                    elif "geo" in cls_name:
+                        plain_csr.append([cls_name, etype, "inclusive, queryEntity", "geospatial polygon", cnt])
+                    elif "scope" in cls_name:
+                        plain_csr.append([cls_name, etype, "inclusive, queryEntity", "scope hierarchy", cnt])
+                    else:
+                        plain_csr.append([cls_name, etype, "inclusive", "default", cnt])
+            story.append(build_table(plain_csr, col_widths=[110, 65, 140, 105, 50]))
             story.append(Spacer(1, 4))
 
         sub_header("How to read them")
@@ -886,13 +1031,23 @@ def build(out: str, record: dict) -> str | None:
         story.append(Paragraph("Figure 6.1: End-to-end notification delivery pipeline stages.", caption))
 
         sub_header("The numbers")
-        fire_summary = [["Rate (rps)", "Updates", "Failed", "Due", "Delivered", "Deliv %", "Dropped", "PATCH p99", "Broker Cores"]]
+        # Split into two human-readable tables (<= 8 columns each)
+        story.append(Paragraph("<b>Table 6.1: Workload and Ingestion Activity</b>", h3))
+        fire_workload = [["Rate (rps)", "Updates", "Deletes", "Reads", "Failed Operations"]]
+        for r in fire_rows[1:]:
+            if len(r) >= 5:
+                fire_workload.append([r[0], r[1], r[2], r[3], r[4]])
+        story.append(build_table(fire_workload, col_widths=[85, 95, 95, 95, 100]))
+        story.append(Spacer(1, 4))
+
+        story.append(Paragraph("<b>Table 6.2: Notification Delivery and Latency</b>", h3))
+        fire_delivery = [["Rate (rps)", "Due", "Delivered", "Deliv %", "Dropped", "PATCH p99", "Broker Cores"]]
         for r in fire_rows[1:]:
             if len(r) >= 18:
-                fire_summary.append([r[0], r[1], r[4], r[5], r[6], f"{r[7]}%", r[12], f"{r[14]} ms", r[16]])
+                fire_delivery.append([r[0], r[5], r[6], f"{r[7]}%", r[12], f"{r[14]} ms", r[16]])
             elif len(r) >= 8:
-                fire_summary.append([r[0], r[1], r[4], r[5], r[6], f"{r[7]}%", "—", "—", "—"])
-        story.append(build_table(fire_summary, col_widths=[55, 50, 50, 50, 55, 45, 50, 65, 50]))
+                fire_delivery.append([r[0], r[5], r[6], f"{r[7]}%", "—", "—", "—"])
+        story.append(build_table(fire_delivery, col_widths=[65, 65, 70, 55, 60, 95, 60]))
 
         chart1, chart2 = chart_fire(out_path, fire_rows)
         if chart1:
@@ -1038,6 +1193,112 @@ def build(out: str, record: dict) -> str | None:
         rss_prose.append(peak_mean(h_cpu_peak, "The whole machine", cores_ceiling))
         rss_prose.append("A peak close to the core count means the machine, not the broker, was the limit in that phase; the rig's own load generator and receiver run on the same cores.")
     story.append(Paragraph(" ".join(rss_prose), body))
+
+    # PART B: DEPLOYMENT SCENARIOS
+    story.append(PageBreak())
+    add_section_header("Part B: Deployment and Edge Scenarios", "sec_scenarios_intro")
+    story.append(Paragraph(
+        "Verification of realistic edge behaviors: resource contention, slow endpoints, multi-broker federation, "
+        "and data collisions. Each scenario verifies specification conformance and measures capacity limits.",
+        body
+    ))
+
+    scen_defs = [
+        ("hot-entity", "S1: Hot Entity Contention",
+         "What does concurrent write contention on a single entity cost, and is any update lost?",
+         "5.6.3: every partial attribute update lands; concurrent writers on one entity serialise on it, "
+         "so the cost shows as latency on the hot entity, never as a lost or failed write."),
+        ("noisy-tenant", "S2: Noisy Tenant Flood",
+         "Does a tenant writing at full speed degrade reads or deliveries for a quiet neighbour?",
+         "4.14: tenants are isolated data spaces; the rig asks whether they are also isolated in time, "
+         "by comparing the quiet tenant's read latency alone and under the flood."),
+        ("slow-subscriber", "S3: Slow Subscriber Isolation",
+         "Does one notification endpoint that answers in 500 ms stall delivery to ten fast endpoints?",
+         "5.8.6: each subscription is notified independently; the broker caps in-flight deliveries per tenant "
+         "(ANTARES_DELIVERY_WIDTH_PER_TENANT) so a slow endpoint holds only its own slots."),
+        ("fan-in", "S4: High Fan-In Notification",
+         "How fast can one entity update be fanned out when 50 subscriptions match it?",
+         "5.8.6: one change matching N subscriptions yields N notifications; the rig counts them at the sink "
+         "against the number of accepted updates."),
+        ("hub-sources", "S5: Federated Hub and Sources",
+         "What does a federated read cost when the registered context sources are live broker processes?",
+         "4.3.6.1: a query matching registrations is forwarded to every source and the answers are merged; "
+         "a retrieve of an absent id answers 404 once every source has answered."),
+        ("collision", "S6: Multi-Source Collisions and Conflicts",
+         "What happens when the same entity id lives in two brokers, or when registrations overlap?",
+         "4.5.5 merges non-colliding attributes; 4.3.6.2 lets local data win over an auxiliary source; "
+         "5.9.2.4 refuses with 409 an exclusive or redirect registration that overlaps data already held."),
+        ("loop", "S7: Mutual Registration Loop",
+         "Does a circular registration between two brokers terminate, and how is the loop reported?",
+         "6.3.18: the Via chain names every broker a request passed; a chain naming the receiver amends matching, "
+         "and 6.3.17 answers 508 Loop Detected only when the sole matching source is exclusive or redirect."),
+        ("distributed-subscription", "S8: Distributed Subscriptions",
+         "Does a subscription at the hub receive a change made at a context source, exactly once?",
+         "5.8.1.4: the hub creates a reduced copy of the subscription at each matching source and the source "
+         "notifies the hub, which re-filters and delivers to the subscriber."),
+        ("ha-pair", "S9: High-Availability Broker Pair",
+         "When two broker pods share one PostgreSQL database and one NATS bus, is every change notified exactly once?",
+         "Two stateless pods behind one store must agree on who delivers; the rig counts notifications against "
+         "accepted writes, so a duplicate or a loss shows as a mismatch."),
+    ]
+
+    scen_verdict = {}
+    if scen_verdicts_file.exists():
+        for r in md_table(open(scen_verdicts_file).read())[1:]:
+            if len(r) >= 4:
+                scen_verdict[r[0]] = (r[1], r[2], r[3])
+
+    for s_name, s_title, s_question, s_expected in scen_defs:
+        s_md_file = out_path / "scenarios" / f"{s_name}.md"
+        s_rows, s_intro, s_shows = [], "", []
+        if s_md_file.exists():
+            s_text = open(s_md_file).read()
+            s_rows = md_table(s_text)
+            lines = [l.strip() for l in s_text.splitlines()]
+            s_intro = next((l for l in lines if l and not l.startswith("|") and not l.startswith("#")), "")
+            after = False
+            for l in lines:
+                if l.startswith("###"):
+                    after = True
+                    continue
+                if after and l.startswith("-"):
+                    s_shows.append(l.lstrip("- ").strip())
+        elif s_name in tables:
+            s_rows = tables[s_name]
+
+        story.append(PageBreak())
+        add_section_header(s_title, f"sec_{s_name.replace('-', '_')}")
+        sub_header("World Topology")
+        story.append(diagram_scenario_world(s_name))
+        story.append(Spacer(1, 3))
+        if s_intro:
+            story.append(Paragraph(html.escape(s_intro), body))
+
+        sub_header("Question")
+        story.append(Paragraph(s_question, body))
+
+        sub_header("What CIM 009 requires")
+        story.append(Paragraph(s_expected, body))
+
+        verd = scen_verdict.get(s_name)
+        sub_header("Verdict")
+        if verd:
+            v_color = {"PASS": "#276749", "FAIL": "#c53030"}.get(verd[0], "#718096")
+            story.append(Paragraph(
+                f"<font color='{v_color}'><b>{html.escape(verd[0])}</b></font> &nbsp; {html.escape(verd[1])} &mdash; {html.escape(verd[2])}",
+                body))
+        else:
+            story.append(Paragraph("<i>not run</i>", body))
+
+        sub_header("Measured Numbers")
+        if s_rows and len(s_rows) > 1:
+            story.append(build_table(s_rows))
+        else:
+            story.append(Paragraph("<i>No load table: the scenario ran its conformance check only, or was skipped.</i>", body))
+        if s_shows:
+            sub_header("What this shows")
+            for line in s_shows:
+                story.append(Paragraph("&bull; " + html.escape(line), body))
 
     # SECTION 9: APPENDIX AND MANIFEST
     story.append(PageBreak())

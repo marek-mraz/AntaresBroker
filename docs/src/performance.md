@@ -168,6 +168,65 @@ change to the request runtime, the drivers or the store keeps all of it:
 - Live OS threads at the write knee: 4 038 or fewer, against the 11 024
   ceiling.
 
+## Deployment scenarios
+
+`dev/perf/scenarios.sh` starts one or more brokers from the release binary
+(`dev/perf/fleet.sh`), seeds each world over the API and asks one question
+per scenario. `MODE=check` runs the conformance assertions of
+`dev/perf/scenario-check.py` against a memory-store fleet in seconds;
+`MODE=load` runs the same assertions first and then a k6 rate ladder whose
+every number comes from k6's summary or the sink's counters. A verdict is
+computed from those numbers and its note names the failing assertion.
+
+```bash
+MODE=check STORE=memory   ./dev/perf/scenarios.sh              # all nine
+MODE=load  STORE=postgres ./dev/perf/scenarios.sh loop fan-in  # a subset
+```
+
+The nine worlds, and what each one asks:
+
+- **S1 `hot-entity`**: one broker, 1 000 vehicles. Concurrent partial
+  updates on one entity (5.6.3, distinct `datasetId`s) versus the same
+  load spread over all of them: are updates lost, and what does the
+  contention cost in p99?
+- **S2 `noisy-tenant`**: one broker, tenants `quiet` and `loud`. The quiet
+  tenant's GET p99 is measured alone and under a write flood on `loud`
+  (4.14 isolation, in time as well as in data).
+- **S3 `slow-subscriber`**: one broker, ten fast endpoints and one that
+  answers after 500 ms. Does the slow one hold the fast ones back, given
+  `ANTARES_DELIVERY_WIDTH_PER_TENANT`?
+- **S4 `fan-in`**: one broker, 50 subscriptions matching one entity. How
+  many notifications per second does one update stream fan out to, and are
+  all of them delivered?
+- **S5 `hub-sources`**: a hub and two source brokers, registered with the
+  `tenant` member (a forward never carries the client's tenant). Federated
+  query and retrieve through the hub (4.3.6.1, 5.7.2): complete, merged,
+  404 for an absent id.
+- **S6 `collision`**: the same entity id in the hub and a source. 4.5.5
+  merge of non-colliding attributes, 4.3.6.2 local data over an auxiliary
+  source, 5.9.2.4 409 for an exclusive or redirect registration that
+  overlaps data already held.
+- **S7 `loop`**: brokers A and B registered to each other. A query
+  terminates with each side's data once (6.3.18 `Via`); a write whose
+  chain already names the receiver runs locally under an inclusive
+  registration and answers 508 (6.3.17) when the only matching source is a
+  redirect. An id-only write carries no type, so every type-only
+  registration matches it: the 508 case needs a tenant whose only
+  registration is the redirect.
+- **S8 `distributed-subscription`**: a subscription at the hub, the entity
+  at a source. 5.8.1.4: the hub plants a reduced copy at the source
+  (registration `operations` includes `federationOps`) and a change at the
+  source reaches the hub's subscriber, counted against the accepted
+  updates.
+- **S9 `ha-pair`**: two broker pods on one PostgreSQL database and one NATS
+  JetStream bus (`NATS_URL`, `PG_URL_BASE`; skipped without them). Writes
+  alternate between the pods; notifications are counted against accepted
+  writes, so a duplicate or a loss shows as a mismatch.
+
+The tables land in `scenarios/` of the run artifact; `report.py` folds them
+into `index.html` and `pdf.py` gives each scenario a page (world, question,
+what CIM 009 requires, verdict, measured numbers).
+
 ## The design targets (`scale-weekly`)
 
 The README's target table is a design contract; this run is where each
