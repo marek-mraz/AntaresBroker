@@ -31,7 +31,7 @@ on:
         default: "10000"
       server_type:
         description: Hetzner server type (ccx33 = 8 dedicated vCPU / 32 GB, ccx43 = 16 / 64, ccx53 = 32 / 128)
-        default: ccx53
+        default: ccx33
       scenarios:
         description: deployment scenarios to run (all, none, or space-separated names)
         default: "all"
@@ -46,7 +46,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SERVER_TYPE: ${{ inputs.server_type || 'ccx53' }}
+  SERVER_TYPE: ${{ inputs.server_type || 'ccx33' }}
   SERVER_IMAGE: ubuntu-24.04
   SERVER_LOCATION: hel1
   # full-scale data volume; a fractional dispatch shrinks it in the create
